@@ -56,6 +56,34 @@ GALLERIES=[{"name":"<GALLERY_NAME>", "url":"<GALLERY_URL"}]
 
 The models in the gallery will be automatically indexed and available for installation.
 
+## Gallery mirrors
+
+A gallery entry can declare a `mirrors` list of alternative locations for the same index file. Mirrors exist for availability, not for load balancing: LocalAI always prefers the `url`, and only falls back to the mirrors, in the order you listed them, when the one before it cannot be fetched. If the primary works, the mirrors are never contacted.
+
+Mirrors accept any URI the gallery loader understands — `https://`, `github:`, `huggingface://` (also `hf://` and `hf.co/`), and `file://` — and the same rules apply to them as to a primary URL, so a `file://` mirror must still live inside your models directory.
+
+```json
+GALLERIES=[{"name":"localai", "url":"https://example.org/gallery/index.yaml", "mirrors":["github:mudler/LocalAI/gallery/index.yaml@master"]}]
+```
+
+Each attempt is bounded by a 120 second timeout, and a source that fails — a connection error, a timeout, or an HTTP error status such as 404 or 502 — is skipped for the next 10 minutes so a dead host is not re-dialled on every gallery listing. A source that answers is usable again immediately, and a request you cancel yourself is not counted against it. If every source happens to be inside that 10 minute window, LocalAI tries them all anyway rather than refuse to serve the gallery.
+
+{{% notice warning %}}
+**Neither mirrors nor the offline cache cover a `.ref` URL.** If a gallery's `url` ends in `.ref`, that reference file is fetched and resolved to the real index location *before* mirrors or the cached copy are consulted, and a failure to fetch it fails the gallery outright. That includes the offline case: a `.ref` gallery fails when the network is gone even if it has been fetched successfully before. Mirrors are alternates for the index, not for the reference that points at it. If you want mirror coverage or offline listings, point `url` directly at the index file.
+{{% /notice %}}
+
+The key is optional: a gallery without `mirrors` behaves exactly as before.
+
+## Offline gallery listings
+
+Every successful gallery fetch is written to a cache directory alongside your models directory (`<MODELS_PATH>/../cache/gallery/`), one file per gallery URL. If nothing can serve the index — the primary and every mirror failed, there is no network at all, the host is airgapped — LocalAI serves that last successfully fetched copy instead of failing the listing, and logs a warning saying it did so. This applies to every gallery whose `url` points directly at an index file, with or without `mirrors` — but not to a `.ref` URL, which is resolved before the cache is consulted (see the warning above).
+
+Only a response that actually parses as a gallery index is stored. A captive portal, a proxy or a CDN can answer an index request with HTTP 200 and an HTML error page; caching that would replace a working offline copy with something no listing can read. An empty index is rejected for the same reason, so the previous copy survives.
+
+Entries served this way may be stale: the copy is only as fresh as the last time the gallery could be reached, so models added or changed upstream since then will not show up, and an entry may point at a file that has since moved. A listing served from disk is a degraded mode, not a substitute for a reachable gallery.
+
+The copy is deliberately kept out of the models directory itself, where LocalAI reads a `.yaml` file as an installed model's configuration. Deleting the cache directory is safe — the next successful fetch recreates it — and a machine that has never reached a gallery has nothing cached, so its first listing still fails.
+
 ## API Reference
 
 ### Model repositories
@@ -72,13 +100,13 @@ To use additional repositories you need to start `local-ai` with the `GALLERIES`
 GALLERIES=[{"name":"<GALLERY_NAME>", "url":"<GALLERY_URL"}]
 ```
 
-For example, to enable the default `localai` repository, you can start `local-ai` with:
+For example, to spell out the default `localai` repository, you can start `local-ai` with:
 
 ```
-GALLERIES=[{"name":"localai", "url":"github:mudler/localai/gallery/index.yaml"}]
+GALLERIES=[{"name":"localai", "url":"https://index.localai.io/models", "mirrors":["github:mudler/LocalAI/gallery/index.yaml@master"]}]
 ```
 
-where `github:mudler/localai/gallery/index.yaml` will be expanded automatically to `https://raw.githubusercontent.com/mudler/LocalAI/main/index.yaml`.
+`https://index.localai.io/models` is a caching mirror of the same index file, and the `github:` entry is the fallback used whenever it cannot be reached. `github:mudler/LocalAI/gallery/index.yaml@master` is expanded automatically to `https://raw.githubusercontent.com/mudler/LocalAI/master/gallery/index.yaml`.
 
 Note: the url are expanded automatically for `github` and `huggingface`, however `https://` and `http://` prefix works as well.
 
@@ -371,6 +399,8 @@ To preload models on start, use the `PRELOAD_MODELS` environment variable by set
 ```bash
 PRELOAD_MODELS='[{"url": "<MODEL_URL>"}]'
 ```
+
+The value must be a JSON array. Boolean values such as `true` are not valid model preload configurations.
 
 Note: `url` or `id` must be specified. `url` is used to a url to a model gallery configuration, while an `id` is used to refer to models inside repositories. If both are specified, the `id` will be used.
 

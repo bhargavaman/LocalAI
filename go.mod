@@ -24,7 +24,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
-	github.com/gpustack/gguf-parser-go v0.24.0
+	github.com/gpustack/gguf-parser-go v0.25.0
 	github.com/hpcloud/tail v1.0.0
 	github.com/ipfs/go-log v1.0.5
 	github.com/jaypipes/ghw v0.24.0
@@ -322,7 +322,7 @@ require (
 	github.com/otiai10/mint v1.6.3 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect
-	github.com/pion/ice/v4 v4.2.2 // indirect
+	github.com/pion/ice/v4 v4.2.2
 	github.com/pion/interceptor v0.1.44 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
