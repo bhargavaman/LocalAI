@@ -278,6 +278,7 @@ export const videoApi = {
 }
 
 export const threeDApi = {
+  animate: (body) => postJSON(API_CONFIG.endpoints.threeDAnimate, body),
   generate: (body) => postJSON(API_CONFIG.endpoints.threeDGenerations, body),
   remesh: async (mesh, model, detail) => {
     const form = new FormData()
@@ -457,7 +458,10 @@ export const agentCollectionsApi = {
   reset: (name, userId) => postJSON(`/api/agents/collections/${enc(name)}/reset${userQ(userId)}`),
   deleteEntry: (name, entry, userId) => fetchJSON(`/api/agents/collections/${enc(name)}/entry/delete${userQ(userId)}`, { method: 'DELETE', body: JSON.stringify({ entry }), headers: { 'Content-Type': 'application/json' } }),
   sources: (name, userId) => fetchJSON(`/api/agents/collections/${enc(name)}/sources${userQ(userId)}`),
-  addSource: (name, url, interval, userId) => postJSON(`/api/agents/collections/${enc(name)}/sources${userQ(userId)}`, { url, update_interval: interval }),
+  addSource: (name, url, interval, userId) => postJSON(`/api/agents/collections/${enc(name)}/sources${userQ(userId)}`, {
+    url,
+    update_interval: interval === undefined ? undefined : Number(interval),
+  }),
   removeSource: (name, url, userId) => fetchJSON(`/api/agents/collections/${enc(name)}/sources${userQ(userId)}`, { method: 'DELETE', body: JSON.stringify({ url }), headers: { 'Content-Type': 'application/json' } }),
 }
 
@@ -594,6 +598,16 @@ export const quantizationApi = {
   importModel: (id, data) => postJSON(`/api/quantization/jobs/${enc(id)}/import`, data),
   progressUrl: (id) => apiUrl(`/api/quantization/jobs/${enc(id)}/progress`),
   downloadUrl: (id) => apiUrl(`/api/quantization/jobs/${enc(id)}/download`),
+}
+
+// Failover chains API. Health is pushed over /api/failover/events (SSE);
+// list() seeds the view and backs the periodic resync.
+export const failoverApi = {
+  list: () => fetchJSON(API_CONFIG.endpoints.failoverChains),
+  get: (name) => fetchJSON(API_CONFIG.endpoints.failoverChain(name)),
+  pin: (name, target) => postJSON(API_CONFIG.endpoints.failoverPin(name), { target }),
+  unpin: (name) => fetchJSON(API_CONFIG.endpoints.failoverPin(name), { method: 'DELETE' }),
+  eventsUrl: () => API_CONFIG.endpoints.failoverEvents,
 }
 
 // Nodes API (distributed)

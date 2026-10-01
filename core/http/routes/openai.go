@@ -194,7 +194,7 @@ func RegisterOpenAIRoutes(app *echo.Echo,
 	app.POST("/v1/audio/transcriptions", audioHandler, audioMiddleware...)
 	app.POST("/audio/transcriptions", audioHandler, audioMiddleware...)
 
-	diarizationHandler := openai.DiarizationEndpoint(application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())
+	diarizationHandler := openai.DiarizationEndpoint(application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.VoiceRegistry())
 	diarizationMiddleware := []echo.MiddlewareFunc{
 		traceMiddleware,
 		re.BuildFilteredFirstAvailableDefaultModel(config.BuildUsecaseFilterFn(config.FLAG_DIARIZATION)),
@@ -238,6 +238,8 @@ func RegisterOpenAIRoutes(app *echo.Echo,
 
 	app.POST("/v1/audio/speech", audioSpeechHandler, audioSpeechMiddleware...)
 	app.POST("/audio/speech", audioSpeechHandler, audioSpeechMiddleware...)
+	app.GET("/v1/audio/voices", localai.TTSVoicesEndpoint(application.ModelConfigLoader(), application.AuthDB()))
+	app.GET("/audio/voices", localai.TTSVoicesEndpoint(application.ModelConfigLoader(), application.AuthDB()))
 
 	// images
 	imageHandler := openai.ImageEndpoint(application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())

@@ -1,5 +1,5 @@
 
-LLAMA_VERSION?=d7bd3bfcad3e29c7e49fd26f38c79ee3e9a3fd6b
+LLAMA_VERSION?=a4d880fd5c7f88713ded6db9f0111893bd78afa6
 LLAMA_REPO?=https://github.com/ggerganov/llama.cpp
 
 CMAKE_ARGS?=
@@ -67,6 +67,7 @@ ifeq ($(BUILD_TYPE),sycl_f16)
 	CMAKE_ARGS+=-DGGML_SYCL=ON \
 		-DCMAKE_C_COMPILER=icx \
 		-DCMAKE_CXX_COMPILER=icpx \
+		-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
 		-DCMAKE_CXX_FLAGS="-fsycl" \
 		-DGGML_SYCL_F16=ON
 endif
@@ -75,6 +76,7 @@ ifeq ($(BUILD_TYPE),sycl_f32)
 	CMAKE_ARGS+=-DGGML_SYCL=ON \
 		-DCMAKE_C_COMPILER=icx \
 		-DCMAKE_CXX_COMPILER=icpx \
+		-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
 		-DCMAKE_CXX_FLAGS="-fsycl"
 endif
 

@@ -171,6 +171,16 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		return nil
 	}))
 
+	// Failover chains: reads and the event stream use standard auth (any
+	// authenticated caller may watch chain health); pin/unpin are admin-only
+	// since they override the routing decision for every caller of the chain.
+	fm := app.FailoverManager()
+	router.GET("/api/failover", localai.ListFailoverChainsEndpoint(fm))
+	router.GET("/api/failover/events", localai.FailoverEventsEndpoint(fm))
+	router.GET("/api/failover/:chain", localai.GetFailoverChainEndpoint(fm))
+	router.POST("/api/failover/:chain/pin", localai.PinFailoverTargetEndpoint(fm), adminMiddleware)
+	router.DELETE("/api/failover/:chain/pin", localai.UnpinFailoverTargetEndpoint(fm), adminMiddleware)
+
 	voiceProfiles := app.VoiceProfileStore()
 	router.GET("/api/voice-profiles", localai.ListVoiceProfilesEndpoint(voiceProfiles))
 	router.GET("/api/voice-profiles/:id/audio", localai.ServeVoiceProfileAudioEndpoint(voiceProfiles))
@@ -229,6 +239,13 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		requestExtractor.SetModelAndConfig(func() schema.LocalAIRequest { return new(schema.VideoRequest) }))
 
 	model3dHandler := localai.Model3DEndpoint(cl, ml, appConfig)
+	router.POST("/3d/animate",
+		localai.Model3DAnimationEndpoint(ml, appConfig),
+		middleware.UsageMiddleware(app.StatsRecorder(), app.FallbackUser()),
+		echomiddleware.BodyLimit("45M"),
+		middleware.TraceMiddleware(app),
+		requestExtractor.BuildFilteredFirstAvailableDefaultModel(config.BuildUsecaseFilterFn(config.FLAG_3D_ANIMATION)),
+		requestExtractor.SetModelAndConfig(func() schema.LocalAIRequest { return new(schema.Model3DAnimationRequest) }))
 	router.POST("/3d/generations",
 		model3dHandler,
 		requestExtractor.BuildFilteredFirstAvailableDefaultModel(config.BuildUsecaseFilterFn(config.FLAG_3D)),
@@ -328,6 +345,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 				"vram_estimate":       "/api/models/vram-estimate",
 				"model_load_status":   "/api/models/:id/load-status",
 				"tts":                 "/tts",
+				"tts_voices":          "/v1/audio/voices",
 				"voice_profiles":      "/api/voice-profiles",
 				"transcription":       "/v1/audio/transcriptions",
 				"image_generation":    "/v1/images/generations",
@@ -345,6 +363,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 					"transcription":        "/v1/audio/transcriptions",
 					"diarization":          "/v1/audio/diarization",
 					"sound_classification": "/v1/audio/classification",
+					"tts_voices":           "/v1/audio/voices",
 					"image_generation":     "/v1/images/generations",
 				},
 				"config_management": map[string]string{
@@ -366,6 +385,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 				},
 				"ai_functions": map[string]string{
 					"tts":            "/tts",
+					"tts_voices":     "/v1/audio/voices",
 					"voice_profiles": "/api/voice-profiles",
 					"vad":            "/vad",
 					"video":          "/video",
@@ -414,6 +434,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 				"p2p":             appConfig.P2PToken != "",
 				"tracing":         true,
 				"voice_profiles":  true,
+				"tts_voices":      true,
 			},
 		})
 	})
@@ -433,7 +454,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		})
 	})
 
-	router.GET("/system", localai.SystemInformations(cl, ml, appConfig), adminMiddleware)
+	router.GET("/system", localai.SystemInformations(cl, ml, appConfig, monitoring.NewLocalProcessSampler()), adminMiddleware)
 
 	// misc
 	tokenizeHandler := localai.TokenizeEndpoint(cl, ml, appConfig)

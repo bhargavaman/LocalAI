@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -52,6 +53,8 @@ func (f *fakeFileStager) AllocRemoteTemp(_ context.Context, _ string) (string, e
 
 func (f *fakeFileStager) StageRemoteToStore(_ context.Context, _, _, _ string) error { return nil }
 
+func (f *fakeFileStager) ReleaseRemote(_ context.Context, _, _ string) error { return nil }
+
 func (f *fakeFileStager) ListRemoteDir(_ context.Context, _, _ string) ([]string, error) {
 	return nil, nil
 }
@@ -92,6 +95,13 @@ type fakeModelRouter struct {
 	// FindLRUModel returns
 	findLRUModel *NodeModel
 	findLRUErr   error
+	// findLRUExclude records the exclusion list EvictLRU passed, so specs can
+	// assert pinned models were filtered at the query, not post-hoc.
+	findLRUExclude []string
+
+	// NextFreeReplicaIndex returns
+	nextFreeReplicaIdx int
+	nextFreeReplicaErr error
 
 	// Get returns
 	getNode *BackendNode
@@ -317,7 +327,7 @@ func (f *fakeModelRouter) ListModelCleanupRetries(_ context.Context, _ time.Time
 }
 
 func (f *fakeModelRouter) NextFreeReplicaIndex(_ context.Context, _, _ string, _ int) (int, error) {
-	return 0, nil
+	return f.nextFreeReplicaIdx, f.nextFreeReplicaErr
 }
 
 func (f *fakeModelRouter) CountReplicasOnNode(_ context.Context, _, _ string) (int, error) {
@@ -340,7 +350,11 @@ func (f *fakeModelRouter) FindGlobalLRUModelWithZeroInFlight(_ context.Context) 
 	return f.findGlobalLRUModel, f.findGlobalLRUErr
 }
 
-func (f *fakeModelRouter) FindLRUModel(_ context.Context, _ string) (*NodeModel, error) {
+func (f *fakeModelRouter) FindLRUModel(_ context.Context, _ string, excludeModels []string) (*NodeModel, error) {
+	f.findLRUExclude = excludeModels
+	if f.findLRUModel != nil && slices.Contains(excludeModels, f.findLRUModel.ModelName) {
+		return nil, fmt.Errorf("finding LRU model: record not found")
+	}
 	return f.findLRUModel, f.findLRUErr
 }
 
@@ -829,6 +843,26 @@ var _ = Describe("SmartRouter", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no available nodes"))
 		})
+
+		It("wraps ErrNoAvailableNodes when all nodes are full and eviction cannot help", func() {
+			// gorm.ErrRecordNotFound is the registry's verdict that no node
+			// matches — the scheduler then falls through to eviction. With
+			// DB nil, eviction returns ErrEvictionBusy, and the scheduler
+			// wraps the error with ErrNoAvailableNodes so the HTTP layer can
+			// map it to 503 instead of 500.
+			reg.findIdleErr = errors.New("no idle")
+			reg.findLeastLoadedErr = gorm.ErrRecordNotFound
+
+			router := NewSmartRouter(reg, SmartRouterOptions{
+				Unloader:      unloader,
+				ClientFactory: factory,
+			})
+
+			_, err := router.Route(context.Background(), "m5", "models/m5.gguf", "llama-cpp", "", nil, false)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.Is(err, ErrNoAvailableNodes)).To(BeTrue())
+			Expect(errors.Is(err, ErrEvictionBusy)).To(BeTrue())
+		})
 	})
 
 	Describe("UnloadModel (mock-based)", func() {
@@ -956,6 +990,7 @@ var _ = Describe("SmartRouter", func() {
 			_, err := router.Route(context.Background(), "aliased-model", "models/aliased.gguf", "llama-cpp", "", nil, false)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no healthy nodes match selector"))
+			Expect(errors.Is(err, ErrNoAvailableNodes)).To(BeTrue())
 		})
 
 		It("returns error when no nodes match selector", func() {
@@ -974,6 +1009,7 @@ var _ = Describe("SmartRouter", func() {
 			_, err := router.Route(context.Background(), "no-match-model", "models/nomatch.gguf", "llama-cpp", "", nil, false)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no healthy nodes match selector"))
+			Expect(errors.Is(err, ErrNoAvailableNodes)).To(BeTrue())
 		})
 
 		It("uses regular methods when model has no scheduling config", func() {

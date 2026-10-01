@@ -22,6 +22,7 @@ import (
 	"github.com/mudler/xlog"
 
 	"github.com/mudler/LocalAI/internal"
+	"github.com/mudler/LocalAI/pkg/credentials"
 	"github.com/mudler/LocalAI/pkg/httpclient"
 	"github.com/mudler/LocalAI/pkg/oci"
 	"github.com/mudler/LocalAI/pkg/utils"
@@ -217,7 +218,16 @@ func (uri URI) ReadWithAuthorizationAndCallback(ctx context.Context, basePath st
 	// source was down. DownloadFile has always checked the status; this path
 	// never did.
 	if response.StatusCode >= 400 {
-		return fmt.Errorf("failed to read url %q, invalid status code %d", url, response.StatusCode)
+		err := fmt.Errorf("failed to read url %q, invalid status code %d", url, response.StatusCode)
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			// The credentials transport leaves a caller-set Authorization
+			// alone, so a rejection here is about that header, not the store.
+			if authorization != "" {
+				return credentials.HTTPProvidedCredentialError(response.Request.URL, response.StatusCode, err)
+			}
+			return credentials.HTTPAuthError(response.Request.URL, response.StatusCode, err)
+		}
+		return err
 	}
 
 	// Read the response body
@@ -272,6 +282,20 @@ func (u URI) LooksLikeURL() bool {
 		strings.HasPrefix(string(u), GithubURI2)
 }
 
+// hasLocalSource reports whether the URI names a local file to copy from
+// rather than a URL to fetch. DownloadFileWithContext both decides whether the
+// destination is reachable and picks its source with this, so that the two
+// cannot drift apart: they did, and every "file://" install failed because the
+// reachability check admitted http(s) only, leaving the local-source branch
+// unreachable for any destination that did not already exist.
+func (u URI) hasLocalSource() bool {
+	if strings.HasPrefix(string(u), LocalPrefix) {
+		return true
+	}
+	_, err := os.Stat(u.ResolveURL())
+	return err == nil
+}
+
 func (u URI) LooksLikeHTTPURL() bool {
 	return strings.HasPrefix(string(u), HTTPPrefix) ||
 		strings.HasPrefix(string(u), HTTPSPrefix)
@@ -289,6 +313,30 @@ func (s URI) LooksLikeOCI() bool {
 		strings.HasPrefix(string(s), OCIFilePrefix) ||
 		strings.HasPrefix(string(s), "ghcr.io") ||
 		strings.HasPrefix(string(s), "docker.io")
+}
+
+// LooksLikeRegistryOCI reports whether the URI names an image in a registry.
+//
+// LooksLikeOCI also accepts ollama:// and ocifile://, which the downloader
+// pulls through its OCI path but which name no registry image: a caller about
+// to ask a registry about the URI must check this instead, or it sends
+// "ollama://..." or "ocifile:///path" to a registry client that can only fail.
+func (s URI) LooksLikeRegistryOCI() bool {
+	return s.LooksLikeOCI() &&
+		!strings.HasPrefix(string(s), OllamaPrefix) &&
+		!strings.HasPrefix(string(s), OCIFilePrefix)
+}
+
+// OCIReference returns the registry reference an OCI URI names, without the
+// oci:// scheme. The scheme is LocalAI's own marker for "this is an image":
+// registry clients do not know it and read "oci" as the registry host, so
+// every consumer that hands a URI to a registry client goes through here.
+//
+// It is only meaningful for a URI that LooksLikeRegistryOCI: ollama:// and
+// ocifile:// URIs come back unchanged, and no registry client can resolve
+// them.
+func (s URI) OCIReference() string {
+	return strings.TrimPrefix(string(s), OCIPrefix)
 }
 
 func (s URI) LooksLikeOCIFile() bool {
@@ -423,11 +471,16 @@ func downloadHTTPClient() *http.Client {
 	defer downloadClientMu.Unlock()
 	if downloadClientCached == nil || downloadClientTimeout != DownloadResponseHeaderTimeout {
 		downloadClientTimeout = DownloadResponseHeaderTimeout
-		opts := []httpclient.Option{httpclient.WithFollowRedirects()}
+		base := httpclient.HardenedTransport()
+		// httpclient only applies the header timeout to a bare *http.Transport,
+		// and the credential wrapper hides it, so set it on the base directly.
 		if downloadClientTimeout > 0 {
-			opts = append(opts, httpclient.WithResponseHeaderTimeout(downloadClientTimeout))
+			base.ResponseHeaderTimeout = downloadClientTimeout
 		}
-		downloadClientCached = httpclient.New(opts...)
+		downloadClientCached = httpclient.New(
+			httpclient.WithFollowRedirects(),
+			httpclient.WithTransport(credentials.Transport(base)),
+		)
 	}
 	return downloadClientCached
 }
@@ -577,7 +630,7 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 			return oci.ExtractOCIImage(ctx, img, url, filePath, downloadStatus)
 		}
 
-		url = strings.TrimPrefix(url, OCIPrefix)
+		url = URI(url).OCIReference()
 		img, err := oci.GetImage(url, "", nil, nil)
 		if err != nil {
 			return fmt.Errorf("failed to get image %q: %v", url, err)
@@ -643,7 +696,7 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 				return nil
 			}
 		}
-	} else if !os.IsNotExist(err) || !URI(url).LooksLikeHTTPURL() {
+	} else if !os.IsNotExist(err) || !(URI(url).LooksLikeHTTPURL() || uri.hasLocalSource()) {
 		// Error occurred while checking file existence
 		return fmt.Errorf("could not fetch %q: local file does not exist (%v) and %q is not a recognized downloadable URL (supported schemes: %s)", filePath, err, url, strings.Join([]string{HTTPPrefix, HTTPSPrefix, LocalPrefix, HuggingFacePrefix, HuggingFacePrefix1, OllamaPrefix, OCIPrefix, OCIFilePrefix, GithubURI2}, ", "))
 	}
@@ -671,6 +724,9 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 		resumable := false
 		if uri.LooksLikeHTTPURL() {
 			support, err := uri.checkServerSupportsRangeHeader(ctx, dopts.bearerToken)
+			if errors.Is(err, credentials.ErrUnresolvedSecret) {
+				return fmt.Errorf("failed to check if uri server supports range header: %w", err)
+			}
 			if err != nil {
 				// The probe only ever fails on transport trouble (the status is
 				// not consulted), so it says nothing permanent about the URL. It
@@ -720,7 +776,7 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 
 	var source io.ReadCloser
 	var contentLength int64
-	if _, e := os.Stat(uri.ResolveURL()); strings.HasPrefix(string(uri), LocalPrefix) || e == nil {
+	if uri.hasLocalSource() {
 		file, err := os.Open(uri.ResolveURL())
 		if err != nil {
 			return fmt.Errorf("failed to open file %q: %v", uri.ResolveURL(), err)
@@ -747,6 +803,11 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 				}
 				return ctx.Err()
 			}
+			// An unreadable secret is a configuration problem that a retry
+			// cannot fix.
+			if errors.Is(err, credentials.ErrUnresolvedSecret) {
+				return fmt.Errorf("failed to download file %q: %w", filePath, err)
+			}
 			// The transport failed before the response was established (reset
 			// connection, refused dial, TLS hiccup). Nothing about it is
 			// specific to this URL, so another attempt may well succeed.
@@ -767,6 +828,15 @@ func (uri URI) DownloadFileWithContext(ctx context.Context, filePath, sha string
 		}
 		if resp.StatusCode >= 400 {
 			err := fmt.Errorf("failed to download url %q, invalid status code %d", url, resp.StatusCode)
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				_ = resp.Body.Close()
+				// The credentials transport leaves a WithBearerToken header
+				// alone, so a rejection here is about that token, not the store.
+				if dopts.bearerToken != "" {
+					return credentials.HTTPProvidedCredentialError(resp.Request.URL, resp.StatusCode, err)
+				}
+				return credentials.HTTPAuthError(resp.Request.URL, resp.StatusCode, err)
+			}
 			// 5xx and 429 describe the server's current state, not the request;
 			// every other 4xx (missing file, bad auth) is settled and retrying
 			// it only delays the real error.
