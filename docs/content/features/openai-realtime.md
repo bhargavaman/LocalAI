@@ -173,7 +173,7 @@ Each closed speaker segment emits a `conversation.item.input_audio_transcription
 }
 ```
 
-`speaker_name` is the name of a voice registered through `/v1/voice/register`, and is present only when the model has a `speaker_model:` and the speaker was identified. A segment that closes before its speaker is identified has none, and later segments of the same speaker do. See [Voice Recognition]({{% relref "voice-recognition" %}}#naming-speakers-in-diarization-and-live-transcription). The segments of the offline path below carry no `speaker_name`.
+`speaker_name` is the name of a voice registered through `/v1/voice/register`, and is present only when the model has a `speaker_model:` (or, for a parakeet-cpp bundle file, a `speaker_component:`) and the speaker was identified. A segment that closes before its speaker is identified has none, and later segments of the same speaker do. See [Voice Recognition]({{% relref "voice-recognition" %}}#naming-speakers-in-diarization-and-live-transcription). The segments of the offline path below carry no `speaker_name`.
 
 Each sound event emits a `conversation.item.sound_detection` event with one tag and the detection window's `start`/`end`:
 
@@ -230,7 +230,7 @@ pipeline:
 
 #### Choosing the sound model
 
-Both scene models ship with CED-Tiny, the cheapest to run all the time. `parakeet-cpp-realtime-scene-base` and `parakeet-cpp-realtime-scene-tdt-base` are the same pipelines with CED-Base (86M, the largest CED), which tags sounds more confidently. Any CED GGUF from [`mudler/ced-gguf`](https://huggingface.co/mudler/ced-gguf) (tiny, mini, small, base) works as `sound_model`. Measured on CPU (Ryzen 9 9950X3D) over a 37 s clip with two speakers and a rooster, as a fraction of real time:
+Both scene models ship with CED-Tiny, the cheapest to run all the time. `parakeet-cpp-realtime-scene-base` and `parakeet-cpp-realtime-scene-tdt-base` are the same pipelines with CED-Base (86M, the largest CED), which tags sounds more confidently. `parakeet-cpp-multilingual-diarization-speakers-sounds` loads the same TDT, Nemotron-3-Diarization and CED-Tiny trio plus the WeSpeaker encoder, and is meant for offline `/v1/audio/diarization` calls with `include_sounds=true` (see [Speaker Diarization]({{% relref "audio-diarization" %}}#sound-events)). Any CED GGUF from [`mudler/ced-gguf`](https://huggingface.co/mudler/ced-gguf) (tiny, mini, small, base) works as `sound_model`. Measured on CPU (Ryzen 9 9950X3D) over a 37 s clip with two speakers and a rooster, as a fraction of real time:
 
 | | CED-Tiny | CED-Base |
 |---|---|---|
@@ -546,6 +546,33 @@ pipeline:
       - name: bob
         audio: /models/voices/bob.wav
 ```
+
+### One bundle for every stage
+
+A parakeet-cpp bundle can fill the speaker stage as well as the others, so one model serves
+`vad`, `transcription`, `sound_detection` and `voice_recognition`. The bundle config must
+list `speaker_recognition` in `known_usecases` (the gallery entries do), and the libparakeet.so
+must export `parakeet_capi_speaker_embed_pcm`:
+
+```yaml
+name: my-realtime
+pipeline:
+  vad: parakeet-cpp-bundle-small
+  transcription: parakeet-cpp-bundle-small
+  sound_detection: parakeet-cpp-bundle-small
+  llm: qwen
+  tts: kokoro
+  voice_recognition:
+    model: parakeet-cpp-bundle-small
+    mode: identify
+    threshold: 0.5               # WeSpeaker distance; see Voice Recognition
+```
+
+The bundle's encoder has the same weights as `voice-detect-wespeaker-resnet34`, so voices
+registered with that model are matched. Embedding an utterance uses the same engine lock as
+transcription, so it adds to the turn latency. Voices from a 192-dimension model (ECAPA-TDNN,
+for example) cannot be matched by a bundle; see
+[Voice Recognition]({{% relref "voice-recognition#a-parakeet-cpp-bundle-as-the-embedding-model" %}}).
 
 ### Identifying speakers without gating
 

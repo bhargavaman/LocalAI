@@ -2909,6 +2909,7 @@ const docTemplate = `{
         },
         "/v1/audio/diarization": {
             "post": {
+                "description": "JSON accepts model, file (raw base64 audio), include_text, include_speaker_profiles, include_sounds and response_format. Profiles require voice-recognition permission and json or verbose_json; unsupported backends return 501.",
                 "consumes": [
                     "multipart/form-data",
                     "application/json"
@@ -2934,7 +2935,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "exact speaker count (>0 forces; 0 = auto)",
+                        "description": "exact speaker count (\u003e0 forces; 0 = auto)",
                         "name": "num_speakers",
                         "in": "formData"
                     },
@@ -2976,20 +2977,26 @@ const docTemplate = `{
                     },
                     {
                         "type": "boolean",
+                        "description": "export portable biometric profiles (voice-recognition permission; JSON formats only)",
+                        "name": "include_speaker_profiles",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
                         "description": "include per-segment transcript when the backend supports it",
                         "name": "include_text",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "include closed sound events (start, end, label, confidence) when the model has a sound_model companion; otherwise 501 include_sounds_unsupported (JSON formats only)",
+                        "name": "include_sounds",
                         "in": "formData"
                     },
                     {
                         "type": "string",
                         "description": "json (default), verbose_json, or rttm",
                         "name": "response_format",
-                        "in": "formData"
-                    },
-                    {
-                        "type": "boolean",
-                        "description": "Export portable biometric profiles; requires voice-recognition permission. Omitted by default.",
-                        "name": "include_speaker_profiles",
                         "in": "formData"
                     }
                 ],
@@ -3000,8 +3007,7 @@ const docTemplate = `{
                             "$ref": "#/definitions/schema.DiarizationResult"
                         }
                     }
-                },
-                "description": "JSON accepts model, file (raw base64 audio), include_text, include_speaker_profiles and response_format. Profiles require voice-recognition permission and json or verbose_json; unsupported backends return 501."
+                }
             }
         },
         "/v1/audio/speech": {
@@ -4206,6 +4212,7 @@ const docTemplate = `{
         },
         "/v1/voice/register": {
             "post": {
+                "description": "Supply either audio or speaker_profiles plus an explicit numeric speaker_slot. The selected model must expose matching trusted encoder metadata for portable enrollment. Registrations are global and ephemeral, with a fresh ID for each request.",
                 "tags": [
                     "voice-recognition"
                 ],
@@ -4228,8 +4235,7 @@ const docTemplate = `{
                             "$ref": "#/definitions/schema.VoiceRegisterResponse"
                         }
                     }
-                },
-                "description": "Supply either audio or speaker_profiles plus an explicit numeric speaker_slot. The selected model must expose matching trusted encoder metadata for portable enrollment. Registrations are global and ephemeral, with a fresh ID for each request."
+                }
             }
         },
         "/v1/voice/verify": {
@@ -4337,73 +4343,6 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "schema.SpeakerProfiles": {
-            "type": "object",
-            "properties": {
-                "version": {
-                    "type": "integer"
-                },
-                "encoder": {
-                    "$ref": "#/definitions/schema.SpeakerEncoder"
-                },
-                "speakers": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/schema.SpeakerProfile"
-                    }
-                }
-            }
-        },
-        "schema.SpeakerProfile": {
-            "type": "object",
-            "properties": {
-                "speaker": {
-                    "type": "integer",
-                    "description": "Raw numeric slot matching the decimal segment/summary label, not SPEAKER_NN."
-                },
-                "clean_duration": {
-                    "type": "number"
-                },
-                "intervals": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/schema.SpeakerProfileInterval"
-                    }
-                },
-                "unavailable_reason": {
-                    "type": "string",
-                    "x-nullable": true
-                },
-                "embedding": {
-                    "type": "array",
-                    "items": {
-                        "type": "number"
-                    }
-                }
-            }
-        },
-        "schema.SpeakerProfileInterval": {
-            "type": "object",
-            "properties": {
-                "start": {
-                    "type": "number"
-                },
-                "end": {
-                    "type": "number"
-                }
-            }
-        },
-        "schema.SpeakerEncoder": {
-            "type": "object",
-            "properties": {
-                "identity": {
-                    "type": "string"
-                },
-                "dimension": {
-                    "type": "integer"
-                }
-            }
-        },
         "config.Gallery": {
             "type": "object",
             "properties": {
@@ -5342,11 +5281,35 @@ const docTemplate = `{
                 }
             }
         },
+        "proto.SpeakerEncoder": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "integer"
+                },
+                "family": {
+                    "description": "embedding space of the encoder; empty when the backend cannot tell",
+                    "type": "string"
+                },
+                "identity": {
+                    "description": "sha256 of loaded GGUF bytes",
+                    "type": "string"
+                }
+            }
+        },
         "proto.StatusResponse": {
             "type": "object",
             "properties": {
                 "memory": {
                     "$ref": "#/definitions/proto.MemoryUsageData"
+                },
+                "speaker_encoder": {
+                    "description": "trusted metadata from the loaded server encoder, never request data",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/proto.SpeakerEncoder"
+                        }
+                    ]
                 },
                 "state": {
                     "$ref": "#/definitions/proto.StatusResponse_State"
@@ -5904,6 +5867,16 @@ const docTemplate = `{
                         "$ref": "#/definitions/schema.DiarizationSegment"
                     }
                 },
+                "sounds": {
+                    "description": "Sounds is present only when the request set include_sounds. An empty\nlist then means the model ran and heard no event; omitzero keeps a nil\nlist (not requested) out of the payload while an empty one stays.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DiarizationSound"
+                    }
+                },
+                "speaker_profiles": {
+                    "$ref": "#/definitions/schema.SpeakerProfiles"
+                },
                 "speakers": {
                     "type": "array",
                     "items": {
@@ -5912,9 +5885,6 @@ const docTemplate = `{
                 },
                 "task": {
                     "type": "string"
-                },
-                "speaker_profiles": {
-                    "$ref": "#/definitions/schema.SpeakerProfiles"
                 }
             }
         },
@@ -5945,6 +5915,23 @@ const docTemplate = `{
                 },
                 "text": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.DiarizationSound": {
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "end": {
+                    "type": "number"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "start": {
+                    "type": "number"
                 }
             }
         },
@@ -7571,6 +7558,15 @@ const docTemplate = `{
                 "ignore_eos": {
                     "type": "boolean"
                 },
+                "include_sounds": {
+                    "type": "boolean"
+                },
+                "include_speaker_profiles": {
+                    "type": "boolean"
+                },
+                "include_text": {
+                    "type": "boolean"
+                },
                 "input": {},
                 "instruction": {
                     "description": "Edit endpoint",
@@ -8239,6 +8235,75 @@ const docTemplate = `{
                 },
                 "model": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.SpeakerEncoder": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "integer"
+                },
+                "family": {
+                    "description": "Family is the embedding space of the encoder. The server fills it from the\nloaded encoder; exported profiles do not carry it and it is not matched.",
+                    "type": "string"
+                },
+                "identity": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.SpeakerProfile": {
+            "type": "object",
+            "properties": {
+                "clean_duration": {
+                    "type": "number"
+                },
+                "embedding": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "intervals": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.SpeakerProfileInterval"
+                    }
+                },
+                "speaker": {
+                    "type": "integer"
+                },
+                "unavailable_reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.SpeakerProfileInterval": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "number"
+                },
+                "start": {
+                    "type": "number"
+                }
+            }
+        },
+        "schema.SpeakerProfiles": {
+            "type": "object",
+            "properties": {
+                "encoder": {
+                    "$ref": "#/definitions/schema.SpeakerEncoder"
+                },
+                "speakers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.SpeakerProfile"
+                    }
+                },
+                "version": {
+                    "type": "integer"
                 }
             }
         },
@@ -8976,15 +9041,14 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
-                "store": {
-                    "type": "string"
-                },
                 "speaker_profiles": {
                     "$ref": "#/definitions/schema.SpeakerProfiles"
                 },
                 "speaker_slot": {
-                    "type": "integer",
-                    "description": "Required with speaker_profiles, mutually exclusive with audio; explicit raw numeric speaker slot."
+                    "type": "integer"
+                },
+                "store": {
+                    "type": "string"
                 }
             }
         },

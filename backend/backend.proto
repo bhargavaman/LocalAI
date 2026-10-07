@@ -831,6 +831,7 @@ message DiarizeRequest {
   // identify speakers themselves read this; others ignore it.
   repeated KnownVoice known_voices = 12;
   bool include_speaker_profiles = 13; // opt-in sensitive embeddings; unsupported backends must reject
+  bool include_sounds = 14;           // ask for closed sound events; backends without a sound model must reject, never return an empty list
 }
 
 message DiarizeSegment {
@@ -851,10 +852,26 @@ message KnownVoice {
   string name = 1;
   repeated float embedding = 2;
   string model = 3;
+  // Fingerprint of the encoder that made the embedding, when it is known: the
+  // embedding space ("voicedetect:<arch>:<name>:<dim>") and the exact weights
+  // ("sha256:<hex>"). Empty for voices registered before it was recorded.
+  string encoder_family = 5;
+  string encoder_weights = 6;
+}
+
+// DiarizeSound is one closed sound event over the whole clip, merged the same
+// way the live scene stream merges them.
+message DiarizeSound {
+  float  start = 1;                    // seconds
+  float  end = 2;                      // seconds
+  string label = 3;                    // AudioSet label
+  float  confidence = 4;               // peak score of the event, 0..1
 }
 
 message DiarizeResponse {
   string speaker_profiles_json = 5; // versioned speaker_profiles object only; absent by default
+  repeated DiarizeSound sounds = 6;    // closed sound events; only filled when include_sounds was set
+  bool   sounds_included = 7;          // true when the backend ran sound detection for this request (an empty `sounds` is then a real "nothing heard")
   repeated DiarizeSegment segments = 1;
   int32  num_speakers = 2;             // count of distinct speaker labels in `segments`
   float  duration = 3;                 // total audio duration in seconds (0 if unknown)
@@ -913,6 +930,7 @@ message MemoryUsageData {
 message SpeakerEncoder {
   string identity = 1; // sha256 of loaded GGUF bytes
   int32 dimension = 2;
+  string family = 3; // embedding space of the encoder; empty when the backend cannot tell
 }
 
 message StatusResponse {
