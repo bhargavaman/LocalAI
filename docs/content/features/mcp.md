@@ -95,6 +95,10 @@ Configure HTTP-based MCP servers:
 - **`url`**: The MCP server endpoint URL
 - **`token`**: Bearer token for authentication (optional)
 
+LocalAI automatically selects the transport for remote model MCP servers. It tries Streamable HTTP first, including servers that do not assign session IDs. If the initial POST returns HTTP 400, 404, or 405, LocalAI retries with legacy SSE. Both attempts share the discovery timeout and use the configured bearer token. Authentication failures and redirects do not trigger fallback.
+
+Use the endpoint URL published by your server: usually `/mcp` for Streamable HTTP or `/sse` for legacy SSE. Legacy SSE servers must advertise a message endpoint on the same origin (scheme, host, and port). No transport setting is required.
+
 Remote model MCP connections originate from the LocalAI process. If LocalAI runs in Docker, the URL must therefore resolve and be reachable **from the LocalAI container**, not only from the host browser. For another service in the same Compose project, use its Compose service name and container port. Host-only DNS names, VPN DNS, and private routes must also be made available inside the container.
 
 #### STDIO Servers (`stdio`)
@@ -558,7 +562,7 @@ In addition to server-side MCP (where the backend connects to MCP servers), Loca
 
 ### How It Works
 
-1. **Add servers in the UI**: Click **MCP** in the chat header, open the **Client** tab, and add MCP server URLs
+1. **Add servers in the UI**: Click the **MCP** chip above the message box, open the **Client** tab, and add MCP server URLs
 2. **Browser connects directly**: The browser uses the MCP TypeScript SDK (`StreamableHTTPClientTransport` or `SSEClientTransport`) to connect to MCP servers
 3. **Tool discovery**: Connected servers' tools are sent as `tools` in the chat request body
 4. **Browser-side execution**: When the LLM calls a client-side tool, the browser executes it against the MCP server and sends the result back in a follow-up request

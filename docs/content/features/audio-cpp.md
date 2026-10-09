@@ -221,6 +221,10 @@ unaffected.
 
 ## Pinned tasks
 
+The upstream `turn` task performs turn detection. LocalAI has no RPC for this
+task, so requests to a model that only advertises `turn` are refused. It is not
+routed through voice activity detection (`vad`).
+
 Two routes are unreachable by auto-routing and need `task:` in the model config, because
 nothing in a request distinguishes them from a task the same family also advertises:
 
@@ -234,7 +238,7 @@ voice conversion from the same weights.
 ## Family notes
 
 - **Fish Audio voice cloning**: save a reference clip with its transcript in the
-  Voice Library, then select **Use in Text to Speech**. The backend accepts
+  Voice Library (**Build → Voices → Speech voices**), then select **Use in Text to Speech**. The backend accepts
   `params.ref_text` as an alias for `params.reference_text` in both ordinary and
   streaming speech requests. If you supply both parameters, `reference_text`
   takes precedence. For direct requests with a reference file in `voice`, supply
