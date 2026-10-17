@@ -170,6 +170,17 @@ build_sound_generation_request(const backend::SoundGenerationRequest &request,
         task.audio_input = std::move(*source_audio);
     }
 
+    // Generic options are copied first so typed request fields remain authoritative
+    // when callers provide the same key in both places.
+    for (const auto &param : request.params()) {
+        // src is reserved for trusted, decoded source audio and must not cross
+        // the generic option boundary as a caller-controlled filesystem path.
+        if (param.first == "src") {
+            continue;
+        }
+        task.options[param.first] = param.second;
+    }
+
     // WHAT LANDS AND WHAT DOES NOT. Three families advertise AudioGeneration in
     // the pinned upstream: ace_step, heartmula and stable_audio. Every key below
     // was grepped against find_option/parse_*_option in src/ and include/ rather
@@ -221,9 +232,12 @@ build_sound_generation_request(const backend::SoundGenerationRequest &request,
         task.options["think"] = bool_option(request.think());
     }
     if (request.has_caption()) {
-        // Read only by irodori_tts, which advertises Tts/VoiceCloning/VoiceDesign
-        // and not AudioGeneration, so it is unreachable from this RPC: DEAD here.
         task.options["caption"] = request.caption();
+        // YuE2 calls the musical caption "style". Preserve explicit options,
+        // including an empty style, while accepting Studio's caption field.
+        if (!request.caption().empty()) {
+            task.options.emplace("style", request.caption());
+        }
     }
     if (request.has_lyrics()) {
         // Read by ace_step and heartmula.

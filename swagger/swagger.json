@@ -1464,6 +1464,146 @@
                 }
             }
         },
+        "/api/motion/sessions": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "motion"
+                ],
+                "summary": "Create a motion capture session",
+                "parameters": [
+                    {
+                        "description": "Model, output profile and source clock origin",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.MotionSessionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/localai.MotionSessionInfo"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/motion/sessions/{id}": {
+            "get": {
+                "tags": [
+                    "motion"
+                ],
+                "summary": "Get motion session status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.MotionSessionInfo"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "motion"
+                ],
+                "summary": "Close a motion session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            }
+        },
+        "/api/motion/sessions/{id}/poses": {
+            "get": {
+                "tags": [
+                    "motion"
+                ],
+                "summary": "Stream motion frames and poses over a duplex WebSocket",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "101": {
+                        "description": "Switching Protocols"
+                    }
+                }
+            }
+        },
+        "/api/motion/sessions/{id}/tickets": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "motion"
+                ],
+                "summary": "Issue a motion WebSocket ticket (30 seconds, single use)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Browser origin",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.MotionTicketRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/auth.WebSocketTicketResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/nodes/models": {
             "get": {
                 "tags": [
@@ -2854,6 +2994,46 @@
                 }
             }
         },
+        "/models/import": {
+            "post": {
+                "description": "Writes the posted model configuration. A config referencing\nremote assets (download_files entries, URI-valued model/mmproj)\nis enqueued on the gallery job queue and answered with a job id\nplus status URL to poll, like a gallery install; a config with\nno downloads is written synchronously and answered with a\nplain success response. A queued import runs the gallery\ninstaller, which also adds recommended inference defaults the\nconfig leaves unset and installs the backend when automatic\nbackend installation is enabled; the synchronous path stores\nthe body as posted.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "models"
+                ],
+                "summary": "Import a model from a raw YAML or JSON configuration",
+                "parameters": [
+                    {
+                        "description": "model configuration (YAML or JSON body)",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "remote assets present: job id and status URL",
+                        "schema": {
+                            "$ref": "#/definitions/schema.GalleryResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "invalid or incomplete configuration",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/models/jobs": {
             "get": {
                 "tags": [
@@ -3291,6 +3471,40 @@
                 }
             }
         },
+        "/v1/decisions": {
+            "post": {
+                "description": "Uses the same local decision and NER execution as SystemOne. Supports inline images on capable backends; confidence is not OpenAI calibrated.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "systemone"
+                ],
+                "summary": "Answer ordered predicate, choice and score questions.",
+                "parameters": [
+                    {
+                        "description": "input + questions + model",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.DecisionsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/schema.DecisionsResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/depth": {
             "post": {
                 "tags": [
@@ -3719,9 +3933,10 @@
                     },
                     {
                         "type": "integer",
-                        "description": "Upscale factor: 2 or 4 (default 2)",
+                        "description": "Upscale factor: integer from 1 to 16; must match the model native scale",
                         "name": "scale",
-                        "in": "formData"
+                        "in": "formData",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -4443,6 +4658,17 @@
         }
     },
     "definitions": {
+        "auth.WebSocketTicketResponse": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "string"
+                },
+                "ticket": {
+                    "type": "string"
+                }
+            }
+        },
         "config.Gallery": {
             "type": "object",
             "properties": {
@@ -4936,6 +5162,10 @@
                     "items": {
                         "$ref": "#/definitions/gallery.NodeDriftInfo"
                     }
+                },
+                "reason": {
+                    "description": "Reason says why the backend is flagged when version and digest alone\nwould not flag it: the backend failed a request in a way that shows it\nis older than the server. Empty for ordinary version or digest upgrades.",
+                    "type": "string"
                 }
             }
         },
@@ -5227,6 +5457,57 @@
                 },
                 "success": {
                     "type": "boolean"
+                }
+            }
+        },
+        "localai.MotionSessionInfo": {
+            "type": "object",
+            "properties": {
+                "frames": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "poses": {
+                    "type": "integer"
+                },
+                "profile": {
+                    "type": "string"
+                },
+                "time_origin": {
+                    "type": "string"
+                },
+                "upload_accepted": {
+                    "type": "integer"
+                },
+                "upload_dropped": {
+                    "type": "integer"
+                }
+            }
+        },
+        "localai.MotionSessionRequest": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string"
+                },
+                "profile": {
+                    "type": "string"
+                },
+                "time_origin": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.MotionTicketRequest": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string"
                 }
             }
         },
@@ -5808,6 +6089,164 @@
                 }
             }
         },
+        "schema.DecisionAnswer": {
+            "type": "object",
+            "properties": {
+                "choice": {
+                    "description": "Choice preserves the selected string or boolean value. Swagger 2 uses a loose object placeholder for this union.",
+                    "type": "object"
+                },
+                "confidence": {
+                    "type": "number"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "probabilities": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DecisionProbability"
+                    }
+                },
+                "probability": {
+                    "type": "number"
+                },
+                "score": {
+                    "type": "number"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DecisionChoice": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "value": {
+                    "description": "Value is a string or boolean choice. Swagger 2 uses a loose object placeholder for this union.",
+                    "type": "object"
+                }
+            }
+        },
+        "schema.DecisionLevel": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DecisionProbability": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string"
+                },
+                "probability": {
+                    "type": "number"
+                },
+                "value": {
+                    "description": "Value is a string or boolean for choices, or a zero-based integer for score levels. Swagger 2 uses a loose object placeholder for this union.",
+                    "type": "object"
+                }
+            }
+        },
+        "schema.DecisionQuestion": {
+            "type": "object",
+            "properties": {
+                "choices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DecisionChoice"
+                    }
+                },
+                "instructions": {
+                    "type": "string"
+                },
+                "levels": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DecisionLevel"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DecisionUsage": {
+            "type": "object",
+            "properties": {
+                "input_tokens": {
+                    "type": "integer"
+                },
+                "input_tokens_details": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "output_tokens": {
+                    "type": "integer"
+                },
+                "output_tokens_details": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "total_tokens": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.DecisionsRequest": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "description": "Input is a text string or an array of user messages. Swagger 2 uses a loose object placeholder for this union.",
+                    "type": "object"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DecisionQuestion"
+                    }
+                },
+                "safety_identifier": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DecisionsResponse": {
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DecisionAnswer"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                },
+                "usage": {
+                    "$ref": "#/definitions/schema.DecisionUsage"
+                }
+            }
+        },
         "schema.DepthRequest": {
             "type": "object",
             "properties": {
@@ -6159,6 +6598,12 @@
                 },
                 "model_id": {
                     "type": "string"
+                },
+                "params": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 },
                 "prompt_influence": {
                     "type": "number"
@@ -7041,6 +7486,9 @@
                     "items": {
                         "$ref": "#/definitions/schema.ThreeDOperation"
                     }
+                },
+                "upscale_scale": {
+                    "type": "integer"
                 }
             }
         },
@@ -9011,6 +9459,26 @@
                 }
             }
         },
+        "schema.VideoReference": {
+            "type": "object",
+            "properties": {
+                "audio": {
+                    "description": "optional audio paired with this video",
+                    "type": "string"
+                },
+                "fps": {
+                    "description": "frame rate of the source frames; 0 means the backend default",
+                    "type": "integer"
+                },
+                "frames": {
+                    "description": "ordered frame images: URL, base64 or data URI",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "schema.VideoRequest": {
             "type": "object",
             "properties": {
@@ -9059,6 +9527,27 @@
                 "prompt": {
                     "description": "text description of the video to generate",
                     "type": "string"
+                },
+                "ref_audios": {
+                    "description": "reference audio clips (WAV); exclusive with start_image/end_image",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ref_images": {
+                    "description": "reference images (URL, base64 or data URI); exclusive with start_image/end_image",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ref_videos": {
+                    "description": "reference videos as frame lists; exclusive with start_image/end_image",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.VideoReference"
+                    }
                 },
                 "response_format": {
                     "description": "output format (url or b64_json)",

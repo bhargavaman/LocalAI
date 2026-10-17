@@ -45,6 +45,7 @@ const (
 // usecaseFilters maps UI filter keys to ModelConfigUsecase flags for
 // capability-based gallery filtering.
 var usecaseFilters = map[string]config.ModelConfigUsecase{
+	config.UsecaseMotion:              config.FLAG_MOTION,
 	config.UsecaseChat:                config.FLAG_CHAT,
 	config.UsecaseImage:               config.FLAG_IMAGE,
 	config.UsecaseVideo:               config.FLAG_VIDEO,
@@ -822,6 +823,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			NodeStatus string `json:"node_status"`
 		}
 		type modelCapability struct {
+			UpscaleScale     int                            `json:"upscaleScale,omitempty"`
 			ThreeDOperations []schema.ThreeDOperation       `json:"three_d_operations,omitempty"`
 			ID               string                         `json:"id"`
 			Capabilities     []string                       `json:"capabilities"`
@@ -873,6 +875,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			result = append(result, modelCapability{
 				ID:               cfg.Name,
 				Capabilities:     cfg.KnownUsecaseStrings,
+				UpscaleScale:     config.UpscaleScaleFromOptions(cfg),
 				ThreeDOperations: cfg.ThreeDOperations(),
 				Backend:          cfg.Backend,
 				Disabled:         cfg.IsDisabled(),

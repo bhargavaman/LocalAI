@@ -44,6 +44,23 @@ Both views store the view, search, filter, and selection in the URL. Installing
 from Explore does not move you away from the catalog; the entry updates in place
 when the operation finishes.
 
+### MiniCPM-V 4.7 1B
+
+[MiniCPM-V 4.7 1B](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B)
+supports text chat and image understanding through the llama.cpp backend.
+The gallery includes official Q4_K_M, Q5_K_M, Q6_K, and Q8_0 GGUF builds.
+Each build includes the F16 vision projector and uses an 8,192-token default context.
+
+Install the family with automatic variant selection:
+
+```bash
+local-ai models install minicpm-v-4_7-1b-q4
+```
+
+Select a specific build with `--variant minicpm-v-4_7-1b-q4`,
+`--variant minicpm-v-4_7-1b-q5`, `--variant minicpm-v-4_7-1b-q6`,
+or `--variant minicpm-v-4_7-1b-q8`.
+
 ### Repairing an existing model configuration
 
 Gallery template updates do not rewrite YAML files for already installed models.
@@ -157,6 +174,25 @@ confirm, the review checks again and lists what will go, why, and how much it
 frees. Removal then waits 30 seconds, during which you can undo it; the delete
 request is sent only when that time ends. If you leave the page during the wait,
 nothing is deleted.
+
+## LFM2.5-24B-A2B
+
+[LiquidAI LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B)
+is a text-only reasoning model with 24B total parameters and 2.45B active
+parameters. The gallery provides the official Q4_K_M, Q5_K_M, Q6_K, and Q8_0
+GGUF builds through the `llama-cpp` backend.
+
+Install the model with automatic variant selection:
+
+```bash
+local-ai models install lfm2.5-24b-a2b
+```
+
+To select a specific quantization, use `--variant` with `lfm2.5-24b-a2b`
+(Q4_K_M), `lfm2.5-24b-a2b-q5`, `lfm2.5-24b-a2b-q6`, or
+`lfm2.5-24b-a2b-q8`. The entries use the embedded tokenizer template, a
+131,072-token context, and LiquidAI's recommended sampling settings.
+The weights use the [Liquid AI LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B/blob/main/LICENSE).
 
 ## Cyber-Ornith 1.5 9B
 

@@ -384,6 +384,10 @@ curl http://localhost:8080/v1/sound-generation -H "Content-Type: application/jso
 
 The `/v1/sound-generation` endpoint is compatible with the [ElevenLabs sound generation API](https://elevenlabs.io/docs/api-reference/sound-generation) and can produce music, sound effects, and other audio content. It responds with a binary audio file and the appropriate `Content-Type` header (for example `audio/wav`, `audio/mpeg`, `audio/flac`, or `audio/ogg`). The request body is JSON and supports two usage modes.
 
+Each generated sound has a unique filename. The filename remains unique when
+LocalAI changes its extension to match the audio format, so later generations
+do not overwrite earlier recordings in the WebUI history.
+
 **Simple mode:**
 
 | Parameter        | Type     | Required | Description                                  |
@@ -411,6 +415,33 @@ The `/v1/sound-generation` endpoint is compatible with the [ElevenLabs sound gen
 | `vocal_language`    | `string` | No       | Vocal language (fallback if `language` is empty) |
 | `timesignature`     | `string` | No       | Time signature (for example `4`)                |
 | `instrumental`      | `bool`   | No       | Generate instrumental audio (no vocals)         |
+| `params`            | `object` | No       | Backend-specific options with string keys and string values |
+
+Use `params` to pass backend-specific string options that do not have fixed request
+fields. Every value in `params` must be a string. Existing fixed fields remain
+authoritative when a fixed field and `params` contain the same option.
+
+The `audio-cpp` backend uses a nonempty `caption` as the default `style` option.
+An explicit `params.style` takes precedence, including an empty string. In
+Studio → Sound, select Advanced mode and enter the musical style in Caption
+and the song text in Lyrics to use YuE2.
+
+Install the YuE2 gallery model and generate a song:
+
+```bash
+local-ai models install audio-cpp-yue2-3b
+
+curl http://localhost:8080/v1/sound-generation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "audio-cpp-yue2-3b",
+    "lyrics": "[Verse]\nMorning light across the bay\nCarry every cloud away",
+    "params": {
+      "style": "acoustic folk, warm vocals, gentle guitar",
+      "cot": "off"
+    }
+  }' --output yue2.wav
+```
 
 Error responses: `400` for a missing or invalid model or request parameters, and `500` for a backend error during sound generation.
 
@@ -585,6 +616,29 @@ options:
 ```
 
 A per-request `seed` can also be supplied through the `params` map alongside `ref_text`.
+
+#### Duration and postprocessing
+
+For `omnivoice-cpp`, set these request-local controls in `params`, not as top-level fields:
+
+```json
+{
+  "model": "omnivoice-cpp",
+  "input": "Hello world.",
+  "params": {"duration":"2.5","postprocess":"false"}
+}
+```
+
+- `duration` accepts a finite numeric string of seconds greater than zero and at most `30`, inclusive. Whitespace, empty strings, and nonfinite values are invalid.
+- The backend uses `max(1, floor(seconds * 25))` generation frames. Each frame represents 40 milliseconds at the bundled codec rate. Thus, `2.5` selects 62 frames; tiny positive values select one frame.
+- `postprocess` accepts only the exact strings `"true"` and `"false"`. Buffered synthesis accepts either value, with or without `duration`.
+- Omitted controls preserve engine defaults. Omitted duration leaves duration estimation and chunking unchanged.
+
+A supplied duration forces single-shot generation and bypasses chunking. The 30-second cap is a conservative wrapper resource policy, aligned with the engine's default chunk threshold. It is not an engine positional limit or a guarantee of available memory or successful synthesis.
+
+Duration controls generation frames, not playback speed or guaranteed final WAV duration. Buffered postprocessing can trim or pad audio. With `postprocess="false"`, buffered output preserves the raw decoded frame length; reference loudness matching remains active. Quantization does not guarantee perceptual accuracy.
+
+Streaming accepts `duration` and explicit `postprocess="true"`. It rejects `postprocess="false"` before reference reads, native synthesis, or audio output because the streaming engine always postprocesses audio.
 
 ### Pocket TTS
 

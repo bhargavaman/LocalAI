@@ -1,5 +1,12 @@
 basePath: /
 definitions:
+  auth.WebSocketTicketResponse:
+    properties:
+      expires_at:
+        type: string
+      ticket:
+        type: string
+    type: object
   config.Gallery:
     properties:
       artifact_verification:
@@ -355,6 +362,12 @@ definitions:
         items:
           $ref: '#/definitions/gallery.NodeDriftInfo'
         type: array
+      reason:
+        description: |-
+          Reason says why the backend is flagged when version and digest alone
+          would not flag it: the backend failed a request in a way that shows it
+          is older than the server. Empty for ordinary version or digest upgrades.
+        type: string
     type: object
   gallery.Variant:
     properties:
@@ -578,6 +591,39 @@ definitions:
         type: integer
       success:
         type: boolean
+    type: object
+  localai.MotionSessionInfo:
+    properties:
+      frames:
+        type: integer
+      id:
+        type: string
+      model:
+        type: string
+      poses:
+        type: integer
+      profile:
+        type: string
+      time_origin:
+        type: string
+      upload_accepted:
+        type: integer
+      upload_dropped:
+        type: integer
+    type: object
+  localai.MotionSessionRequest:
+    properties:
+      model:
+        type: string
+      profile:
+        type: string
+      time_origin:
+        type: string
+    type: object
+  localai.MotionTicketRequest:
+    properties:
+      origin:
+        type: string
     type: object
   localai.TTSModelVoices:
     properties:
@@ -967,6 +1013,114 @@ definitions:
       summary_tokens:
         type: integer
     type: object
+  schema.DecisionAnswer:
+    properties:
+      choice:
+        description: Choice preserves the selected string or boolean value. Swagger
+          2 uses a loose object placeholder for this union.
+        type: object
+      confidence:
+        type: number
+      name:
+        type: string
+      probabilities:
+        items:
+          $ref: '#/definitions/schema.DecisionProbability'
+        type: array
+      probability:
+        type: number
+      score:
+        type: number
+      type:
+        type: string
+    type: object
+  schema.DecisionChoice:
+    properties:
+      description:
+        type: string
+      value:
+        description: Value is a string or boolean choice. Swagger 2 uses a loose object
+          placeholder for this union.
+        type: object
+    type: object
+  schema.DecisionLevel:
+    properties:
+      description:
+        type: string
+      label:
+        type: string
+    type: object
+  schema.DecisionProbability:
+    properties:
+      label:
+        type: string
+      probability:
+        type: number
+      value:
+        description: Value is a string or boolean for choices, or a zero-based integer
+          for score levels. Swagger 2 uses a loose object placeholder for this union.
+        type: object
+    type: object
+  schema.DecisionQuestion:
+    properties:
+      choices:
+        items:
+          $ref: '#/definitions/schema.DecisionChoice'
+        type: array
+      instructions:
+        type: string
+      levels:
+        items:
+          $ref: '#/definitions/schema.DecisionLevel'
+        type: array
+      name:
+        type: string
+      type:
+        type: string
+    type: object
+  schema.DecisionUsage:
+    properties:
+      input_tokens:
+        type: integer
+      input_tokens_details:
+        additionalProperties:
+          type: integer
+        type: object
+      output_tokens:
+        type: integer
+      output_tokens_details:
+        additionalProperties:
+          type: integer
+        type: object
+      total_tokens:
+        type: integer
+    type: object
+  schema.DecisionsRequest:
+    properties:
+      input:
+        description: Input is a text string or an array of user messages. Swagger
+          2 uses a loose object placeholder for this union.
+        type: object
+      model:
+        type: string
+      questions:
+        items:
+          $ref: '#/definitions/schema.DecisionQuestion'
+        type: array
+      safety_identifier:
+        type: string
+    type: object
+  schema.DecisionsResponse:
+    properties:
+      answers:
+        items:
+          $ref: '#/definitions/schema.DecisionAnswer'
+        type: array
+      model:
+        type: string
+      usage:
+        $ref: '#/definitions/schema.DecisionUsage'
+    type: object
   schema.DepthRequest:
     properties:
       dst:
@@ -1216,6 +1370,10 @@ definitions:
         type: string
       model_id:
         type: string
+      params:
+        additionalProperties:
+          type: string
+        type: object
       prompt_influence:
         type: number
       text:
@@ -1835,6 +1993,8 @@ definitions:
         items:
           $ref: '#/definitions/schema.ThreeDOperation'
         type: array
+      upscale_scale:
+        type: integer
     type: object
   schema.ModelCapabilitiesResponse:
     properties:
@@ -3275,6 +3435,20 @@ definitions:
       model:
         type: string
     type: object
+  schema.VideoReference:
+    properties:
+      audio:
+        description: optional audio paired with this video
+        type: string
+      fps:
+        description: frame rate of the source frames; 0 means the backend default
+        type: integer
+      frames:
+        description: 'ordered frame images: URL, base64 or data URI'
+        items:
+          type: string
+        type: array
+    type: object
   schema.VideoRequest:
     properties:
       audio:
@@ -3311,6 +3485,21 @@ definitions:
       prompt:
         description: text description of the video to generate
         type: string
+      ref_audios:
+        description: reference audio clips (WAV); exclusive with start_image/end_image
+        items:
+          type: string
+        type: array
+      ref_images:
+        description: reference images (URL, base64 or data URI); exclusive with start_image/end_image
+        items:
+          type: string
+        type: array
+      ref_videos:
+        description: reference videos as frame lists; exclusive with start_image/end_image
+        items:
+          $ref: '#/definitions/schema.VideoReference'
+        type: array
       response_format:
         description: output format (url or b64_json)
         type: string
@@ -4551,6 +4740,96 @@ paths:
       summary: Estimate VRAM usage for a model
       tags:
       - config
+  /api/motion/sessions:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Model, output profile and source clock origin
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/localai.MotionSessionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/localai.MotionSessionInfo'
+      summary: Create a motion capture session
+      tags:
+      - motion
+  /api/motion/sessions/{id}:
+    delete:
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+      summary: Close a motion session
+      tags:
+      - motion
+    get:
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/localai.MotionSessionInfo'
+      summary: Get motion session status
+      tags:
+      - motion
+  /api/motion/sessions/{id}/poses:
+    get:
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "101":
+          description: Switching Protocols
+      summary: Stream motion frames and poses over a duplex WebSocket
+      tags:
+      - motion
+  /api/motion/sessions/{id}/tickets:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Browser origin
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/localai.MotionTicketRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/auth.WebSocketTicketResponse'
+      summary: Issue a motion WebSocket ticket (30 seconds, single use)
+      tags:
+      - motion
   /api/nodes/{id}/max-replicas-per-model:
     delete:
       parameters:
@@ -5504,6 +5783,42 @@ paths:
       summary: List all Galleries
       tags:
       - models
+  /models/import:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Writes the posted model configuration. A config referencing
+        remote assets (download_files entries, URI-valued model/mmproj)
+        is enqueued on the gallery job queue and answered with a job id
+        plus status URL to poll, like a gallery install; a config with
+        no downloads is written synchronously and answered with a
+        plain success response. A queued import runs the gallery
+        installer, which also adds recommended inference defaults the
+        config leaves unset and installs the backend when automatic
+        backend installation is enabled; the synchronous path stores
+        the body as posted.
+      parameters:
+      - description: model configuration (YAML or JSON body)
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'remote assets present: job id and status URL'
+          schema:
+            $ref: '#/definitions/schema.GalleryResponse'
+        "400":
+          description: invalid or incomplete configuration
+          schema:
+            $ref: '#/definitions/localai.ModelResponse'
+      summary: Import a model from a raw YAML or JSON configuration
+      tags:
+      - models
   /models/jobs:
     get:
       responses:
@@ -5795,6 +6110,29 @@ paths:
       summary: Generate completions for a given prompt and model.
       tags:
       - inference
+  /v1/decisions:
+    post:
+      consumes:
+      - application/json
+      description: Uses the same local decision and NER execution as SystemOne. Supports
+        inline images on capable backends; confidence is not OpenAI calibrated.
+      parameters:
+      - description: input + questions + model
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/schema.DecisionsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/schema.DecisionsResponse'
+      summary: Answer ordered predicate, choice and score questions.
+      tags:
+      - systemone
   /v1/depth:
     post:
       parameters:
@@ -6068,9 +6406,11 @@ paths:
         name: image
         required: true
         type: file
-      - description: 'Upscale factor: 2 or 4 (default 2)'
+      - description: 'Upscale factor: integer from 1 to 16; must match the model native
+          scale'
         in: formData
         name: scale
+        required: true
         type: integer
       produces:
       - application/json

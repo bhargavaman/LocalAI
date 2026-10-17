@@ -29,6 +29,7 @@ import ChatHeader from '../components/chat/ChatHeader'
 // eslint-disable-next-line no-unused-vars
 import ShortcutsDialog from '../components/chat/ShortcutsDialog'
 // eslint-disable-next-line no-unused-vars
+import ReasoningChips from '../components/chat/ReasoningChips'
 import ChatSettingsSheet from '../components/chat/ChatSettingsSheet'
 // eslint-disable-next-line no-unused-vars
 import FindBar from '../components/chat/FindBar'
@@ -190,6 +191,7 @@ export default function Chat() {
   const [scrolledUp, setScrolledUp] = useState(false)
   const chatsMenuRef = useRef(null)
   const pickerRef = useRef(null)
+  const effortRef = useRef(null)
   const { models: chatModels, loading: chatModelsLoading } = useModels(CAP_CHAT)
   const [fitOpenCount, setFitOpenCount] = useState(0)
   const modelNames = useMemo(() => chatModels.map(m => m.id), [chatModels])
@@ -1039,7 +1041,13 @@ export default function Chat() {
     />
   )
 
-  const canvasChip = (
+  const composerChips = (
+    <>
+    <ReasoningChips
+      ref={effortRef}
+      effort={activeChat.reasoningEffort}
+      onEffort={(reasoningEffort) => updateChatSettings(activeChat.id, { reasoningEffort })}
+    />
     <span className="cx-chipset">
       <button
         type="button"
@@ -1064,6 +1072,7 @@ export default function Chat() {
         </button>
       )}
     </span>
+    </>
   )
 
   const moreItems = [
@@ -1082,6 +1091,10 @@ export default function Chat() {
       case 'model': pickerRef.current?.open(); break
       case 'new': addChat(activeChat.model); break
       case 'chats': chatsMenuRef.current?.open(); break
+      case 'effort': {
+        effortRef.current?.open()
+        break
+      }
       case 'assistant': updateChatSettings(activeChat.id, { localaiAssistant: !activeChat.localaiAssistant }); break
       case 'canvas': toggleCanvasMode(); break
       case 'settings': setShowSettings(true); break
@@ -1212,7 +1225,7 @@ export default function Chat() {
               textareaRef={textareaRef}
               picker={picker}
               mcp={mcp}
-              chips={canvasChip}
+              chips={composerChips}
               files={files}
               onRemoveFile={(f) => setFiles(prev => prev.filter(x => x !== f))}
               onAttach={attachFiles}

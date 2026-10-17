@@ -17,9 +17,11 @@ const (
 	UsecaseEmbeddings          = "embeddings"
 	UsecaseTokenize            = "tokenize"
 	UsecaseImage               = "image"
+	UsecaseUpscale             = "upscale"
 	UsecaseVideo               = "video"
 	Usecase3D                  = "3d"
 	Usecase3DAnimation         = "3d_animation"
+	UsecaseMotion              = "motion"
 	UsecaseTranscript          = "transcript"
 	UsecaseTTS                 = "tts"
 	UsecaseSoundGeneration     = "sound_generation"
@@ -50,6 +52,7 @@ const (
 	MethodGenerateVideo      GRPCMethod = "GenerateVideo"
 	MethodGenerate3D         GRPCMethod = "Generate3D"
 	MethodAnimate3D          GRPCMethod = "Animate3D"
+	MethodMotionStream       GRPCMethod = "MotionStream"
 	MethodAudioTranscription GRPCMethod = "AudioTranscription"
 	MethodTTS                GRPCMethod = "TTS"
 	MethodTTSStream          GRPCMethod = "TTSStream"
@@ -90,6 +93,7 @@ type UsecaseInfo struct {
 
 // UsecaseInfoMap maps each known_usecase string to its gRPC and semantic info.
 var UsecaseInfoMap = map[string]UsecaseInfo{
+	UsecaseMotion: {Flag: FLAG_MOTION, GRPCMethod: MethodMotionStream, Description: "Timestamped human pose streams with native or SMPL skeletons."},
 	UsecaseChat: {
 		Flag:        FLAG_CHAT,
 		GRPCMethod:  MethodPredict,
@@ -121,6 +125,11 @@ var UsecaseInfoMap = map[string]UsecaseInfo{
 		Flag:        FLAG_TOKENIZE,
 		GRPCMethod:  MethodTokenizeString,
 		Description: "Tokenization via the TokenizeString RPC without running inference.",
+	},
+	UsecaseUpscale: {
+		Flag:        FLAG_UPSCALE,
+		GRPCMethod:  MethodUpscaleImage,
+		Description: "Image upscaling via the UpscaleImage RPC.",
 	},
 	UsecaseImage: {
 		Flag:        FLAG_IMAGE,
@@ -406,7 +415,7 @@ var BackendCapabilities = map[string]BackendCapability{
 	// --- Image/video generation backends ---
 	"diffusers": {
 		GRPCMethods:      []GRPCMethod{MethodGenerateImage, MethodUpscaleImage, MethodGenerateVideo, MethodSoundGeneration},
-		PossibleUsecases: []string{UsecaseImage, UsecaseVideo, UsecaseSoundGeneration},
+		PossibleUsecases: []string{UsecaseImage, UsecaseUpscale, UsecaseVideo, UsecaseSoundGeneration},
 		DefaultUsecases:  []string{UsecaseImage},
 		Description:      "HuggingFace diffusers — image, video, and sound generation",
 	},
@@ -432,13 +441,14 @@ var BackendCapabilities = map[string]BackendCapability{
 		Description:      "Stable Diffusion native backend",
 	},
 	"stablediffusion-ggml": {
-		GRPCMethods:      []GRPCMethod{MethodGenerateImage},
-		PossibleUsecases: []string{UsecaseImage},
+		GRPCMethods:      []GRPCMethod{MethodGenerateImage, MethodUpscaleImage},
+		PossibleUsecases: []string{UsecaseImage, UsecaseUpscale},
 		DefaultUsecases:  []string{UsecaseImage},
 		Description:      "Stable Diffusion via GGML quantized models",
 	},
 
 	// --- 3D generation backends ---
+	"gemxcpp": {GRPCMethods: []GRPCMethod{MethodMotionStream}, PossibleUsecases: []string{UsecaseMotion}, DefaultUsecases: []string{UsecaseMotion}, Description: "GEM-X live human motion on CPU/Vulkan; SOMA-77 and SMPL-24 pose streams"},
 	"kimodocpp": {
 		GRPCMethods:      []GRPCMethod{MethodAnimate3D},
 		PossibleUsecases: []string{Usecase3DAnimation},

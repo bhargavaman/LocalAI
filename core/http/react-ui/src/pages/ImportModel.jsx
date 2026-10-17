@@ -7,12 +7,12 @@ import { formatBytes } from '../utils/format'
 import { useResources } from '../hooks/useResources'
 import { detectSource, fitFor, importChecks, importRequest, machineFacts, requestText } from '../utils/tools'
 import { createTransferRateSampler } from '../utils/transferRate'
-import LoadingSpinner from '../components/LoadingSpinner'
 import PageHeader from '../components/PageHeader'
 import CodeEditor from '../components/CodeEditor'
 import SearchableSelect from '../components/SearchableSelect'
 import AmbiguityAlert from '../components/AmbiguityAlert'
 import ModalityChips from '../components/ModalityChips'
+import { classifyImportJob } from '../utils/importJob'
 import Icon from '../components/Icon'
 import ToolSteps from '../components/tools/ToolSteps'
 import Checks from '../components/tools/Checks'
@@ -25,7 +25,7 @@ const BACKENDS_FALLBACK_EMPTY = []
 
 // Modality keys used as i18n keys under "modality.*" namespace; resolved
 // at render time inside `buildBackendOptions`.
-const MODALITY_KEYS = ['text', 'asr', 'tts', 'image', 'video', '3d', '3d_animation', 'embeddings', 'reranker', 'detection', 'vad']
+const MODALITY_KEYS = ['text', 'asr', 'tts', 'image', 'video', '3d', '3d_animation', 'motion', 'embeddings', 'reranker', 'detection', 'vad']
 
 // buildBackendOptions groups known backends by modality and tags
 // auto_detect=false entries with a muted "manual pick" badge so users
@@ -148,6 +148,8 @@ export default function ImportModel() {
   const [showOptions, setShowOptions] = useState(() => {
     try { return localStorage.getItem('import-form-options') === 'open' } catch { return false }
   })
+
+  const optionsToggleRef = useRef(null)
 
   const [importUri, setImportUri] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -279,28 +281,26 @@ export default function ImportModel() {
     pollRef.current = setInterval(async () => {
       try {
         const data = await modelsApi.getJobStatus(jobId)
-        if (data.completed) {
+        // Failure is classified before completion: a failed or cancelled
+        // job also sets `processed`. Shared with the model editor.
+        const status = classifyImportJob(data)
+        if (status.state === 'failed') {
           transferRateRef.current.reset(jobId)
           clearInterval(pollRef.current)
           pollRef.current = null
           setIsSubmitting(false)
           setJob(null)
-          setDone({ name: data.gallery_element_name || '' })
-          addToast(t('toasts.imported'), 'success')
+          addToast(t('toasts.importFailed', { message: status.message }), 'error')
           return
         }
-        if (data.error || (data.message && data.message.startsWith('error:'))) {
+        if (status.state === 'done') {
           transferRateRef.current.reset(jobId)
           clearInterval(pollRef.current)
           pollRef.current = null
           setIsSubmitting(false)
           setJob(null)
-          let msg = 'Unknown error'
-          if (typeof data.error === 'string') msg = data.error
-          else if (data.error?.message) msg = data.error.message
-          else if (data.message) msg = data.message
-          if (msg.startsWith('error: ')) msg = msg.substring(7)
-          addToast(t('toasts.importFailed', { message: msg }), 'error')
+          setDone({ name: status.name })
+          addToast(t('toasts.imported'), 'success')
           return
         }
         // Keep the whole status. /api/operations carries the same job (the
@@ -407,12 +407,22 @@ export default function ImportModel() {
     if (!yamlContent.trim()) { addToast(t('toasts.noYaml'), 'error'); return }
     setIsSubmitting(true)
     try {
-      await modelsApi.importConfig(yamlContent, 'application/x-yaml')
+      const result = await modelsApi.importConfig(yamlContent, 'application/x-yaml')
+      // A config referencing remote assets comes back as a queued job
+      // (same shape as the URI import) and startJobPolling owns the
+      // submitting state until the job ends; a config-only import
+      // completes synchronously and navigates straight to the model list.
+      const jobId = result?.uuid || result?.ID
+      if (jobId) {
+        addToast(t('toasts.started'), 'success')
+        startJobPolling(jobId)
+        return
+      }
       addToast(t('toasts.importedYaml'), 'success')
       navigate('/app/models?view=installed')
+      setIsSubmitting(false)
     } catch (err) {
       addToast(t('toasts.importFailed', { message: err.message }), 'error')
-    } finally {
       setIsSubmitting(false)
     }
   }
@@ -842,7 +852,11 @@ export default function ImportModel() {
                     </dd>
                   </dl>
                   <div className="import-found__acts">
-                    <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm" onClick={() => setShowOptions(true)} data-testid="import-adjust">
+                    <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm" onClick={() => {
+                      setShowOptions(true)
+                      optionsToggleRef.current?.focus()
+                      optionsToggleRef.current?.scrollIntoView({ block: 'start' })
+                    }} aria-controls="import-options-panel" aria-expanded={showOptions} data-testid="import-adjust">
                       <Icon name="sliders" /> {t('found.adjust')}
                     </button>
                   </div>
@@ -855,21 +869,12 @@ export default function ImportModel() {
                   </header>
                   <pre className="import-preview__code dk-mono" data-testid="import-preview-code">{requestText(request)}</pre>
                 </section>
-
-                <section className="bt-block" aria-labelledby="import-checks-title">
-                  <header className="bt-block__head">
-                    <h2 className="bt-h2" id="import-checks-title">{t('checks.heading')}</h2>
-                    <p className="dk-hint">{t('checks.note')}</p>
-                  </header>
-                  <div className="dk-card bt-checks-card">
-                    <Checks checks={checks} isAdmin label={t('checks.heading')} testId="import-checks" />
-                  </div>
-                </section>
               </>
             )}
 
             <div className="import-options">
               <button
+                ref={optionsToggleRef}
                 type="button"
                 className="import-disclosure"
                 data-testid="import-options-toggle"
@@ -883,6 +888,18 @@ export default function ImportModel() {
               </button>
               {showOptions && renderOptions()}
             </div>
+
+            {source && !done && !job && !isSubmitting && (
+              <section className="bt-block" aria-labelledby="import-checks-title">
+                <header className="bt-block__head">
+                  <h2 className="bt-h2" id="import-checks-title">{t('checks.heading')}</h2>
+                  <p className="dk-hint">{t('checks.note')}</p>
+                </header>
+                <div className="dk-card bt-checks-card">
+                  <Checks checks={checks} isAdmin label={t('checks.heading')} testId="import-checks" />
+                </div>
+              </section>
+            )}
 
             {!done && (
             <div className="bt-bar" data-testid="import-bar">
@@ -902,7 +919,7 @@ export default function ImportModel() {
                   aria-busy={isSubmitting || undefined}
                 >
                   {isSubmitting
-                    ? <><LoadingSpinner size="sm" /> {t('actions.importing')}</>
+                    ? t('actions.importing')
                     : <><Icon name="import" /> {t('actions.import')}</>}
                 </button>
               </div>
@@ -935,7 +952,7 @@ export default function ImportModel() {
                 aria-busy={isSubmitting || undefined}
               >
                 {isSubmitting
-                  ? <><LoadingSpinner size="sm" /> {t('actions.saving')}</>
+                  ? t('actions.saving')
                   : <><Icon name="plus" /> {t('actions.create')}</>}
               </button>
             </div>

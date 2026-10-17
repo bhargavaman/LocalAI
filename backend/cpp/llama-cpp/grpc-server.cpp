@@ -63,6 +63,7 @@
 #include "thread_params.h"
 #include "parallel_params.h"
 #include "message_content.h"
+#include "moe_cache_option.h"
 #include "passthrough_options.h"
 #include "stream_peer.h"
 #include "tts_request_options.h"
@@ -108,6 +109,12 @@ using grpc::Status;
 // requests without a matching "authorization: Bearer <token>" metadata header.
 
 // Cached auth token — empty means auth is disabled.
+// Newer llama.cpp returns common_chat_params::prompt as a common_chat_prompt
+// (use .str()); older forks such as turboquant still return std::string.
+static inline std::string chat_prompt_str(const std::string & p) { return p; }
+template <typename T>
+static inline std::string chat_prompt_str(const T & p) { return p.str(); }
+
 static std::string g_grpc_auth_token;
 
 // Minimal constant-time comparison (avoids OpenSSL dependency)
@@ -1158,6 +1165,21 @@ static void params_parse(server_context& /*ctx_server*/, const backend::ModelOpt
             if (enable) {
                 params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
             }
+        } else if (!strcmp(optname, "moe_cache_mib")) {
+            // GPU cache for MoE experts kept in host memory (upstream --moe-cache-mib).
+            // Whole MiB, off (0) by default; invalid values keep the default.
+            if (optval != NULL) {
+                const auto bytes = llama_grpc::parse_moe_cache_bytes(optval_str);
+                if (!bytes) {
+                    SRV_WRN("moe_cache_mib: ignoring invalid value '%s' (expected a non-negative integer in MiB)\n", optval_str.c_str());
+                } else {
+#if LOCALAI_HAS_MOE_CACHE
+                    params.moe_cache_size = *bytes;
+#else
+                    SRV_WRN("%s", "moe_cache_mib: this llama.cpp build has no MoE cache, ignoring\n");
+#endif
+                }
+            }
         } else if (!strcmp(optname, "n_cpu_moe")) {
             if (optval != NULL) {
                 try {
@@ -1783,6 +1805,9 @@ public:
 
             std::string prompt_str;
             std::vector<raw_buffer> files; // Declare files early so it's accessible in both branches
+#if LOCALAI_HAS_CHAT_SESSION
+            common_chat_session chat_session;
+#endif
             // Handle chat templates when UseTokenizerTemplate is enabled and Messages are provided
             if (request->usetokenizertemplate() && request->messages_size() > 0 && ctx_server.impl->chat_params.tmpls != nullptr) {
                 // Convert proto Messages to JSON format compatible with oaicompat_chat_params_parse
@@ -2038,7 +2063,12 @@ public:
                     }
                 }
 
+#if LOCALAI_HAS_CHAT_SESSION
+                json parsed_data = oaicompat_chat_params_parse(
+                        ctx_server.impl->vocab, body_json, ctx_server.impl->chat_params, files, chat_session);
+#else
                 json parsed_data = oaicompat_chat_params_parse(body_json, ctx_server.impl->chat_params, files);
+#endif
 
                 // Debug: Log tools after template processing
                 if (parsed_data.contains("tools")) {
@@ -2158,6 +2188,10 @@ public:
                         ctx_server.get_meta().logit_bias_eog,
                         data);
 #endif
+#if LOCALAI_HAS_CHAT_SESSION
+                // The parser now keeps grammar, stops and message spans in the session.
+                task.apply_chat_session(chat_session);
+#endif
                 task.id_slot = json_value(data, "id_slot", -1);
 
                 // OAI-compat: enable autoparser (PEG-based chat parsing) so that
@@ -2171,7 +2205,11 @@ public:
                 tasks.push_back(std::move(task));
             }
 
+#if LOCALAI_HAS_CHAT_SESSION
+            rd.post_tasks(std::move(tasks), chat_session);
+#else
             rd.post_tasks(std::move(tasks));
+#endif
         } catch (const std::exception & e) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
         }
@@ -2368,6 +2406,9 @@ public:
 
             std::string prompt_str;
             std::vector<raw_buffer> files; // Declare files early so it's accessible in both branches
+#if LOCALAI_HAS_CHAT_SESSION
+            common_chat_session chat_session;
+#endif
             // Handle chat templates when UseTokenizerTemplate is enabled and Messages are provided
             if (request->usetokenizertemplate() && request->messages_size() > 0 && ctx_server.impl->chat_params.tmpls != nullptr) {
                 // Convert proto Messages to JSON format compatible with oaicompat_chat_params_parse
@@ -2624,7 +2665,12 @@ public:
                     }
                 }
 
+#if LOCALAI_HAS_CHAT_SESSION
+                json parsed_data = oaicompat_chat_params_parse(
+                        ctx_server.impl->vocab, body_json, ctx_server.impl->chat_params, files, chat_session);
+#else
                 json parsed_data = oaicompat_chat_params_parse(body_json, ctx_server.impl->chat_params, files);
+#endif
 
                 // Debug: Log tools after template processing
                 if (parsed_data.contains("tools")) {
@@ -2747,6 +2793,10 @@ public:
                         ctx_server.get_meta().logit_bias_eog,
                         data);
 #endif
+#if LOCALAI_HAS_CHAT_SESSION
+                // The parser now keeps grammar, stops and message spans in the session.
+                task.apply_chat_session(chat_session);
+#endif
                 task.id_slot = json_value(data, "id_slot", -1);
 
                 // OAI-compat: enable autoparser (PEG-based chat parsing) so that
@@ -2758,7 +2808,11 @@ public:
                 tasks.push_back(std::move(task));
             }
 
+#if LOCALAI_HAS_CHAT_SESSION
+            rd.post_tasks(std::move(tasks), chat_session);
+#else
             rd.post_tasks(std::move(tasks));
+#endif
         } catch (const std::exception & e) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
         }
@@ -3791,7 +3845,7 @@ public:
             dummy_inputs.use_jinja = params_base.use_jinja;
             
             const auto rendered = common_chat_templates_apply(ctx_server.impl->chat_params.tmpls.get(), dummy_inputs);
-            rendered_template = rendered.prompt;
+            rendered_template = chat_prompt_str(rendered.prompt);
         }
         
         response->set_rendered_template(rendered_template);
