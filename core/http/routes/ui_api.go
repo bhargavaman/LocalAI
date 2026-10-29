@@ -5,6 +5,7 @@ import "os"
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/http/auth"
 	"github.com/mudler/LocalAI/core/http/endpoints/localai"
+	"github.com/mudler/LocalAI/core/http/middleware"
 	"github.com/mudler/LocalAI/core/p2p"
 	"github.com/mudler/LocalAI/core/schema"
 	"github.com/mudler/LocalAI/core/services/galleryop"
@@ -58,6 +60,7 @@ var usecaseFilters = map[string]config.ModelConfigUsecase{
 	config.UsecaseEmbeddings:          config.FLAG_EMBEDDINGS,
 	config.UsecaseRerank:              config.FLAG_RERANK,
 	config.UsecaseDetection:           config.FLAG_DETECTION,
+	config.UsecaseForecast:            config.FLAG_FORECAST,
 	config.UsecaseVAD:                 config.FLAG_VAD,
 	config.UsecaseAudioTransform:      config.FLAG_AUDIO_TRANSFORM,
 	config.UsecaseDiarization:         config.FLAG_DIARIZATION,
@@ -840,6 +843,13 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			// Source="registry-only" marks models adopted from the cluster that
 			// have no local config yet (ghosts that the reconciler discovered).
 			Source string `json:"source,omitempty"`
+			// MCP reports that the model config declares MCP servers and MCP is
+			// enabled on this instance. Non-admin chat users cannot read the
+			// model config (config-json is admin-only), so this is how the chat
+			// UI learns it may offer server selection to users holding the
+			// `mcp` feature. Server names and commands stay behind
+			// /v1/mcp/servers/:model, which is gated by that feature.
+			MCP bool `json:"mcp,omitempty"`
 		}
 
 		// Join with the node registry when we have one (distributed mode). A
@@ -882,6 +892,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 				Pinned:           cfg.IsPinned(),
 				VoiceCloning:     config.VoiceCloningForModel(&cfg),
 				LoadedOn:         loadedByModel[cfg.Name],
+				MCP:              !appConfig.DisableMCP && cfg.MCP.HasMCPServers(),
 			})
 		}
 		for _, name := range modelsWithoutConfig {
@@ -1054,6 +1065,10 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		variant := c.QueryParam("variant")
 		xlog.Debug("API job submitted to install", "galleryID", galleryID, "variant", variant)
 
+		if refused, err := localai.RefuseModelWithoutBackend(c, appConfig, appConfig.Galleries, galleryID, variant, galleryService.BackendManager().BackendAvailable); refused {
+			return err
+		}
+
 		id, err := uuid.NewUUID()
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]any{
@@ -1167,8 +1182,15 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		}
 
 		_, err = gallery.InstallModel(context.Background(), appConfig.SystemState, model.Name, &config, model.Overrides, nil, false,
-			gallery.WithArtifactMaterializer(appConfig.ModelArtifactMaterializer))
+			gallery.WithArtifactMaterializer(appConfig.ModelArtifactMaterializer),
+			gallery.WithBackendAvailability(galleryService.BackendManager().BackendAvailable))
 		if err != nil {
+			if errors.Is(err, gallery.ErrBackendInstallDisabled) {
+				return c.JSON(http.StatusConflict, map[string]any{
+					"error": err.Error(),
+					"code":  "backend_not_installed",
+				})
+			}
 			return c.JSON(http.StatusInternalServerError, map[string]any{
 				"error": err.Error(),
 			})
@@ -1542,7 +1564,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			"jobID":   uid,
 			"message": "Backend installation started",
 		})
-	}, adminMiddleware)
+	}, adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
 
 	// Install backend from external source (OCI image, URL, or path)
 	app.POST("/api/backends/install-external", func(c echo.Context) error {
@@ -1605,7 +1627,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			"jobID":   uid,
 			"message": "External backend installation started",
 		})
-	}, adminMiddleware)
+	}, adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
 
 	app.POST("/api/backends/delete/:id", func(c echo.Context) error {
 		backendID := c.Param("id")
@@ -1774,7 +1796,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			"statusUrl": fmt.Sprintf("/api/backends/job/%s", uid),
 			"message":   "Backend upgrade started",
 		})
-	}, adminMiddleware)
+	}, adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
 
 	// P2P APIs
 	app.GET("/api/p2p/workers", func(c echo.Context) error {

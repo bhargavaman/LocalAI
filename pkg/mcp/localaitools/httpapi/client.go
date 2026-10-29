@@ -413,6 +413,19 @@ func (c *Client) ListKnownBackends(ctx context.Context) ([]schema.KnownBackend, 
 	return out, nil
 }
 
+func (c *Client) ListBackendLibraryUpdates(ctx context.Context) ([]localaitools.BackendLibraryUpdate, error) {
+	var resp struct {
+		Updates []localaitools.BackendLibraryUpdate `json:"updates"`
+	}
+	if err := c.do(ctx, http.MethodGet, routeBackendsLibraryUpdates, nil, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Updates == nil {
+		resp.Updates = []localaitools.BackendLibraryUpdate{}
+	}
+	return resp.Updates, nil
+}
+
 func (c *Client) InstallBackend(ctx context.Context, req localaitools.InstallBackendRequest) (string, error) {
 	body := map[string]any{"id": req.BackendName}
 	if req.GalleryName != "" {
@@ -426,6 +439,19 @@ func (c *Client) InstallBackend(ctx context.Context, req localaitools.InstallBac
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+func (c *Client) InstallLibraryBackend(ctx context.Context, req localaitools.InstallLibraryBackendRequest) (*localaitools.InstallLibraryBackendResult, error) {
+	body := map[string]any{"sourceId": req.SourceID, "name": req.Name, "version": req.Version}
+	var resp struct {
+		Status   string `json:"status"`
+		Name     string `json:"name"`
+		SourceID string `json:"sourceId"`
+	}
+	if err := c.do(ctx, http.MethodPost, routeBackendsLibraryInstall, body, &resp); err != nil {
+		return nil, err
+	}
+	return &localaitools.InstallLibraryBackendResult{Status: resp.Status, Name: resp.Name, SourceID: resp.SourceID}, nil
 }
 
 func (c *Client) UpgradeBackend(ctx context.Context, name string) (string, error) {

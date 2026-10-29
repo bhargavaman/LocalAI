@@ -12,7 +12,7 @@ Besides llama based models, LocalAI is compatible also with other architectures.
 
 LocalAI will attempt to automatically load models which are not explicitly configured for a specific backend. You can specify the backend to use by configuring a model with a YAML file. See [the advanced section]({{%relref "advanced" %}}) for more details.
 
-All backends listed here can be installed on demand from the [Backend Gallery]({{%relref "features/backends" %}}). The exact set of acceleration variants published for each backend is defined in [`backend/index.yaml`](https://github.com/mudler/LocalAI/blob/master/backend/index.yaml).
+All backends listed here can be installed on demand from the [Backend Gallery]({{%relref "features/backends" %}}). The exact set of acceleration variants published for each backend is defined in the backend library, [`gallery/backends/index.yaml`](https://github.com/mudler/LocalAI/blob/master/gallery/backends/index.yaml). [`backend/index.yaml`](https://github.com/mudler/LocalAI/blob/master/backend/index.yaml) is generated from it.
 
  {{% /notice %}}
 
@@ -77,9 +77,14 @@ All backends listed here can be installed on demand from the [Backend Gallery]({
 | [Kitten TTS](https://github.com/KittenML/KittenTTS) | Kitten TTS model | CPU, Metal |
 | [Supertonic](https://github.com/supertone-inc/supertonic) | Lightning-fast on-device multilingual TTS via ONNX | CPU |
 | [MLX-Audio](https://github.com/Blaizzy/mlx-audio) | Audio models on Apple Silicon | CPU, CUDA 12/13, Metal, Jetson L4T |
-| [liquid-audio](https://github.com/Liquid4All/liquid-audio) | LFM2 end-to-end speech-to-speech, ASR, and TTS | CPU, CUDA 12/13, ROCm, Intel SYCL, Jetson L4T |
 | [audio.cpp](https://github.com/0xShug0/audio.cpp) | Multi-family GGML audio engine: TTS, voice cloning and voice design (`supertonic`, `vibevoice`, `qwen3_tts`, `chatterbox` and more). See [audio.cpp backend](/features/audio-cpp/) | CPU, CUDA 12/13, Metal |
 | [NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) | NVIDIA MagpieTTS over NanoCodec, served by the same backend as Nemotron ASR. See [NeMo-Speech.cpp backend](/features/nemo-speech-cpp/) | CPU, CUDA 12/13, Vulkan, Metal, Jetson L4T |
+
+## Speech-to-Speech
+
+| Backend | Description | Acceleration |
+|---------|-------------|-------------|
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Any-to-any audio models (for example [LFM3-Audio]({{%relref "features/openai-realtime" %}}), experimental) served through the Realtime API, with tool calls and transcripts. See [Speech-to-speech models]({{%relref "features/openai-realtime#speech-to-speech-models-experimental" %}}) | CPU, CUDA 12/13, ROCm, Intel SYCL, Vulkan, Metal, Jetson L4T |
 
 ## Music & Sound Generation
 
@@ -107,6 +112,7 @@ All backends listed here can be installed on demand from the [Backend Gallery]({
 | [locate-anything.cpp](https://github.com/mudler/locate-anything.cpp) | Open-vocabulary object detection and visual grounding (LocateAnything-3B) in C/C++ using GGML | CPU, CUDA 12/13, Intel SYCL, Vulkan, Jetson L4T |
 | [depth-anything.cpp](https://github.com/mudler/depth-anything.cpp) | Depth Anything 3 monocular metric depth + camera pose in C/C++ using GGML | CPU, CUDA 12/13, Intel SYCL, Vulkan, Jetson L4T |
 | [sam3.cpp](https://github.com/PABannier/sam3.cpp) | Segment Anything (SAM 3/2/EdgeTAM) with text/point/box prompts in C/C++ using GGML | CPU, CUDA 12/13, Intel SYCL, Vulkan, Jetson L4T |
+| [timestral.cpp](https://github.com/mudler/timestral.cpp) | Mistral Timestral time-series forecasting through `/v1/forecast`, in C/C++ using GGML | CPU (Linux amd64 and arm64) |
 | [face-detect.cpp](https://github.com/mudler/face-detect.cpp) | Native face detection, recognition, embedding, demographics and anti-spoofing (SCRFD/ArcFace, YuNet/SFace) in C/C++ using GGML | CPU, CUDA 12/13, ROCm, Intel SYCL, Vulkan, Metal, Jetson L4T |
 | [voice-detect.cpp](https://github.com/localai-org/voice-detect.cpp) | Native speaker (voice) recognition and voice analysis (ECAPA-TDNN, WeSpeaker, ERes2Net, CAM++, wav2vec2) in C/C++ using GGML | CPU, CUDA 12/13, ROCm, Intel SYCL, Vulkan, Metal, Jetson L4T |
 | [insightface](https://github.com/deepinsight/insightface) | Face verification, embedding, and anti-spoofing liveness (ONNX Runtime) | CPU, CUDA 12 |

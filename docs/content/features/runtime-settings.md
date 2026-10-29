@@ -80,6 +80,7 @@ You can configure these settings via the web UI or through environment variables
 
 - **Threads**: Number of threads used for parallel computation (recommended: number of physical cores)
 - **Context Size**: Default context size for models (default: `512`)
+- **Concurrent Backend Operations**: How many backend installs, upgrades and deletes run at once. `1` runs them one after the other (default: `1`, minimum `1`). Operations on the same backend never overlap, whatever the value. Model operations run in their own queue and are not held up by backend operations. In distributed mode the same limit bounds how many nodes receive one operation at the same time. The limit is per frontend. A change applies to operations that start after the change
 - **Artifact Download Concurrency**: Maximum number of artifact files downloaded at once. `1` downloads sequentially (default: `1`)
 - **F16**: Enable GPU acceleration using 16-bit floating point
 - **VRAM Budget**: Cap on VRAM used for model allocation (for example `80%` or `12GB`; empty means no cap). See [VRAM Management]({{%relref "advanced/vram-management" %}})
@@ -111,8 +112,8 @@ Changes to P2P settings automatically restart the P2P stack with the new configu
 
 Manage model and backend galleries:
 
-- **Model Galleries**: JSON array of gallery objects with `url` and `name` fields, plus an optional `mirrors` list of fallback URLs (see [Gallery mirrors]({{%relref "features/model-gallery#gallery-mirrors" %}}))
-- **Backend Galleries**: JSON array of backend gallery objects, which accept the same `mirrors` key
+- **Model Galleries**: a read-only list of the model library sources, with name, id, address, state, whether it is a default, and its mirrors. Change them in the **Manage libraries** panel of the Models page (see [Gallery mirrors]({{%relref "features/model-gallery#gallery-mirrors" %}}))
+- **Backend Galleries**: the same read-only list for backend library sources; change them in the **Manage libraries** panel of the Backends page
 - **Load and pre-warm galleries on boot**: Load model galleries and pre-warm their remote size and VRAM estimates when LocalAI starts. Disable this setting to skip both startup operations.
 - **Autoload Backend Galleries**: Automatically load backend galleries on startup
 
@@ -171,6 +172,7 @@ The `runtime_settings.json` file follows this structure:
   "threads": 8,
   "context_size": 2048,
   "artifact_download_concurrency": 4,
+  "max_concurrent_backend_operations": 2,
   "f16": false,
   "debug": false,
   "cors": true,

@@ -1,13 +1,18 @@
 /* eslint-disable no-unused-vars -- components used only inside JSX look unused to this config, which has no eslint-plugin-react */
+import KindLibraries from '../components/catalog/KindLibraries'
+import { rowInSource } from '../components/catalog/catalogState'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Link, useOutletContext, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { backendsApi, modelsApi, nodesApi } from '../utils/api'
+import { apiUrl } from '../utils/basePath'
+import { FEATURE_BACKEND_INSTALL } from '../utils/capabilities'
 import { useDebouncedCallback } from '../hooks/useDebounce'
 import { useOperations } from '../hooks/useOperations'
 import { useDistributedMode } from '../hooks/useDistributedMode'
 import { CANCEL_UNDO_MS, useUndoableCancel } from '../hooks/useUndoableCancel'
-import { backendState, opForBackend, sortInstalled, versionLabel } from '../utils/backendRows'
+import { backendState, libraryOrigin, opForBackend, shortDigest, sortInstalled, versionLabel } from '../utils/backendRows'
+import { addonsApi } from '../utils/addonsClient'
 import { backendDependents, recommendedBackend } from '../utils/operateStatus'
 import { renderMarkdown, stripMarkdown } from '../utils/markdown'
 import { safeHref } from '../utils/url'
@@ -16,9 +21,15 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import NodeDistributionChip from '../components/NodeDistributionChip'
 import NodeInstallPicker from '../components/NodeInstallPicker'
 import BackendsTable from '../components/operate/BackendsTable'
+import { InstallSteps } from '../components/addons/AddonBits'
 import HomeUndoToast from '../components/home/HomeUndoToast'
 import LoadingSpinner from '../components/LoadingSpinner'
 import Icon from '../components/Icon'
+import UpdateReviewSheet from '../components/UpdateReviewSheet'
+import { runBatch } from '../utils/updateReview'
+import CatalogSearchBox from '../components/catalog/CatalogSearchBox'
+import CatalogPager from '../components/catalog/CatalogPager'
+import CatalogEmpty from '../components/catalog/CatalogEmpty'
 import './operate.css'
 
 const CATALOG_FILTERS = [
@@ -61,16 +72,53 @@ export default function Backends() {
   const [sortOrder, setSortOrder] = useState('asc')
   const [page, setPage] = useState(1)
   const [showManualInstall, setShowManualInstall] = useState(false)
+  // Servers run with --disable-backend-install answer 403 to every install
+  // and upgrade; the page shows that up front instead of after the click.
+  const [installEnabled, setInstallEnabled] = useState(true)
+
+  useEffect(() => {
+    fetch(apiUrl('/api/features'))
+      .then(r => r.json())
+      .then(data => setInstallEnabled(data[FEATURE_BACKEND_INSTALL] !== false))
+      .catch(() => {})
+  }, [])
   const [manualUri, setManualUri] = useState('')
   const [manualName, setManualName] = useState('')
   const [manualAlias, setManualAlias] = useState('')
   const [manualError, setManualError] = useState('')
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [allBackends, setAllBackends] = useState([])
+  const [librarySource, setLibrarySource] = useState(null)
   const [installed, setInstalled] = useState([])
+  const [inventories, setInventories] = useState({})
+  const [nodeErrors, setNodeErrors] = useState({})
+  const [removalPending, setRemovalPending] = useState(false)
+  const [refreshError, setRefreshError] = useState(false)
+  const removalLock = useRef(null)
+  // Ref guards same-tick callbacks; state also rerenders the exact target controls.
+  const targetInstallLocks = useRef(new Set())
+  const [targetInstalls, setTargetInstalls] = useState(() => new Set())
+  const targetKey = (nodeID, name) => JSON.stringify([nodeID, name])
+  const targetInstalling = (nodeID, name) => targetInstallLocks.current.has(targetKey(nodeID, name))
+  const targetBusy = (nodeID, name) => rowConflict(name)
+    || targetInstalls.has(targetKey(nodeID, name))
+    || removalLock.current === targetKey(nodeID, name)
+  const inventoryRequests = useRef({})
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false; inventoryRequests.current = {} }
+  }, [])
   const [models, setModels] = useState([])
   const [upgrades, setUpgrades] = useState({})
-  const [upgradingAll, setUpgradingAll] = useState(false)
+  // Newer builds of library backends, by name, and the library updates the
+  // administrator started from this page: name -> { job } while one runs.
+  const [libUpdates, setLibUpdates] = useState({})
+  const [libWork, setLibWork] = useState({})
+  const [libReload, setLibReload] = useState(0)
+  // The review sheet for pending updates: { preselect } while open. Nothing is
+  // upgraded until the administrator confirms in it.
+  const [review, setReview] = useState(null)
   const [checking, setChecking] = useState(false)
   const [preferDevLoaded, setPreferDevLoaded] = useState(false)
   const [preferDev, setPreferDev] = useState(false)
@@ -149,8 +197,10 @@ export default function Backends() {
         setPreferDev(true)
         setPreferDevLoaded(true)
       }
+      return true
     } catch (err) {
       addToast(t('backends.loadFailed', { message: err.message }), 'error')
+      return false
     } finally {
       loadedOnce.current = true
       setCatalogReady(true)
@@ -166,15 +216,23 @@ export default function Backends() {
       setInstalledLoading(true)
       const data = await backendsApi.listInstalled()
       setInstalled(Array.isArray(data) ? data : [])
-      setGlobalError('')
-    } catch (err) {
-      setInstalled([])
-      setGlobalError(t('backends.installedLoadFailed', { message: err.message }))
-    } finally {
       installedOnce.current = true
+      setGlobalError('')
+      setSearchParams(prev => {
+        const selected = prev.get('backend')
+        if (prev.get('view') !== 'installed' || !selected || data.some(b => b.Name === selected)) return prev
+        const next = new URLSearchParams(prev)
+        next.delete('backend')
+        return next
+      }, { replace: true })
+      return true
+    } catch (err) {
+      setGlobalError(t('backends.installedLoadFailed', { message: err.message }))
+      return false
+    } finally {
       setInstalledLoading(false)
     }
-  }, [t])
+  }, [t, setSearchParams])
 
   // Install and delete change what is installed, so the lists are read again
   // whenever the set of operations changes.
@@ -185,6 +243,18 @@ export default function Backends() {
     modelsApi.listCapabilities().then(data => setModels(Array.isArray(data?.data) ? data.data : [])).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operations.length])
+
+  // Library backends are checked against the index their library cached. The
+  // route exists only where the add-on owner runs, so a failure is no update.
+  const hasLibraryBackend = installed.some(b => libraryOrigin(b))
+  useEffect(() => {
+    if (!hasLibraryBackend) { setLibUpdates({}); return undefined }
+    const ctl = new AbortController()
+    addonsApi.backends.updates(ctl.signal)
+      .then(list => setLibUpdates(Object.fromEntries(list.map(u => [u.name, u]))))
+      .catch(() => { if (!ctl.signal.aborted) setLibUpdates({}) })
+    return () => ctl.abort()
+  }, [hasLibraryBackend, installed, libReload])
 
   const catalogByName = useMemo(
     () => new Map(allBackends.map(b => [b.name || b.id, b])),
@@ -232,26 +302,158 @@ export default function Backends() {
 
   const handleInstallOnTarget = async (id) => {
     if (!targetNode) return
+    const node = { id: targetNode.id, name: targetNode.name }
+    const key = targetKey(node.id, id)
+    if (targetBusy(node.id, id) || targetInstalling(node.id, id)) return
+    targetInstallLocks.current.add(key)
+    setTargetInstalls(new Set(targetInstallLocks.current))
     setError(id, '')
     try {
-      await nodesApi.installBackend(targetNode.id, id)
-      addToast(t('backends.installingOn', { name: id, node: targetNode.name }), 'info')
-      setTimeout(() => { fetchBackends(); fetchInstalled(); refetchNodes() }, 1200)
+      await nodesApi.installBackend(node.id, id)
+      addToast(t('backends.installingOn', { name: id, node: node.name }), 'info')
+      await Promise.all([loadInventory(node.id), refreshBackendData()])
     } catch (err) {
-      setError(id, t('backends.dispatchFailed', { node: targetNode.name, message: err.message }))
+      setError(id, t('backends.dispatchFailed', { node: node.name, message: err.message }))
+    } finally {
+      targetInstallLocks.current.delete(key)
+      if (mounted.current) setTargetInstalls(new Set(targetInstallLocks.current))
     }
   }
 
-  const handleRemoveFromTarget = async (name) => {
-    setError(name, '')
+  // Inventory is page-local and fetched only for the expanded row's scoped nodes.
+  const loadInventory = useCallback(async (nodeID) => {
+    const request = Symbol(nodeID)
+    inventoryRequests.current[nodeID] = request
+    setInventories(prev => ({ ...prev, [nodeID]: { status: 'loading' } }))
     try {
-      await nodesApi.deleteBackend(targetNode.id, name)
-      addToast(t('backends.removedFrom', { name, node: targetNode.name }), 'success')
-      setTimeout(() => { fetchBackends(); fetchInstalled(); refetchNodes() }, 600)
+      const data = await nodesApi.getBackends(nodeID)
+      if (!Array.isArray(data)) throw new Error(t('backends.nodeRemoval.inventoryUnknown'))
+      if (mounted.current && inventoryRequests.current[nodeID] === request) {
+        setInventories(prev => ({ ...prev, [nodeID]: { status: 'success', data } }))
+      }
+      return data
     } catch (err) {
-      setError(name, t('backends.removeFailed', { message: err.message }))
+      if (mounted.current && inventoryRequests.current[nodeID] === request) {
+        setInventories(prev => ({ ...prev, [nodeID]: { status: 'error', error: err.message } }))
+      }
+      return null
+    }
+  }, [t])
+
+  const visibleRefs = activeView === 'installed'
+    ? (installed.find(b => b.Name === selectedName)?.Nodes || installed.find(b => b.Name === selectedName)?.nodes || [])
+    : (allBackends.find(b => (b.name || b.id) === selectedName)?.nodes || [])
+  const visibleNodeIDs = distributedEnabled ? [...new Set(visibleRefs.map(n => n.node_id ?? n.NodeID))]
+    .filter(id => !targetNodeId || id === targetNodeId) : []
+  const inventoryScope = JSON.stringify([selectedName, activeView, visibleNodeIDs, clusterNodes])
+  useEffect(() => {
+    const ids = JSON.parse(inventoryScope)[2]
+    ids.forEach(id => {
+      const node = clusterNodes.find(n => n.id === id)
+      if (node?.node_type === 'backend' && node.status === 'healthy') loadInventory(id)
+    })
+    return () => { inventoryRequests.current = {} }
+    // Responses from a previous expanded row or node status are ignored.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventoryScope, loadInventory])
+
+  const nodeReason = (node, data, name) => {
+    if (!node || node.node_type !== 'backend' || node.status !== 'healthy') return t('backends.nodeRemoval.unreachable')
+    const entry = data?.find(b => b.name === name)
+    if (!entry) return t('backends.nodeRemoval.absent')
+    if (entry.is_system !== false || entry.is_meta !== false) return t('backends.nodeRemoval.protected')
+    return ''
+  }
+  const rowConflict = (name) => {
+    const state = backendState({ installed: true, op: opForBackend(operations, name) })
+    return pending.has(name) || ['installing', 'queued', 'removing'].includes(state.kind)
+  }
+  // Async confirmation must use current operation state, not the dialog's closure.
+  const currentRowConflict = useRef(rowConflict)
+  currentRowConflict.current = rowConflict
+
+  const refreshBackendData = async (afterDeletion = false) => {
+    const results = await Promise.all([fetchBackends(), fetchInstalled(), refetchNodes()])
+    const failed = results.some(result => result === false)
+    setRefreshError(previous => failed ? (afterDeletion || previous === 'deletion' ? 'deletion' : 'refresh') : false)
+    return !failed
+  }
+
+  const confirmNodeRemoval = async (snapshot) => {
+    if (removalLock.current || targetInstalling(snapshot.nodeID, snapshot.backendName)) return
+    const key = JSON.stringify([snapshot.nodeID, snapshot.backendName])
+    removalLock.current = key
+    setRemovalPending(true)
+    setNodeErrors(prev => ({ ...prev, [key]: '' }))
+    try {
+      // Refresh status too: a node can drain or disappear while the dialog is open.
+      const nodes = await nodesApi.list()
+      const node = nodes.find(n => n.id === snapshot.nodeID)
+      const data = await loadInventory(snapshot.nodeID)
+      const reason = nodeReason(node, data, snapshot.backendName)
+      if (!data || reason || currentRowConflict.current(snapshot.backendName) || targetInstalling(snapshot.nodeID, snapshot.backendName)) {
+        throw new Error(reason || t('backends.nodeRemoval.inventoryUnknown'))
+      }
+      if (!mounted.current) return
+      await nodesApi.deleteBackend(snapshot.nodeID, snapshot.backendName)
+      if (!mounted.current) return
+      setConfirmDialog(null)
+      addToast(t('backends.removedFrom', { name: snapshot.backendName, node: snapshot.nodeName }), 'success')
+      const inventory = await loadInventory(snapshot.nodeID)
+      const refreshed = await refreshBackendData(true)
+      if (!inventory || !refreshed) setRefreshError('deletion')
+    } catch (err) {
+      if (!mounted.current) return
+      setConfirmDialog(null)
+      setNodeErrors(prev => ({ ...prev, [key]: t('backends.nodeRemoval.failed', { name: snapshot.backendName, node: snapshot.nodeName, message: err.message }) }))
+      await loadInventory(snapshot.nodeID)
+    } finally {
+      removalLock.current = null
+      if (mounted.current) setRemovalPending(false)
     }
   }
+
+  const handleRemoveFromTarget = (snapshot) => {
+    if (removalLock.current || rowConflict(snapshot.backendName) || targetInstalling(snapshot.nodeID, snapshot.backendName)) return
+    setConfirmDialog({
+      title: t('backends.nodeRemoval.title', { name: snapshot.backendName, node: snapshot.nodeName }),
+      message: <>{t('backends.nodeRemoval.message')}{usedBy(snapshot.backendName)}</>,
+      confirmLabel: t('backends.remove'),
+      onConfirm: () => confirmNodeRemoval(snapshot),
+    })
+  }
+
+  const nodeControls = (name, refs) => (
+    <div className="stack">
+      {refs.filter(ref => !targetNodeId || (ref.node_id ?? ref.NodeID) === targetNodeId).map(ref => {
+        const nodeID = ref.node_id ?? ref.NodeID
+        const node = clusterNodes.find(n => n.id === nodeID)
+        const nodeName = node?.name || ref.node_name || ref.NodeName || nodeID
+        const inventory = inventories[nodeID]
+        const key = JSON.stringify([nodeID, name])
+        const reason = inventory?.status === 'success'
+          ? nodeReason(node, inventory.data, name)
+          : t(inventory?.status === 'error' ? 'backends.nodeRemoval.inventoryError' : 'backends.nodeRemoval.inventoryUnknown')
+        return (
+          <div className="stack" key={nodeID}>
+            <div className="hstack">
+              <span className="dk-mono">{nodeName}</span>
+              <span className="text-note">{reason || t('backends.nodeRemoval.managed')}</span>
+              <button type="button" className="dk-btn dk-btn--danger dk-btn--sm"
+                disabled={!!reason || rowConflict(name) || targetInstalling(nodeID, name) || removalPending}
+                onClick={() => handleRemoveFromTarget({ nodeID, nodeName, backendName: name })}>
+                <Icon name="trash" /> {t('backends.nodeRemoval.action', { node: nodeName })}
+              </button>
+              {inventory?.status === 'error' && <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm"
+                aria-label={t('backends.nodeRemoval.retry', { node: nodeName })}
+                onClick={() => loadInventory(nodeID)}>{t('backends.retry')}</button>}
+            </div>
+            {nodeErrors[key] && <div className="op-error" role="alert">{nodeErrors[key]}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
 
   const openPicker = (b, initialSelection = []) => {
     setPickerBackend(b)
@@ -267,16 +469,61 @@ export default function Backends() {
       .map(n => n.id)
   }
 
-  const handleUpgrade = async (name) => {
-    setError(name, '')
-    markPending(name, true)
+  // An Upgrade button opens the review sheet with its backend checked; it
+  // starts nothing by itself.
+  const handleUpgrade = (name) => setReview({ preselect: [name] })
+
+  const reviewItems = useMemo(() => Object.keys(upgrades).sort().map(name => ({
+    key: name,
+    name,
+    from: versionLabel(upgrades[name].installed_version),
+    to: versionLabel(upgrades[name].available_version),
+    blocked: [],
+  })), [upgrades])
+
+  // One backend upgrade is a request that queues the job; the job itself runs
+  // as an operation (see Activity). A request that fails does not stop the
+  // others in the batch.
+  const runReview = (chosen, onProgress) => runBatch(chosen, async (item) => {
+    markPending(item.key, true)
     try {
-      await backendsApi.upgrade(name)
-      addToast(t('backends.updateStarted', { name }), 'info')
+      await backendsApi.upgrade(item.key)
+      return { ok: true }
     } catch (err) {
-      setError(name, t('backends.updateFailed', { message: err.message }))
+      return { ok: false, message: err.message }
     } finally {
-      markPending(name, false)
+      markPending(item.key, false)
+    }
+  }, { onProgress })
+  const reviewSettled = (results) => {
+    for (const r of results) {
+      if (r.ok) addToast(t('backends.reviewDone', { name: r.key }), 'info')
+      else addToast(t('backends.reviewFailed', { name: r.key, message: r.message }), 'error')
+    }
+  }
+
+  // Installs the newer build the library lists. It is the administrator's own
+  // action; nothing here runs on its own. The host pins the image by the digest
+  // of the library entry and verifies it as for the first install.
+  const handleLibraryUpdate = async (name) => {
+    const update = libUpdates[name]
+    if (!update) return
+    setError(name, '')
+    setLibWork(w => ({ ...w, [name]: { job: { phase: 'resolving' }, signed: update.signed !== false } }))
+    try {
+      await addonsApi.backends.install(
+        { sourceId: update.sourceId, name, version: update.version }, undefined,
+        { onStatus: job => mounted.current && setLibWork(w => ({ ...w, [name]: { ...w[name], job } })) },
+      )
+      addToast(t('backends.library.updated', { name }), 'info')
+    } catch (err) {
+      if (mounted.current) setError(name, t('backends.library.updateFailed', { message: err.message }))
+    } finally {
+      if (mounted.current) {
+        setLibWork(w => { const next = { ...w }; delete next[name]; return next })
+        fetchInstalled()
+        setLibReload(n => n + 1)
+      }
     }
   }
 
@@ -290,29 +537,6 @@ export default function Backends() {
       setError(name, t('backends.reinstallFailed', { message: err.message }))
     } finally {
       markPending(name, false)
-    }
-  }
-
-  const handleUpgradeAll = async () => {
-    if (updateNames.length === 0) return
-    setUpgradingAll(true)
-    setGlobalError('')
-    try {
-      const failures = []
-      for (const name of updateNames) {
-        try {
-          await backendsApi.upgrade(name)
-        } catch (err) {
-          failures.push(t('backends.updateAllFailed', { name, message: err.message }))
-        }
-      }
-      if (failures.length > 0) {
-        setGlobalError(failures.join(' '))
-        return
-      }
-      addToast(t('backends.updateAllStarted', { count: updateNames.length }), 'info')
-    } finally {
-      setUpgradingAll(false)
     }
   }
 
@@ -334,7 +558,12 @@ export default function Backends() {
   // the backend they ask for and an installed meta backend names the concrete
   // one it points at, so both are read before asking, and the dialog says what
   // would stop working.
+  // Generic deletion can affect every node, so any targeted install of this
+  // build conflicts, even after navigation clears the selected node.
+  const deletionBlocked = (name) => removalLock.current || currentRowConflict.current(name)
+    || [...targetInstallLocks.current].some(key => JSON.parse(key)[1] === name)
   const handleDelete = async (name, how) => {
+    if (deletionBlocked(name)) return
     let dependents = { models: [], metas: [] }
     try {
       const data = await modelsApi.listCapabilities()
@@ -344,6 +573,7 @@ export default function Backends() {
     } catch {
       dependents = backendDependents(name, { models, installed })
     }
+    if (!mounted.current || deletionBlocked(name)) return
     setConfirmDialog({
       title: t('backends.deleteTitle'),
       message: (
@@ -367,6 +597,7 @@ export default function Backends() {
       confirmLabel: t('backends.delete'),
       onConfirm: async () => {
         setConfirmDialog(null)
+        if (deletionBlocked(name)) return
         setError(name, '')
         try {
           if (how === 'installed') await backendsApi.deleteInstalled(name)
@@ -431,6 +662,7 @@ export default function Backends() {
     // all" is on. Standalone backends stay visible.
     if (!showAll) result = result.filter(b => b.isMeta || !b.isAlias)
     if (!showDevelopment) result = result.filter(b => !b.isDevelopment)
+    if (librarySource) result = result.filter(b => rowInSource(b, librarySource))
     if (catalogFilter) {
       const f = catalogFilter.toLowerCase()
       result = result.filter(b => {
@@ -439,7 +671,7 @@ export default function Backends() {
       })
     }
     return result
-  }, [allBackends, showAll, showDevelopment, catalogFilter])
+  }, [allBackends, showAll, showDevelopment, catalogFilter, librarySource])
   const totalPages = Math.max(1, Math.ceil(catalogList.length / ITEMS_PER_PAGE))
   const catalogPage = catalogList.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE)
 
@@ -484,7 +716,7 @@ export default function Backends() {
     const op = opForBackend(operations, name, b.id)
     const upgrade = upgrades[name]
     const state = backendState({ installed: b.installed, upgrade, op })
-    const busy = pending.has(name)
+    const busy = pending.has(name) || removalPending
     const isNodeScoped = Boolean(targetNode)
     const onTarget = isNodeScoped && (b.nodes || []).some(n => (n.node_id ?? n.NodeID) === targetNode.id)
 
@@ -495,12 +727,16 @@ export default function Backends() {
         : null
     } else if (state.kind === 'removing') {
       action = null
+    } else if (!installEnabled) {
+      action = b.installed
+        ? null
+        : <span className="dk-badge" title={t('backends.installDisabledTitle')}><Icon name="lock" /> {t('backends.installDisabledShort')}</span>
     } else if (state.kind === 'failed') {
-      action = <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" onClick={() => handleInstall(name)} aria-label={t('backends.retryLabel', { name })}>{t('backends.retry')}</button>
+      action = <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" disabled={isNodeScoped ? targetBusy(targetNode.id, name) : busy} onClick={() => isNodeScoped ? handleInstallOnTarget(name) : handleInstall(name)} aria-label={t('backends.retryLabel', { name })}>{t('backends.retry')}</button>
     } else if (isNodeScoped) {
       action = onTarget
         ? null
-        : <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" data-testid="backends-install" onClick={() => handleInstallOnTarget(name)}><Icon name="download" /> {t('backends.installOnNode', { node: targetNode.name })}</button>
+        : <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" data-testid="backends-install" disabled={targetBusy(targetNode.id, name)} onClick={() => handleInstallOnTarget(name)}><Icon name="download" /> {t('backends.installOnNode', { node: targetNode.name })}</button>
     } else if (b.installed) {
       action = upgrade
         ? <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" disabled={busy} onClick={() => handleUpgrade(name)} aria-label={t('backends.updateLabel', { name })}>{t('backends.update')}</button>
@@ -552,12 +788,10 @@ export default function Backends() {
         <div className="bk-detail__acts">
           {isNodeScoped && onTarget && (
             <>
-              <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" onClick={() => handleInstallOnTarget(name)} title={t('backends.reinstallOn', { node: targetNode.name })}>
+              <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" disabled={targetBusy(targetNode.id, name)} onClick={() => handleInstallOnTarget(name)} title={t('backends.reinstallOn', { node: targetNode.name })}>
                 <Icon name="refresh" /> {t('backends.reinstall')}
               </button>
-              <button type="button" className="dk-btn dk-btn--danger dk-btn--sm" onClick={() => handleRemoveFromTarget(name)} title={t('backends.removeFrom', { node: targetNode.name })}>
-                <Icon name="trash" /> {t('backends.remove')}
-              </button>
+              {nodeControls(name, b.nodes || [])}
             </>
           )}
           {!isNodeScoped && b.installed && state.kind !== 'installing' && state.kind !== 'removing' && (
@@ -570,7 +804,7 @@ export default function Backends() {
               <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" disabled={busy} onClick={() => handleInstall(name)} title={t('backends.reinstall')}>
                 <Icon name="refresh" /> {t('backends.reinstall')}
               </button>
-              <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm bk-remove" onClick={() => handleDelete(name, 'catalog')} title={t('backends.delete')}>
+              <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm bk-remove" disabled={busy || !!deletionBlocked(name)} onClick={() => handleDelete(name, 'catalog')} title={t('backends.delete')}>
                 <Icon name="trash" /> {t('backends.remove')}
               </button>
             </>
@@ -605,6 +839,9 @@ export default function Backends() {
     const f = flagsFor(b)
     if (f.variant && !showAll) return false
     if (f.development && !showDevelopment) return false
+    // A library backend pins the library id; any other falls back to the
+    // gallery name its catalog row carries.
+    if (librarySource && libraryOrigin(b)?.id !== librarySource.id && !rowInSource(catalogByName.get(b.Name), librarySource)) return false
     return true
   })
   const hiddenVariants = showAll ? 0 : installed.filter(b => flagsFor(b).variant).length
@@ -629,9 +866,15 @@ export default function Backends() {
     const version = b.Metadata?.version || b.Version
     const catalog = catalogByName.get(name)
     const upgrade = upgrades[name]
+    const library = libraryOrigin(b)
+    const libraryUpdate = library ? libUpdates[name] : null
+    const work = libWork[name]
     const op = opForBackend(operations, name)
-    const state = backendState({ installed: true, upgrade, op })
-    const busy = pending.has(name) || state.kind === 'installing' || state.kind === 'queued' || state.kind === 'removing'
+    // While a library update runs, the row shows its progress like any install.
+    const state = work
+      ? { kind: 'installing', progress: Math.round(work.job?.progress || 0), cancellable: false }
+      : backendState({ installed: true, upgrade, op, libraryUpdate })
+    const busy = pending.has(name) || removalPending || state.kind === 'installing' || state.kind === 'queued' || state.kind === 'removing'
     const nodes = b.Nodes || b.nodes || []
 
     let action = null
@@ -641,6 +884,18 @@ export default function Backends() {
         : null
     } else if (b.IsSystem) {
       action = <span className="dk-badge" title={t('backends.protectedTitle')}><Icon name="lock" /> {t('backends.protected')}</span>
+    } else if (!installEnabled) {
+      // Update and reinstall acquire; delete does not.
+      action = (
+        <ActionMenu
+          compact
+          ariaLabel={t('backends.actionsFor', { name })}
+          triggerLabel={t('backends.actionsFor', { name })}
+          items={[
+            { key: 'delete', icon: 'trash', label: t('backends.deleteBackend'), danger: true, onClick: () => handleDelete(name, 'installed') },
+          ]}
+        />
+      )
     } else {
       action = (
         <>
@@ -649,14 +904,19 @@ export default function Backends() {
               {t('backends.update')}
             </button>
           )}
+          {!upgrade && libraryUpdate && (
+            <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" data-testid="backend-library-update" disabled={busy} onClick={() => handleLibraryUpdate(name)} aria-label={t('backends.updateLabel', { name })}>
+              {t('backends.update')}
+            </button>
+          )}
           <ActionMenu
             compact
             ariaLabel={t('backends.actionsFor', { name })}
             triggerLabel={t('backends.actionsFor', { name })}
             items={[
-              { key: 'reinstall', icon: 'refresh', label: t('backends.reinstallBackend'), onClick: () => handleReinstall(name), disabled: busy },
-              { divider: true },
-              { key: 'delete', icon: 'trash', label: t('backends.deleteBackend'), danger: true, onClick: () => handleDelete(name, 'installed') },
+              // A library backend is not in the gallery: a gallery reinstall by name would not find it.
+              ...(library ? [] : [{ key: 'reinstall', icon: 'refresh', label: t('backends.reinstallBackend'), onClick: () => handleReinstall(name), disabled: busy }, { divider: true }]),
+              { key: 'delete', icon: 'trash', label: t('backends.deleteBackend'), danger: true, disabled: busy, onClick: () => handleDelete(name, 'installed') },
             ]}
           />
         </>
@@ -666,24 +926,28 @@ export default function Backends() {
     const detail = (
       <div className="bk-detail" data-testid="backends-installed-pane">
         {errors[name] && <div className="op-error" role="alert"><Icon name="alert-circle" /> <span>{errors[name]}</span></div>}
+        {work && <InstallSteps job={work.job} signed={work.signed} />}
         {catalog?.description && <p className="bk-detail__desc">{stripMarkdown(catalog.description)}</p>}
         <dl className="dk-kv bk-facts">
           <dt>{t('backends.facts.version')}</dt><dd>{versionLabel(version) || '—'}</dd>
           {upgrade && (<><dt>{t('backends.facts.available')}</dt><dd>{versionLabel(upgrade.available_version) || t('backends.state.update')}</dd></>)}
-          <dt>{t('backends.facts.managed')}</dt><dd>{b.IsSystem ? t('backends.facts.system') : t('backends.facts.gallery')}</dd>
+          {libraryUpdate && (<><dt>{t('backends.facts.available')}</dt><dd data-testid="library-update-facts">{versionLabel(libraryUpdate.version)} <span className="dk-mono">{shortDigest(libraryUpdate.digest)}</span></dd></>)}
+          <dt>{t('backends.facts.managed')}</dt><dd>{b.IsSystem ? t('backends.facts.system') : library ? t('backends.facts.library') : t('backends.facts.gallery')}</dd>
+          {library && (<><dt>{t('backends.facts.library')}</dt><dd className="dk-mono" data-testid="library-id">{library.id}</dd></>)}
           {b.Metadata?.uri && (<><dt>{t('backends.facts.source')}</dt><dd className="bk-wrap-any">{b.Metadata.uri}</dd></>)}
-          {b.Metadata?.digest && (<><dt>{t('backends.facts.digest')}</dt><dd className="bk-wrap-any">{b.Metadata.digest}</dd></>)}
+          {b.Metadata?.digest && (<><dt>{library ? t('backends.facts.pinnedDigest') : t('backends.facts.digest')}</dt><dd className="bk-wrap-any">{b.Metadata.digest}</dd></>)}
           {b.Metadata?.installed_at && (<><dt>{t('backends.facts.installedAt')}</dt><dd>{b.Metadata.installed_at}</dd></>)}
         </dl>
         {distributedEnabled && nodes.length > 0 && (
           <div className="bk-onnodes">
             <span className="dk-eyebrow">{t('backends.installedOn')}</span>
             <NodeDistributionChip nodes={nodes} context="backends" compactThreshold={20} />
+            {nodeControls(name, nodes)}
           </div>
         )}
         {usedBy(name)}
         <div className="bk-detail__acts">
-          {!b.IsSystem && upgrade && (
+          {installEnabled && !b.IsSystem && upgrade && (
             <button type="button" className="dk-btn dk-btn--primary dk-btn--sm" disabled={busy} onClick={() => handleUpgrade(name)}>
               <Icon name="arrow-up" /> {upgrade.available_version ? t('backends.updateTo', { version: upgrade.available_version }) : t('backends.update')}
             </button>
@@ -698,6 +962,7 @@ export default function Backends() {
       description: stripMarkdown(catalog?.description || '').slice(0, 160),
       version,
       state,
+      library,
       nodes: <NodeDistributionChip nodes={nodes} compactThreshold={2} />,
       action,
       detail,
@@ -719,6 +984,8 @@ export default function Backends() {
     <div className="page page--wide op-page op-runtime" data-testid="backends">
       <h1 className="dk-sr-only">{t('backends.title')}</h1>
 
+      <KindLibraries kind="backend" onSelect={setLibrarySource} />
+
       <div className="bk-bar">
         <div className="dk-segmented" role="group" aria-label={t('backends.lifecycle')}>
           <Link
@@ -737,31 +1004,29 @@ export default function Backends() {
           </Link>
         </div>
 
-        <div className="dk-input-icon bk-search">
-          <Icon name="search" className="dk-icon" />
-          <input
-            className="dk-input"
-            type="text"
-            aria-label={activeView === 'installed' ? t('backends.searchInstalled') : t('backends.searchCatalog')}
-            placeholder={activeView === 'installed' ? t('backends.searchInstalled') : t('backends.searchCatalog')}
-            value={activeView === 'installed' ? query : search}
-            onChange={e => (activeView === 'installed' ? updateUrlParam('q', e.target.value) : handleSearch(e.target.value))}
-          />
-        </div>
+        <CatalogSearchBox
+          className="bk-search"
+          label={activeView === 'installed' ? t('backends.searchInstalled') : t('backends.searchCatalog')}
+          value={activeView === 'installed' ? query : search}
+          onChange={value => (activeView === 'installed' ? updateUrlParam('q', value) : handleSearch(value))}
+        />
 
         <div className="bk-bar__acts">
-          {updateNames.length > 0 && (
-            <button type="button" className="dk-btn dk-btn--primary" onClick={handleUpgradeAll} disabled={upgradingAll}>
-              <Icon name={upgradingAll ? 'spinner' : 'arrow-up'} spin={Boolean(upgradingAll)} />
-              {upgradingAll ? t('backends.updating') : t('backends.updateAll', { count: updateNames.length })}
+          {installEnabled && updateNames.length > 0 && (
+            <button type="button" className="dk-btn dk-btn--primary" onClick={() => setReview({ preselect: [] })} data-testid="backends-updates">
+              <Icon name="arrow-up" /> {t('backends.reviewButton', { count: updateNames.length })}
             </button>
           )}
-          <button type="button" className="dk-btn dk-btn--ghost" onClick={handleCheck} disabled={checking}>
-            <Icon name="refresh" spin={checking} /> {t('backends.check')}
-          </button>
-          <button type="button" className="dk-btn dk-btn--ghost" aria-expanded={showManualInstall} onClick={() => setShowManualInstall(v => !v)}>
-            <Icon name={showManualInstall ? 'chevron-up' : 'plus'} /> {t('backends.fromUrl')}
-          </button>
+          {installEnabled && (
+            <button type="button" className="dk-btn dk-btn--ghost" onClick={handleCheck} disabled={checking}>
+              <Icon name="refresh" spin={checking} /> {t('backends.check')}
+            </button>
+          )}
+          {installEnabled && (
+            <button type="button" className="dk-btn dk-btn--ghost" aria-expanded={showManualInstall} onClick={() => setShowManualInstall(v => !v)}>
+              <Icon name={showManualInstall ? 'chevron-up' : 'plus'} /> {t('backends.fromUrl')}
+            </button>
+          )}
         </div>
       </div>
 
@@ -816,6 +1081,13 @@ export default function Backends() {
         </div>
       </div>
 
+      {!installEnabled && (
+        <div className="op-notice" data-testid="backends-install-disabled">
+          <Icon name="lock" />
+          <span>{t('backends.installDisabled')}</span>
+        </div>
+      )}
+
       {activeView === 'catalog' && targetNode && (
         <div className="op-notice" data-testid="backends-target">
           <Icon name="target" />
@@ -826,13 +1098,12 @@ export default function Backends() {
         </div>
       )}
 
-      {globalError && (
+      {(refreshError || globalError) && (
         <div className="op-error" role="alert">
-          <Icon name="alert-circle" />
-          <span>{globalError}</span>
+          <span>{refreshError ? t(refreshError === 'deletion' ? 'backends.nodeRemoval.stale' : 'backends.nodeRemoval.refreshFailed') : globalError}</span>
+          <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm" aria-label={t('backends.nodeRemoval.refresh')} onClick={() => refreshBackendData()}>{t('backends.retry')}</button>
         </div>
       )}
-
       {showManualInstall && (
         <form onSubmit={handleManualInstall} className="bk-manual dk-card">
           <h2 className="bk-manual__title">{t('backends.manualTitle')}</h2>
@@ -855,7 +1126,7 @@ export default function Backends() {
         </form>
       )}
 
-      {recommended && (
+      {installEnabled && recommended && (
         <div className="bk-recommend" data-testid="backends-recommend">
           <div>
             <h2 className="bk-recommend__title">{t('backends.recommendTitle', { name: recommended.name || recommended.id })}</h2>
@@ -870,17 +1141,12 @@ export default function Backends() {
       {showCatalogCold || showInstalledCold ? (
         <div className="op-loading"><LoadingSpinner size="lg" /></div>
       ) : activeView === 'installed' ? (
-        installed.length === 0 && !globalError ? (
-          <div className="dk-empty">
-            <div className="dk-empty-icon"><Icon name="server" /></div>
-            <h2 className="dk-empty-title">{t('backends.emptyTitle')}</h2>
-            <p className="dk-empty-text">{t('backends.emptyBody')}</p>
+        installed.length === 0 && globalError ? null : installed.length === 0 ? (
+          <CatalogEmpty icon="server" title={t('backends.emptyTitle')} text={t('backends.emptyBody')}>
             <Link className="dk-btn dk-btn--primary" to={hrefForView('catalog')}>{t('backends.openCatalog')}</Link>
-          </div>
+          </CatalogEmpty>
         ) : installedRows.length === 0 ? (
-          <div className="dk-empty">
-            <div className="dk-empty-icon"><Icon name="filter" /></div>
-            <p className="dk-empty-text">{t('backends.noMatches')}</p>
+          <CatalogEmpty icon="filter" text={librarySource ? t('backends.libraryEmpty', { name: librarySource.name }) : t('backends.noMatches')}>
             <button
               type="button"
               className="dk-btn dk-btn--ghost"
@@ -893,7 +1159,7 @@ export default function Backends() {
             >
               {t('backends.clearFilters')}
             </button>
-          </div>
+          </CatalogEmpty>
         ) : (
           <BackendsTable
             rows={installedRows}
@@ -904,11 +1170,7 @@ export default function Backends() {
           />
         )
       ) : catalogRows.length === 0 ? (
-        <div className="dk-empty">
-          <div className="dk-empty-icon"><Icon name="server" /></div>
-          <h2 className="dk-empty-title">{t('backends.noneFound')}</h2>
-          <p className="dk-empty-text">{search || catalogFilter ? t('backends.noneFoundFiltered') : t('backends.noneFoundBody')}</p>
-        </div>
+        <CatalogEmpty icon="server" title={t('backends.noneFound')} text={librarySource ? t('backends.libraryEmpty', { name: librarySource.name }) : search || catalogFilter ? t('backends.noneFoundFiltered') : t('backends.noneFoundBody')} />
       ) : (
         <>
           <BackendsTable
@@ -923,17 +1185,13 @@ export default function Backends() {
             caption={t('backends.catalogAria')}
           />
           <p className="bk-count">{t('backends.shown', { shown: catalogPage.length, total: allBackends.length })}</p>
-          {totalPages > 1 && (
-            <div className="bk-pager">
-              <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} aria-label={t('backends.prevPage')}>
-                <Icon name="chevron-left" />
-              </button>
-              <span className="dk-mono">{page} / {totalPages}</span>
-              <button type="button" className="dk-btn dk-btn--ghost dk-btn--sm" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} aria-label={t('backends.nextPage')}>
-                <Icon name="chevron-right" />
-              </button>
-            </div>
-          )}
+          <CatalogPager
+            className="bk-pager"
+            page={page}
+            totalPages={totalPages}
+            onPage={setPage}
+            labels={{ previous: t('backends.prevPage'), next: t('backends.nextPage') }}
+          />
         </>
       )}
 
@@ -943,9 +1201,23 @@ export default function Backends() {
         message={confirmDialog?.message}
         confirmLabel={confirmDialog?.confirmLabel}
         danger
+        pending={removalPending}
         onConfirm={confirmDialog?.onConfirm}
-        onCancel={() => setConfirmDialog(null)}
+        onCancel={() => { if (!removalLock.current) setConfirmDialog(null) }}
       />
+
+      {review && (
+        <UpdateReviewSheet
+          title={t('backends.reviewTitle')}
+          description={t('backends.reviewDescription')}
+          items={reviewItems}
+          preselect={review.preselect}
+          run={runReview}
+          onSettled={reviewSettled}
+          onClose={() => setReview(null)}
+          started
+        />
+      )}
 
       <NodeInstallPicker
         open={!!pickerBackend}

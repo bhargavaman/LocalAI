@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -202,6 +203,12 @@ func (c *InFlightTrackingClient) Depth(ctx context.Context, in *pb.DepthRequest,
 	return res, c.reconcile(err)
 }
 
+func (c *InFlightTrackingClient) Forecast(ctx context.Context, in *pb.ForecastRequest, opts ...ggrpc.CallOption) (*pb.ForecastResponse, error) {
+	defer c.track(ctx)()
+	res, err := c.inner.Forecast(ctx, in, opts...)
+	return res, c.reconcile(err)
+}
+
 func (c *InFlightTrackingClient) Rerank(ctx context.Context, in *pb.RerankRequest, opts ...ggrpc.CallOption) (*pb.RerankResult, error) {
 	defer c.track(ctx)()
 	res, err := c.inner.Rerank(ctx, in, opts...)
@@ -294,3 +301,12 @@ func (c *InFlightTrackingClient) AudioTransform(ctx context.Context, in *pb.Audi
 // the done() func tied to stream close, which the Backend interface doesn't surface
 // here. If they ever need tracking, move them to grpc.InferenceBackend - the build
 // will then force an explicit wrapper here.
+
+func (c *InFlightTrackingClient) TTSLive(ctx context.Context, in *pb.TTSRequest, text <-chan string, fn func([]byte) error) error {
+	defer c.track(ctx)()
+	live, ok := c.inner.(grpc.TTSLiveBackend)
+	if !ok {
+		return fmt.Errorf("backend does not support incremental text TTS")
+	}
+	return c.reconcile(live.TTSLive(ctx, in, text, fn))
+}

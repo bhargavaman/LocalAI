@@ -482,3 +482,42 @@ var _ = Describe("Bearer token", func() {
 		Expect(sawAuth).To(Equal("Bearer secret-key"))
 	})
 })
+
+var _ = Describe("InstallLibraryBackend", func() {
+	It("posts the library entry to the backend library route", func() {
+		var path string
+		var body map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path = r.Method + " " + r.URL.Path
+			Expect(json.NewDecoder(r.Body).Decode(&body)).To(Succeed())
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "installed", "name": "demo", "sourceId": "official"})
+		}))
+		DeferCleanup(srv.Close)
+
+		res, err := New(srv.URL, "").InstallLibraryBackend(context.Background(), localaitools.InstallLibraryBackendRequest{SourceID: "official", Name: "demo", Version: "1.0.0"})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(path).To(Equal("POST /backends/library/install"))
+		Expect(body).To(Equal(map[string]any{"sourceId": "official", "name": "demo", "version": "1.0.0"}))
+		Expect(res.Status).To(Equal("installed"))
+	})
+})
+
+var _ = Describe("ListBackendLibraryUpdates", func() {
+	It("reads the backend library updates route", func() {
+		var path string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path = r.Method + " " + r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]any{"updates": []map[string]any{
+				{"name": "demo", "sourceId": "official", "installedVersion": "1.0.0", "version": "1.1.0", "digest": "sha256:aa", "signed": true},
+			}})
+		}))
+		DeferCleanup(srv.Close)
+
+		res, err := New(srv.URL, "").ListBackendLibraryUpdates(context.Background())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(path).To(Equal("GET /backends/library/updates"))
+		Expect(res).To(HaveLen(1))
+		Expect(res[0].SourceID).To(Equal("official"))
+		Expect(res[0].Version).To(Equal("1.1.0"))
+	})
+})

@@ -1,10 +1,15 @@
 package workerctl
 
+import "encoding/json"
+
 // BackendInstallRequest is the payload for a backend.install control request.
 type BackendInstallRequest struct {
-	Backend          string `json:"backend"`
-	ModelID          string `json:"model_id,omitempty"`
-	BackendGalleries string `json:"backend_galleries,omitempty"`
+	// EnvVars is a complete per-process snapshot. nil means a legacy caller;
+	// a non-nil empty map explicitly removes previous model overrides.
+	EnvVars          map[string]string `json:"-"`
+	Backend          string            `json:"backend"`
+	ModelID          string            `json:"model_id,omitempty"`
+	BackendGalleries string            `json:"backend_galleries,omitempty"`
 	// URI is set for external installs (OCI image, URL, or path). When non-empty
 	// the worker routes to InstallExternalBackend instead of the gallery lookup.
 	URI   string `json:"uri,omitempty"`
@@ -110,9 +115,15 @@ type BackendListReply struct {
 
 // NodeBackendInfo describes a backend installed on a worker node.
 type NodeBackendInfo struct {
-	Name        string `json:"name"`
-	IsSystem    bool   `json:"is_system"`
-	IsMeta      bool   `json:"is_meta"`
+	Name     string `json:"name"`
+	IsSystem bool   `json:"is_system"`
+	IsMeta   bool   `json:"is_meta"`
+	// Alias is the alternative name a model config may use for this
+	// backend. The worker resolves it on its own disk when it loads the
+	// model; the frontend needs it only to judge whether such a model can
+	// run anywhere in the cluster. It rides on the concrete's own row, so
+	// upgrade detection still sees one row per installed backend.
+	Alias       string `json:"alias,omitempty"`
 	InstalledAt string `json:"installed_at,omitempty"`
 	GalleryURL  string `json:"gallery_url,omitempty"`
 	// Version, URI and Digest enable cluster-wide upgrade detection:
@@ -181,4 +192,31 @@ type BackendDeleteReply struct {
 	// to read silence as a completed cleanup, which is precisely the wrong
 	// conclusion against an older worker.
 	ReportsStoppedProcesses bool `json:"reports_stopped_processes,omitempty"`
+}
+
+// MarshalJSON omits legacy snapshots without collapsing an explicit empty map.
+func (r BackendInstallRequest) MarshalJSON() ([]byte, error) {
+	type wire BackendInstallRequest
+	var env *map[string]string
+	if r.EnvVars != nil {
+		env = &r.EnvVars
+	}
+	return json.Marshal(struct {
+		wire
+		EnvVars *map[string]string `json:"env_vars,omitempty"`
+	}{wire(r), env})
+}
+
+func (r *BackendInstallRequest) UnmarshalJSON(data []byte) error {
+	type wire BackendInstallRequest
+	var decoded struct {
+		wire
+		EnvVars map[string]string `json:"env_vars"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = BackendInstallRequest(decoded.wire)
+	r.EnvVars = decoded.EnvVars
+	return nil
 }

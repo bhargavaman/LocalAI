@@ -628,6 +628,11 @@
   font-size: 1rem;
 }
 
+/* The pinned apps under Apps have no room in the rail. */
+.sidebar.collapsed .nav-item--sub {
+  display: none;
+}
+
 .sidebar.collapsed .sidebar-footer {
   justify-content: center;
   flex-direction: column;
@@ -708,6 +713,12 @@
   bottom: calc(100% + 8px);
   left: 0;
   min-width: 220px;
+  /* The menu opens upwards from the sidebar footer, inside a scrollable
+     sidebar. Cap its height to the viewport so it stays within the sidebar
+     box instead of being clipped at the top on short windows. */
+  max-height: calc(100dvh - 64px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--color-surface-float);
   border: 1px solid var(--color-border-card);
   border-radius: var(--radius-lg);
@@ -4055,6 +4066,8 @@ button.collapsible-header:focus-visible {
     margin-inline: calc((var(--sidebar-width-collapsed) - var(--control-h)) / 2);
   }
   .sidebar:not(.open) .nav-icon { width: auto; font-size: 1rem; }
+  /* The pinned apps under Apps have no room in the rail. */
+  .sidebar:not(.open) .nav-item--sub { display: none; }
   .sidebar:not(.open) .sidebar-nav .nav-item.active::after { display: none; }
   .sidebar:not(.open) .sidebar-footer {
     justify-content: center;
@@ -9216,6 +9229,11 @@ button.home-strip__head:hover:not(:disabled) { background: var(--dk-hover); }
   /* The page scrolls inside the pinned shell; the rail and pane keep their own
      inner scrollers for long lists and long details. */
   overflow-y: auto;
+  /* Containing block for absolutely positioned descendants. The screen-reader
+     spans inside long tables (.dk-sr-only is position: absolute) otherwise
+     resolve against the viewport, escape every scroller below, and give the
+     document its own scroll height, so the whole window scrolls again. */
+  position: relative;
 }
 
 /* The header, fused. A slim row that reads as the top of the view rather than
@@ -9692,3 +9710,6 @@ button.lane:hover {
 @media (prefers-reduced-motion: reduce) {
   .lai-icon--beat { animation: none; }
 }
+
+/* Pinned apps under the Apps entry: their labels line up with the labels above them. */
+.sidebar-nav .nav-item.nav-item--sub { padding-inline-start: 36px; }

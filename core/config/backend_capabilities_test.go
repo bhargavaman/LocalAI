@@ -471,3 +471,54 @@ var _ = Describe("GEM-X motion capability", func() {
 		Expect((&ModelConfig{Backend: "llama-cpp"}).HasUsecases(FLAG_MOTION)).To(BeFalse())
 	})
 })
+
+var _ = Describe("timestral forecast capability", func() {
+	It("discovers forecast on the backend and keeps the model out of chat", func() {
+		Expect(DefaultUsecasesForBackendCap("timestral-cpp")).To(Equal([]string{UsecaseForecast}))
+		cfg := &ModelConfig{Backend: "timestral-cpp"}
+		Expect(cfg.HasUsecases(FLAG_FORECAST)).To(BeTrue())
+		Expect(cfg.HasUsecases(FLAG_CHAT)).To(BeFalse())
+		Expect(cfg.HasUsecases(FLAG_COMPLETION)).To(BeFalse())
+		Expect(cfg.HasUsecases(FLAG_EMBEDDINGS)).To(BeFalse())
+		Expect(cfg.HasUsecases(FLAG_DEPTH)).To(BeFalse())
+		Expect(cfg.Capabilities()).To(ContainElement(UsecaseForecast))
+		Expect(cfg.Capabilities()).NotTo(ContainElement(UsecaseChat))
+	})
+
+	It("keeps chat models and other backends out of forecast", func() {
+		Expect((&ModelConfig{Backend: "llama-cpp"}).HasUsecases(FLAG_FORECAST)).To(BeFalse())
+		chat := &ModelConfig{Backend: "timestral-cpp"}
+		chat.TemplateConfig.UseTokenizerTemplate = true
+		Expect(chat.HasUsecases(FLAG_CHAT)).To(BeFalse(), "a timestral model never serves text")
+	})
+
+	It("maps the usecase to its flag, RPC and string form", func() {
+		info := UsecaseInfoMap[UsecaseForecast]
+		Expect(info.Flag).To(Equal(FLAG_FORECAST))
+		Expect(info.GRPCMethod).To(Equal(MethodForecast))
+		Expect(GetAllModelConfigUsecases()).To(HaveKeyWithValue("FLAG_FORECAST", FLAG_FORECAST))
+		flags := GetUsecasesFromYAML([]string{"forecast"})
+		Expect(flags).NotTo(BeNil())
+		Expect(*flags).To(Equal(FLAG_FORECAST))
+	})
+})
+
+// LFM3-Audio runs through llama.cpp for speech recognition and for the
+// speech-to-speech loop, so the llama-cpp entry advertises both RPCs. Its
+// default stays chat: a bare GGUF is still a chat model.
+var _ = Describe("llama-cpp speech and realtime capabilities", func() {
+	It("advertises the transcription and audio-to-audio RPCs", func() {
+		capability := GetBackendCapability("llama-cpp")
+		Expect(capability).NotTo(BeNil())
+		Expect(capability.GRPCMethods).To(ContainElements(MethodAudioTranscription, MethodAudioToAudioStream))
+	})
+
+	It("accepts the transcript and realtime_audio usecases", func() {
+		Expect(IsValidUsecaseForBackend("llama-cpp", UsecaseTranscript)).To(BeTrue())
+		Expect(IsValidUsecaseForBackend("llama-cpp", UsecaseRealtimeAudio)).To(BeTrue())
+	})
+
+	It("keeps chat as its only default usecase", func() {
+		Expect(GetBackendCapability("llama-cpp").DefaultUsecases).To(Equal([]string{UsecaseChat}))
+	})
+})

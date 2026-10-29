@@ -47,6 +47,11 @@ import ConfirmDialog from '../components/ConfirmDialog'
 // eslint-disable-next-line no-unused-vars
 import ChatsMenu from '../components/ChatsMenu'
 import { useAuth } from '../context/AuthContext'
+import { useAddonToolAddons } from '../addons/useAddonRegistry'
+import AddonToolsMenu from '../components/chat/AddonToolsMenu'
+import { enabledAddonIds, toggleAddonSettings, toggleAllAddonSettings } from '../utils/chatAddons'
+// eslint-disable-next-line no-unused-vars
+import AddonSlot from '../addons/AddonSlot'
 import { useOperations } from '../hooks/useOperations'
 import { useLoadedModels } from '../hooks/useLoadedModels'
 import { copyToClipboard } from '../utils/clipboard'
@@ -98,13 +103,23 @@ function formatLoadEta(seconds) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
+// One chat state per account: useChat binds its browser cache and its server
+// sync to the signed-in account, so a different account gets a fresh mount
+// instead of the previous account's chats.
 export default function Chat() {
+  const { user } = useAuth()
+  return <ChatPage key={user?.id || ''} />
+}
+
+// eslint-disable-next-line no-unused-vars -- used as JSX above
+function ChatPage() {
   const { model: urlModel } = useParams()
   const { addToast } = useOutletContext()
   const navigate = useNavigate()
   const location = useLocation()
   const { t } = useTranslation('chat')
-  const { isAdmin } = useAuth()
+  const { isAdmin, hasFeature } = useAuth()
+  const canUseMcp = hasFeature('mcp')
   const { operations } = useOperations()
   const {
     chats, activeChat, activeChatId, isStreaming, streamingChatId, streamingContent,
@@ -198,19 +213,27 @@ export default function Chat() {
   const modelFit = useModelFit({ openCount: fitOpenCount, names: modelNames, contextSize: activeChat?.contextSize })
   const onPickerOpen = useCallback(() => setFitOpenCount(n => n + 1), [])
   const hasThread = (activeChat?.history?.length || 0) > 0
+  const toolAddonList = useAddonToolAddons()
+  const hasAddonTools = toolAddonList.length > 0
   const slashConfig = useMemo(() => ({
-    actions: availableChatActions({ isAdmin, hasModels: chatModels.length > 0, hasThread }),
+    actions: availableChatActions({ isAdmin, hasModels: chatModels.length > 0, hasThread, hasAddonTools }),
     groups: CHAT_SLASH_GROUPS,
     label: (a) => t(`slash.${a.id}.label`),
     desc: (a) => t(`slash.${a.id}.desc`),
     groupLabel: (g) => t(`slash.group.${g}`),
-  }), [isAdmin, chatModels.length, hasThread, t])
+  }), [isAdmin, chatModels.length, hasThread, hasAddonTools, t])
 
   // Focus mode: once a conversation has at least one message we slim the
   // surrounding chrome (collapse the global app rail, fade non-essential
   // header items). Esc gives the user back the full chrome for the rest of
   // this session. The settings drawer offers a persistent opt-out.
   const isInConversation = (activeChat?.history?.length || 0) > 0
+  // What the composer slot of add-ons is told: the conversation and whether
+  // sending is blocked. Never the draft or the history.
+  const composerSlotContext = useMemo(
+    () => ({ conversationId: activeChat?.id, disabled: isStreaming }),
+    [activeChat?.id, isStreaming],
+  )
   const [focusOverride, setFocusOverride] = useState(false)
   const [focusModeEnabled, setFocusModeEnabled] = useState(() => {
     try { return localStorage.getItem(FOCUS_MODE_KEY) !== 'false' } catch (_) { return true }
@@ -243,10 +266,30 @@ export default function Chat() {
     prevArtifactCountRef.current = artifacts.length
   }, [artifacts])
 
-  // Check MCP availability and fetch model config (admin-only endpoint)
+  // Non-admins cannot read the model config (config-json is admin-only), so
+  // their MCP availability comes from the `mcp` flag of the chat model list
+  // plus the user's `mcp` feature. Context size and the model-info panel stay
+  // admin-only: they need the full config.
+  const activeModelHasMcp = useMemo(
+    () => !!chatModels.find(m => m.id === activeChat?.model)?.mcp,
+    [chatModels, activeChat?.model]
+  )
+  useEffect(() => {
+    if (isAdmin) return
+    setModelInfo(null)
+    if (!activeChat?.model || chatModelsLoading) { setMcpAvailable(false); return }
+    const hasMcp = canUseMcp && activeModelHasMcp
+    setMcpAvailable(hasMcp)
+    if (!hasMcp && (activeChat.mcpMode || activeChat.mcpServers?.length)) {
+      updateChatSettings(activeChat.id, { mcpMode: false, mcpServers: [] })
+    }
+  }, [activeChat?.model, isAdmin, canUseMcp, activeModelHasMcp, chatModelsLoading])
+
+  // Admins: check MCP availability and fetch model config (admin-only endpoint)
   useEffect(() => {
     const model = activeChat?.model
-    if (!model || !isAdmin) { setMcpAvailable(false); setModelInfo(null); return }
+    if (!isAdmin) return
+    if (!model) { setMcpAvailable(false); setModelInfo(null); return }
     let cancelled = false
     modelsApi.getConfigJson(model).then(cfg => {
       if (cancelled) return
@@ -1013,6 +1056,17 @@ export default function Chat() {
     />
   )
 
+  // The add-on tools control sits right after the MCP control: both decide what
+  // the model may call in this chat.
+  const addonsControl = (
+    <AddonToolsMenu
+      addons={toolAddonList}
+      enabledIds={enabledAddonIds(activeChat, toolAddonList)}
+      onToggle={(id) => updateChatSettings(activeChat.id, toggleAddonSettings(activeChat, toolAddonList, id))}
+      onToggleAll={() => updateChatSettings(activeChat.id, toggleAllAddonSettings(activeChat, toolAddonList))}
+    />
+  )
+
   const mcp = (
     <UnifiedMCPDropdown
       serverMCPAvailable={mcpAvailable}
@@ -1107,6 +1161,12 @@ export default function Chat() {
         break
       }
       case 'assistant': updateChatSettings(activeChat.id, { localaiAssistant: !activeChat.localaiAssistant }); break
+      case 'addon-tools': {
+        const settings = toggleAllAddonSettings(activeChat, toolAddonList)
+        updateChatSettings(activeChat.id, settings)
+        addToast(t(settings.addonTools ? 'toasts.addonToolsOn' : 'toasts.addonToolsOff'), 'success', 2500)
+        break
+      }
       case 'canvas': toggleCanvasMode(); break
       case 'settings': setShowSettings(true); break
       case 'find': openFind(); break
@@ -1187,6 +1247,7 @@ export default function Chat() {
                 activityItems={row.activity}
                 getClientForTool={row.activity ? getClientForTool : undefined}
                 actions={messageActions}
+                conversationId={activeChat.id}
                 onOpenImage={openImage}
               />
             )))}
@@ -1236,8 +1297,9 @@ export default function Chat() {
               sendTitle={activeChat.model ? t('input.send') : t('input.selectModelFirst')}
               textareaRef={textareaRef}
               picker={picker}
-              mcp={mcp}
+              mcp={<>{mcp}{addonsControl}</>}
               chips={composerChips}
+              extras={<AddonSlot slot="chat.composer.actions" context={composerSlotContext} />}
               files={files}
               onRemoveFile={(f) => setFiles(prev => prev.filter(x => x !== f))}
               onAttach={attachFiles}

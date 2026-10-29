@@ -1,5 +1,6 @@
 import { test, expect } from './coverage-fixtures.js'
 import { mockHome, mockUser, seedChats, sampleChats, CHATS_KEY, LOADED } from './home-fixtures.js'
+import { installStudioAddons } from './studio-addon.js'
 
 // The Home console: command bar, slash menu, memory strip, resume list, first
 // run and the phone layout. Data is stubbed the way the other Home specs do it;
@@ -39,8 +40,24 @@ test.describe('Home slash menu', () => {
     expect(names).toEqual([
       '/model', '/new', '/chat', '/assistant',
       '/gallery', '/installed', '/import', '/stop',
-      '/studio', '/settings', '/docs',
+      '/settings', '/docs',
     ])
+  })
+
+  // Studio is an add-on: its command is offered only while it is installed.
+  test('the /studio command appears once the Studio add-on is installed', async ({ page }) => {
+    await installStudioAddons(page, { ids: ['studio'] })
+    await ready(page)
+    await page.locator('.home-textarea').fill('/')
+    await expect(page.getByTestId('home-slash-studio')).toBeVisible()
+    await page.getByTestId('home-slash-studio').click()
+    await expect(page).toHaveURL(/\/app\/addons\/studio\/studio/)
+  })
+
+  test('the /studio command is not offered while the Studio add-on is not installed', async ({ page }) => {
+    await ready(page)
+    await page.locator('.home-textarea').fill('/stu')
+    await expect(page.getByTestId('home-slash-studio')).toHaveCount(0)
   })
 
   test('filters as you type and marks the typed part', async ({ page }) => {
@@ -93,8 +110,8 @@ test.describe('Home slash menu', () => {
   test('a click on an action runs it and clears the box', async ({ page }) => {
     await ready(page)
     await page.locator('.home-textarea').fill('/')
-    await page.getByTestId('home-slash-studio').click()
-    await expect(page).toHaveURL(/\/app\/studio/)
+    await page.getByTestId('home-slash-installed').click()
+    await expect(page).toHaveURL(/\/app\/models\?view=installed/)
   })
 
   test('"/" outside a text field starts a command', async ({ page }) => {
@@ -138,7 +155,7 @@ test.describe('Home slash menu', () => {
     await ready(page)
     await page.locator('.home-textarea').fill('/')
     const names = await page.locator('.dk-cmd-name').allTextContents()
-    expect(names).toEqual(['/model', '/new', '/chat', '/studio', '/docs'])
+    expect(names).toEqual(['/model', '/new', '/chat', '/docs'])
   })
 
   test('and the library row keeps only the documentation link', async ({ page }) => {
@@ -172,6 +189,17 @@ test.describe('Home model chip', () => {
     await expect(chip).toContainText('gemma-4-e4b-it-qat-q4_0')
     await expect(list).toHaveCount(0)
     await expect(chip).toBeFocused()
+  })
+
+  test('keeps Home auto-selection and remembers an explicit model', async ({ page }) => {
+    await ready(page)
+    const chip = page.getByTestId('home-model-chip')
+    await expect(chip).toContainText('qwen3-8b-instruct')
+    await chip.click()
+    await page.getByRole('option', { name: /gemma-4-e4b/ }).click()
+    expect(await page.evaluate(() => localStorage.getItem('localai_last_model:FLAG_CHAT'))).toBe('gemma-4-e4b-it-qat-q4_0')
+    await page.reload()
+    await expect(chip).toContainText('gemma-4-e4b-it-qat-q4_0')
   })
 
   test('Escape closes the list and returns to the chip', async ({ page }) => {
@@ -479,7 +507,8 @@ test.describe('Home first run', () => {
     await mockFirstRun(page)
     await ready(page)
     const guide = page.getByTestId('home-first-run')
-    await expect(guide.getByRole('listitem')).toHaveCount(3)
+    // The steps only: the recommended models are a list inside the second step.
+    await expect(guide.locator('.home-step')).toHaveCount(3)
     await expect(guide.locator('.home-step[data-state="now"]')).toContainText('Browse the Model Gallery')
     await expect(guide.locator('.home-step').nth(1).locator('.home-starters')).toContainText('tiny-chat')
     await expect(guide.getByRole('button', { name: /browse model gallery/i })).toBeVisible()

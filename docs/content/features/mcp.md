@@ -153,9 +153,45 @@ Configure local command-based MCP servers:
 - **`args`**: Array of command-line arguments
 - **`env`**: Environment variables (optional)
 
+#### Automatic activation (`auto`)
+
+`/v1/chat/completions` only runs a model's MCP servers when the request selects
+them through `metadata.mcp_servers`. Plain OpenAI clients cannot send that field.
+Set `auto: true` in the `mcp:` block to enable every configured server when the
+request names none:
+
+```yaml
+mcp:
+  auto: true
+  remote: |
+    {"mcpServers": {"weather-api": {"url": "https://weather.example.com/mcp"}}}
+```
+
+A request that does send `metadata.mcp_servers` still gets exactly the servers it
+names. `/v1/responses` already enables all servers when the request sends no
+`tools`, and `/mcp/v1/chat/completions` always does; `auto` does not change them.
+
+`auto` only applies when MCP is enabled on the instance (not disabled with
+`LOCALAI_DISABLE_MCP`) and, with authentication on, the caller has the `mcp`
+permission. Otherwise the request is answered as a plain chat: no server is
+contacted and no tools are added. It is not rejected, because the client did not
+ask for MCP.
+
+#### Client tools (`client_tools`)
+
+`client_tools: drop` (a top-level model config key) discards the `tools`,
+`functions` and `tool_choice` a client sends, so the model is offered only its own
+MCP tools. Use it when a front end attaches tools of its own that should not
+reach this model. Empty (the default) keeps client tools.
+
+On a [model alias]({{%relref "features/model-aliases" %}}#profile-aliases) these
+keys go inside the alias's `profile` block, which lets several assistants with
+different tools share one loaded model.
+
 #### Agent Configuration (`agent`)
 
 - **`max_iterations`**: Maximum number of MCP tool execution loop iterations (default: 10). Each iteration allows the model to call tools and receive results before generating the next response.
+- **`max_generation_tokens`**: Output-token cap for each completion of an MCP agent job (default: the client default, 16384). `max_iterations` bounds the number of turns, not the length of one; this bounds a single completion that keeps generating. Raise it for reasoning models that think at length, lower it for models that should only pick a tool and answer briefly. It applies to agent jobs (`/api/agent/jobs`, also when run on a distributed agent worker); an MCP tool loop on `/v1/chat/completions` uses the request's own `max_tokens`.
 
 ## Agent-scoped MCP servers
 
@@ -225,6 +261,19 @@ curl http://localhost:8080/v1/responses \
   }'
 ```
 
+The tools LocalAI runs server-side are part of the response: `output` lists a
+`function_call` item and its `function_call_output` item for every MCP tool call,
+in the order they ran, before the final `message`. Replayed tool results retain
+the `call_id` association with their calls. If the streaming iteration limit is
+reached, each executed tool round appears once in the final output. This holds for streaming
+(`response.completed`) and non-streaming requests and for the stored response.
+A follow-up request with `previous_response_id` therefore replays the earlier
+tool calls and results to the model, and a client that keeps the `output` items
+and sends them back as input does the same. Without this trail, models tend to
+answer follow-up questions from the earlier text instead of calling the tool
+again. Chat completions (`/v1/chat/completions`) return only the final answer,
+so a client cannot carry the tool trail over to the next turn there.
+
 ### Server Listing Endpoint
 
 You can list available MCP servers and their tools for a given model:
@@ -255,6 +304,8 @@ Returns a model wrapper and one status entry for every configured server:
 ```
 
 The Chat **MCP → Servers** tab uses this endpoint. A configured server remains listed when it is unavailable, shows the discovery error, and cannot be selected until a later discovery attempt succeeds. Reopening the dropdown or returning to the Servers tab retries discovery.
+
+When authentication is enabled, the Servers tab is offered to admins and to every user holding the `mcp` feature (on by default for new users). Chat learns that a model has MCP servers from the `mcp` flag of `GET /api/models/capabilities`, so non-admin users do not need access to the model configuration. With `LOCALAI_DISABLE_MCP=true` the flag is never set.
 
 ### MCP Prompts
 

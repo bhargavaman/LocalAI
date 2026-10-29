@@ -193,6 +193,8 @@ func setModelLoadingRetryAfter(loadErr *nodes.ModelLoadingError, c echo.Context)
 // @tag.description Document reranking
 // @tag.name instructions
 // @tag.description API instruction discovery — browse instruction areas and get endpoint guides
+// @tag.name chat-history
+// @tag.description Server-side persistence of WebUI chat conversations
 
 func API(application *application.Application) (*echo.Echo, error) {
 	e := echo.New()
@@ -387,6 +389,16 @@ func API(application *application.Application) (*echo.Echo, error) {
 		return c.Blob(http.StatusOK, "image/svg+xml", data)
 	})
 
+	// iOS draws the home-screen icon from an apple-touch-icon PNG and ignores
+	// the SVG favicon, so it falls back to the first letter of the page title.
+	e.GET("/apple-touch-icon.png", func(c echo.Context) error {
+		data, err := embedDirStatic.ReadFile("static/apple-touch-icon.png")
+		if err != nil {
+			return c.NoContent(http.StatusNotFound)
+		}
+		return c.Blob(http.StatusOK, "image/png", data)
+	})
+
 	// Static files - use fs.Sub to create a filesystem rooted at "static"
 	staticFS, err := fs.Sub(embedDirStatic, "static")
 	if err != nil {
@@ -480,6 +492,20 @@ func API(application *application.Application) (*echo.Echo, error) {
 
 	// Register auth routes (login, callback, API keys, user management)
 	routes.RegisterAuthRoutes(e, application)
+	// With add-ons off, no real add-on, fine-tuning or quantization handler is
+	// registered. One handler per prefix answers the same unavailable response
+	// whether or not the path exists, so the off state does not reveal the route
+	// list. With add-ons on, the real routes sit behind the same gate.
+	addonsOn := application.ApplicationConfig().Addons.Enabled
+	if addonsOn {
+		gate := httpMiddleware.RequireAddonsFeature(application)
+		routes.RegisterAddonRoutes(e, application, gate)
+		if err := routes.RegisterAddonNavigationRoutes(e, application, gate); err != nil {
+			return nil, fmt.Errorf("register the add-on navigation routes: %w", err)
+		}
+	} else {
+		routes.RegisterAddonsUnavailable(e, "/api/addons")
+	}
 
 	// Register routing-module usage endpoints. Unlike /api/auth/usage
 	// these go through the StatsRecorder and work in no-auth single-user
@@ -489,7 +515,7 @@ func API(application *application.Application) (*echo.Echo, error) {
 	routes.RegisterSystemOneRoutes(e, application)
 	routes.RegisterMiddlewareRoutes(e, application)
 
-	routes.RegisterElevenLabsRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())
+	routes.RegisterElevenLabsRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.AuthDB())
 
 	// Create opcache for tracking UI operations (used by both UI and LocalAI routes)
 	var opcache *galleryop.OpCache
@@ -512,51 +538,73 @@ func API(application *application.Application) (*echo.Echo, error) {
 	}
 
 	mcpMw := auth.RequireFeature(application.AuthDB(), auth.FeatureMCP)
-	routes.RegisterLocalAIRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application.TemplatesEvaluator(), application, adminMiddleware, mcpJobsMw, mcpMw)
+	chatHistoryMw := auth.RequireFeature(application.AuthDB(), auth.FeatureChatHistory)
+	routes.RegisterLocalAIRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application.TemplatesEvaluator(), application, adminMiddleware, mcpJobsMw, mcpMw, chatHistoryMw)
 	routes.RegisterAgentPoolRoutes(e, application, agentsMw, skillsMw, collectionsMw)
-	// Fine-tuning routes
-	fineTuningMw := auth.RequireFeature(application.AuthDB(), auth.FeatureFineTuning)
-	// In distributed mode pass the shared NATS client + PostgreSQL store so
-	// fine-tune jobs stay consistent across replicas (the SyncedMap broadcasts
-	// mutations and hydrates from the DB); standalone passes nil for both.
-	var ftNats messaging.MessagingClient
-	var ftStore *distributed.FineTuneStore
-	if d := application.Distributed(); d != nil {
-		ftNats = d.Nats
-		if d.DistStores != nil && d.DistStores.FineTune != nil {
-			ftStore = d.DistStores.FineTune
+	if addonsOn {
+		// Fine-tuning routes
+		fineTuningMw := auth.RequireFeature(application.AuthDB(), auth.FeatureFineTuning)
+		// In distributed mode pass the shared NATS client + PostgreSQL store so
+		// fine-tune jobs stay consistent across replicas (the SyncedMap broadcasts
+		// mutations and hydrates from the DB); standalone passes nil for both.
+		var ftNats messaging.MessagingClient
+		var ftStore *distributed.FineTuneStore
+		if d := application.Distributed(); d != nil {
+			ftNats = d.Nats
+			if d.DistStores != nil && d.DistStores.FineTune != nil {
+				ftStore = d.DistStores.FineTune
+			}
 		}
-	}
-	ftService := finetune.NewFineTuneService(
-		application.ApplicationConfig(),
-		application.ModelLoader(),
-		application.ModelConfigLoader(),
-		ftNats,
-		ftStore,
-	)
-	routes.RegisterFineTuningRoutes(e, ftService, application.ApplicationConfig(), application, fineTuningMw)
+		ftService := finetune.NewFineTuneService(
+			application.ApplicationConfig(),
+			application.ModelLoader(),
+			application.ModelConfigLoader(),
+			ftNats,
+			ftStore,
+		)
+		routes.RegisterFineTuningRoutes(e, ftService, application.ApplicationConfig(), application, fineTuningMw)
 
-	// Quantization routes
-	quantizationMw := auth.RequireFeature(application.AuthDB(), auth.FeatureQuantization)
-	// In distributed mode pass the shared NATS client + PostgreSQL store so
-	// quantization jobs stay consistent across replicas (the SyncedMap broadcasts
-	// mutations and hydrates from the DB); standalone passes nil for both.
-	var quantNats messaging.MessagingClient
-	var quantStore *distributed.QuantStore
-	if d := application.Distributed(); d != nil {
-		quantNats = d.Nats
-		if d.DistStores != nil && d.DistStores.Quant != nil {
-			quantStore = d.DistStores.Quant
+		// Quantization routes
+		quantizationMw := auth.RequireFeature(application.AuthDB(), auth.FeatureQuantization)
+		// In distributed mode pass the shared NATS client + PostgreSQL store so
+		// quantization jobs stay consistent across replicas (the SyncedMap broadcasts
+		// mutations and hydrates from the DB); standalone passes nil for both.
+		var quantNats messaging.MessagingClient
+		var quantStore *distributed.QuantStore
+		if d := application.Distributed(); d != nil {
+			quantNats = d.Nats
+			if d.DistStores != nil && d.DistStores.Quant != nil {
+				quantStore = d.DistStores.Quant
+			}
 		}
+		qService := quantization.NewQuantizationService(
+			application.ApplicationConfig(),
+			application.ModelLoader(),
+			application.ModelConfigLoader(),
+			quantNats,
+			quantStore,
+		)
+		routes.RegisterQuantizationRoutes(e, qService, application.ApplicationConfig(), application, quantizationMw)
+
+		// The add-on host operations reach the same services as the routes. Only the
+		// owner of an add-on host has a broker, so elsewhere this registers nothing.
+		engineBackends := localai.EngineBackends{AppConfig: application.ApplicationConfig(), Capabilities: routes.ClusterCapabilityProviderFor(application), Installed: routes.ClusterInstalledProviderFor(application)}
+		if err := application.RegisterAddonEngineJobs(localai.FineTuneJobs{Svc: ftService}, localai.QuantizationJobs{Svc: qService}, engineBackends); err != nil {
+			return nil, err
+		}
+		if err := application.RegisterAddonEngineProgress(localai.FineTuneProgress{Svc: ftService}, localai.QuantizationProgress{Svc: qService}); err != nil {
+			return nil, err
+		}
+		if err := application.RegisterAddonEngineModels(localai.FineTuneModels{Svc: ftService}, localai.QuantizationModels{Svc: qService}); err != nil {
+			return nil, err
+		}
+		if err := application.RegisterAddonEngineDatasets(localai.NewFineTuneDatasets(ftService)); err != nil {
+			return nil, err
+		}
+	} else {
+		routes.RegisterAddonsUnavailable(e, "/api/fine-tuning")
+		routes.RegisterAddonsUnavailable(e, "/api/quantization")
 	}
-	qService := quantization.NewQuantizationService(
-		application.ApplicationConfig(),
-		application.ModelLoader(),
-		application.ModelConfigLoader(),
-		quantNats,
-		quantStore,
-	)
-	routes.RegisterQuantizationRoutes(e, qService, application.ApplicationConfig(), application, quantizationMw)
 
 	// Node management routes (distributed mode)
 	distCfg := application.ApplicationConfig().Distributed
@@ -633,6 +681,7 @@ func API(application *application.Application) (*echo.Echo, error) {
 					html := string(indexHTML)
 					html = strings.ReplaceAll(html, `="/assets/`, `="`+safePrefix+`assets/`)
 					html = strings.ReplaceAll(html, `="/favicon.svg"`, `="`+safePrefix+`favicon.svg"`)
+					html = strings.ReplaceAll(html, `="/apple-touch-icon.png"`, `="`+safePrefix+`apple-touch-icon.png"`)
 					indexHTML = []byte(html)
 				}
 				return c.HTMLBlob(http.StatusOK, indexHTML)

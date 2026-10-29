@@ -63,6 +63,12 @@ Application shutdown has no context parameter; work that ignores cancellation ca
 | `--localai-config-dir-poll-interval` | | Time duration to poll the LocalAI Config Dir if your system has broken fsnotify events (example: `1m`) | `$LOCALAI_CONFIG_DIR_POLL_INTERVAL` |
 
 | `--models-config-file` | | YAML file containing a list of model backend configs (alias: `--config-file`) | `$LOCALAI_MODELS_CONFIG_FILE`, `$CONFIG_FILE` |
+| `--addon-host-ops` | `fine-tuning=finetune.,quantization=quantize.` | Add-ons that may call host operations, as a comma list of `addon-id=operation-prefix`. An add-on that is not listed gets no host operation channel; an empty value lists none. See [Host operations]({{% relref "features/addons" %}}) | `$LOCALAI_ADDON_HOST_OPS` |
+| `--addons-role` | `combined` | How this process takes part in the add-on owner: `combined` (the node is its own owner), `owner` or `frontend`. See [Turning the owner on or off]({{% relref "features/addons#turning-the-owner-on-or-off" %}}) | `$LOCALAI_ADDONS_ROLE` |
+| `--addons-owner-address` | | `https://host:port` of the add-on owner carrier, with no path. Required for the `owner` and `frontend` roles | `$LOCALAI_ADDONS_OWNER_ADDRESS` |
+| `--addons-owner-listen` | | `owner` role only: the address the carrier listens on. Empty listens on all interfaces, on the port of `--addons-owner-address` | `$LOCALAI_ADDONS_OWNER_LISTEN` |
+| `--addons-carrier-dir` | | Directory with the carrier key set from `local-ai util addons-carrier-keys`. Required for the `owner` and `frontend` roles | `$LOCALAI_ADDONS_CARRIER_DIR` |
+| `--max-concurrent-backend-operations` | `1` | How many backend install, upgrade and delete operations run at once. `1` runs them one after the other. Operations on the same backend always run one at a time. In distributed mode it also bounds how many nodes one operation is sent to at the same time | `$LOCALAI_MAX_CONCURRENT_BACKEND_OPERATIONS` |
 | `--artifact-download-concurrency` | `1` | How many files of a model artifact to download at once. `1` downloads sequentially. Raising it helps artifacts split into many files on a fast link, at the cost of more concurrent load on the models volume. Whole files only — a single file is never split, so resume and per-file checksum verification are unaffected | `$LOCALAI_ARTIFACT_DOWNLOAD_CONCURRENCY` |
 
 Backend processes receive a private scratch directory through `TMPDIR`, `TMP`,
@@ -115,8 +121,23 @@ For more information on VRAM management, see [VRAM and Memory Management]({{%rel
 | Parameter | Default | Description | Environment Variable |
 |-----------|---------|-------------|----------------------|
 | `--f16` | `false` | Enable GPU acceleration | `$LOCALAI_F16`, `$F16` |
-| `-t, --threads` | | Number of threads used for parallel computation. Usage of the number of physical cores in the system is suggested | `$LOCALAI_THREADS`, `$THREADS` |
+| `-t, --threads` | Automatic | Number of threads used for parallel computation. See the default thread count below | `$LOCALAI_THREADS`, `$THREADS` |
 | `--context-size` | | Default context size for models (`-1` = each model's full trained context from GGUF metadata) | `$LOCALAI_CONTEXT_SIZE`, `$CONTEXT_SIZE` |
+
+### Default thread count
+
+When the server thread setting is unset or zero, LocalAI selects the smaller
+of the physical core count and Go's current `GOMAXPROCS` value at startup.
+The result is at least one thread.
+
+By default, Go accounts for CPU affinity and Linux container CPU quotas.
+For example, `docker run --cpus=2` limits the automatic default to two threads.
+Go normally applies a minimum of two for CPU quotas, so `--cpus=1` can still
+produce two threads. Set `--threads=1` if you need one inference thread.
+
+An explicit `GOMAXPROCS` value overrides Go's automatic CPU detection.
+A nonzero server thread setting from the CLI, environment, or saved runtime
+settings bypasses this automatic default.
 
 ## API Flags
 
@@ -142,6 +163,7 @@ For more information on VRAM management, see [VRAM and Memory Management]({{%rel
 | Parameter | Default | Description | Environment Variable |
 |-----------|---------|-------------|----------------------|
 | `--disable-predownload-scan` | `false` | If true, disables the best-effort security scanner before downloading any files | `$LOCALAI_DISABLE_PREDOWNLOAD_SCAN` |
+| `--disable-backend-install` | `false` | If true, refuse to install or upgrade backends from galleries, OCI images, URLs or paths, including automatic installs, so the running backend set stays exactly what was deployed and tested; only backends already present or provided via `--backends-system-path` are used | `$LOCALAI_DISABLE_BACKEND_INSTALL`, `$DISABLE_BACKEND_INSTALL` |
 | `--opaque-errors` | `false` | If true, all error responses are replaced with blank 500 errors. This is intended only for hardening against information leaks and is normally not recommended | `$LOCALAI_OPAQUE_ERRORS` |
 | `--use-subtle-key-comparison` | `false` | If true, API Key validation comparisons will be performed using constant-time comparisons rather than simple equality. This trades off performance on each request for resilience against timing attacks | `$LOCALAI_SUBTLE_KEY_COMPARISON` |
 | `--disable-api-key-requirement-for-http-get` | `false` | If true, a valid API key is not required to issue GET requests to portions of the web UI. This should only be enabled in secure testing environments | `$LOCALAI_DISABLE_API_KEY_REQUIREMENT_FOR_HTTP_GET` |
@@ -238,6 +260,22 @@ distinct from the `1` a failure reports.
 | `--p2p-network-id` | | Network ID for P2P mode, can be set arbitrarily by the user for grouping a set of instances | `$LOCALAI_P2P_NETWORK_ID`, `$P2P_NETWORK_ID` |
 | `--federated` | `false` | Enable federated instance | `$LOCALAI_FEDERATED`, `$FEDERATED` |
 
+## Library sources
+
+`local-ai library` manages the sources LocalAI reads add-ons, backends and models from. The sources are stored under the data path (`addons/sources.json`), the file the server reads, so the commands work with the server stopped.
+
+| Command | What it does |
+|---------|--------------|
+| `local-ai library list` | List every source with its kind, id, URL, and whether it is enabled, a shipped default, or removed |
+| `local-ai library add <url> --kind addon\|backend\|model [--id ID] [--name NAME] [--format library\|gallery]` | Add a source of your own |
+| `local-ai library remove <id>` | Remove a source. A removed default leaves a tombstone, so it does not come back at the next start |
+| `local-ai library enable <id>` | Turn a source on. This also brings back a removed default |
+| `local-ai library disable <id>` | Turn a source off without removing it |
+
+All `local-ai library` commands accept `--official-libraries` (`LOCALAI_OFFICIAL_LIBRARIES`, default `true`). With `--official-libraries=false` the list shows the shipped default sources as off. The same switch is the runtime setting `official_libraries` and the toggle "Use official libraries" in Settings. See [Library sources](/features/addons/#library-sources).
+
+When two enabled sources list the same entry (same kind and id), your own source wins over a shipped default. If two of your own sources list it, the entry is refused and the message names both sources: disable or remove one of them. The `--galleries` and `--backend-galleries` flags keep working: each gallery they name is added as a source of your own (kind `model` or `backend`, format `gallery`) at startup, unless it is already a source.
+
 ## Other Commands
 
 LocalAI supports several subcommands beyond `run`:
@@ -259,6 +297,21 @@ LocalAI supports several subcommands beyond `run`:
 - `local-ai completion` - Generate shell completion scripts for bash, zsh, or fish
 
 Use `local-ai <command> --help` for more information on each command.
+
+### Add-on carrier keys
+
+`local-ai util addons-carrier-keys` makes the key set that a separate add-on owner and its frontends share. See [Running the owner as its own workload]({{% relref "features/addons#running-the-owner-as-its-own-workload" %}}) for how the set is used.
+
+| Flag | Description |
+|------|-------------|
+| `--out` | Directory to write the key set to. Required. The command fails if the directory already holds any of the files, and it never overwrites a file. |
+| `--owner-host` | DNS name or IP address of the add-on owner, as the frontends dial it. Required. Repeat the flag for more than one. |
+
+```bash
+local-ai util addons-carrier-keys --out ./carrier-keys --owner-host addons.owner.example
+```
+
+The command prints which files go to the owner and which go to the frontends. It writes the files with mode `0600` in a directory with mode `0700`, and it does not keep the CA key.
 
 ## Examples
 

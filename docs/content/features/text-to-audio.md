@@ -80,7 +80,7 @@ this control may ignore it.
 
 ## Voice Library
 
-Administrators can manage reusable voice-cloning references from **Build → Voices → Speech voices** in the LocalAI WebUI. (Speakers, the first tab of the same page, is a separate feature: voiceprints for recognising who is speaking. See [Voice recognition](/features/voice-recognition/).) The library replaces per-model filesystem and YAML setup for supported cloning backends:
+Administrators can manage reusable voice-cloning references from the **Library** tab of the Voice add-on (**Add-ons → Voice**) in the LocalAI WebUI. (Recognition, the first tab of that page, is a separate feature: voiceprints for recognising who is speaking. See [Voice recognition](/features/voice-recognition/).) The library replaces per-model filesystem and YAML setup for supported cloning backends:
 
 1. Select **Add a speech voice** and upload or record a clear reference clip. A speech voice can also be made while enrolling a speaker, from the enrol sheet.
 2. Enter the exact words spoken in the clip. Add more audio/transcript pairs when the personality needs more examples.
@@ -701,6 +701,19 @@ curl http://localhost:8080/tts -H "Content-Type: application/json" -d '{
    }' | aplay
 ```
 
+#### Languages
+
+Pocket TTS has a separate model for each language and loads the English one by default. Set the `language` option to load another:
+
+```yaml
+name: pocket-tts-french
+backend: pocket-tts
+options:
+  - "language:french"
+```
+
+Supported values depend on the installed `pocket-tts` version; current releases accept `english`, `french`, `german`, `italian`, `spanish`, `portuguese` and `dutch`, plus variants such as `french_24l` and `english_2026-04`. The built-in voice names are resolved against the selected language model.
+
 ### Qwen3-TTS
 
 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) is a high-quality text-to-speech model that supports three modes: custom voice (predefined speakers), voice design (natural language instructions), and voice cloning (from reference audio).
@@ -1066,6 +1079,10 @@ prose style, so `voice` selects a speaker index or a voice name and `instruction
 equivalent. See the [NeMo-Speech.cpp backend]({{%relref "features/nemo-speech-cpp" %}})
 page for the full option list and the conversion steps.
 
+### LFM3-Audio (llama.cpp, experimental)
+
+[LFM3-Audio-2B](https://huggingface.co/LiquidAI/LFM3-Audio-2B-GGUF) synthesises speech through the `llama-cpp` backend. Install the gallery entry `lfm3-audio-2b` (or `lfm3-audio-2b-q8`). Its voices are `female` (the default) and `male`. The `language` field takes a language code, and the default is `en`. The model uses the sampling defaults stored in its GGUF files. This needs a llama.cpp build with LFM3-Audio support.
+
 ## Response format
 
 To provide some compatibility with OpenAI API regarding `response_format`, ffmpeg must be installed (or a docker image including ffmpeg used) to leverage converting the generated wav file before the api provide its response.
@@ -1083,3 +1100,105 @@ curl http://localhost:8080/tts -H "Content-Type: application/json" -d '{
 ```
 
 If a `response_format` is added in the query (other than `wav`) and ffmpeg is not available, the call will fail.
+
+## Sound prompt expansion
+
+`POST /v1/sound-generation` accepts optional `expansion_model` to expand a sound
+description with an installed chat model before audio generation:
+
+```bash
+curl http://localhost:8080/v1/sound-generation \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model_id": "music",
+    "text": "A gentle piano instrumental with warm strings",
+    "expansion_model": "chat",
+    "instrumental": true
+  }' --output music.wav
+```
+
+Replace `music` and `chat` with your installed audio and chat model names.
+The server requires non-empty `text` when you select `expansion_model`.
+Select an installed `llama-cpp` chat model with `use_tokenizer_template: true`
+and a tokenizer template that supports native tool calls. Expansion sends one
+strict, schema-backed `expand_sound` function tool with `tool_choice: required`.
+Other backends and configurations without tokenizer templates are rejected before
+inference. An explicit grammar is cleared for this request only; the installed
+model configuration is unchanged. The configuration flag alone does not guarantee
+that the selected model and template support native tools.
+The server validates the arguments and stops before audio generation if invalid.
+
+If your account has a model allowlist, it must allow both the resolved audio
+model and the selected expansion model. Sound permission covers this internal
+expansion; separate Chat permission is not required.
+Omit `expansion_model` to preserve the backend's existing prompt behavior.
+Python ACE-Step then keeps its native Simple-mode expansion.
+Advanced requests can continue to send caption, lyrics, and metadata directly.
+
+The chat model must return exactly one `expand_sound` tool call with required
+`caption` and `lyrics` strings in its arguments. Assistant prose and reasoning
+are never used as fallback arguments.
+The server caps output at 2,048 tokens and accepts only these fields:
+
+| Field | Accepted value |
+| --- | --- |
+| `caption` | 1–500 characters |
+| `lyrics` | 0–4000 characters |
+| `bpm` | Integer from 1 through 400 |
+| `keyscale` | One of 504 musical key spellings, such as `C`, `F# minor`, or `bb dorian` (see below) |
+| `timesignature` | `N/D`, with each integer from 1 through 32 |
+| `language` | String of at most 32 characters |
+| `duration_seconds` | Number from 1 through 600 |
+
+The `keyscale` tool schema enumerates the accepted spellings instead of using a
+regular expression. Use a root from `A`–`G` or `a`–`g`, optionally followed by
+`#` or `b`. The root can stand alone or have one space followed by `major`,
+`minor`, `maj`, `min`, `dorian`, `phrygian`, `lydian`, `mixolydian`, `locrian`,
+`ionian`, or `aeolian`. Mode names are lowercase; extra whitespace and other
+spellings are not accepted. This preserves the server's existing vocabulary.
+Omit optional fields when unspecified; do not use an empty string or `null`
+for an unknown key. Empty `lyrics` remains valid for instrumental sound.
+Invalid-key errors quote and escape the rejected key, showing at most 64
+characters and the total character count if truncated. They do not include
+other generated arguments.
+
+Explicit `instrumental: true` clears generated lyrics. Your selected `language`
+(or `vocal_language`) takes precedence over generated language.
+An explicit duration takes precedence over generated duration.
+Conflicting caption, style, lyrics, and music metadata in `params` cannot replace
+expanded fields. The audio backend receives structured fields and an expansion
+marker, with the original text cleared. Backend support for expanded requests varies.
+
+An unavailable model, a model without native tool support, a missing or wrong
+tool call, multiple calls, or invalid arguments returns a request error. Expansion failures stop the request before audio generation.
+Cancellation propagates to model loading, text inference, and audio generation.
+
+In **Studio → Sound → Simple**, choose a **Prompt expansion model** before
+submitting. Sound uses the same model picker as Home, with search for longer
+model lists and keyboard navigation. The list contains installed, enabled chat
+models. You must explicitly choose a model or **Backend default**; opening or
+dismissing the picker does not select a model. **Backend default**
+omits `expansion_model` and uses the audio backend's existing prompt behavior.
+Sound remembers either choice in this browser, separately from your chat model.
+If a remembered model disappears or loses chat support, choose again.
+Sound refreshes the list when you return to the browser tab.
+Without an installed chat model, choose **Backend default** to continue.
+**Re-run with edits** restores the expansion choice from that result.
+Older results without a saved expansion choice use **Backend default**.
+**Advanced** keeps its caption, lyrics, metadata, and thinking controls;
+it never sends `expansion_model`.
+
+Expanded requests support these audio families:
+
+| Backend family | Expanded input |
+| --- | --- |
+| audio-cpp YuE2 | Caption as style, generated lyrics |
+| audio-cpp HeartMuLa | Caption as tags, generated lyrics; instrumental requests are rejected because lyrics are required |
+| audio-cpp ACE-Step | Caption as prompt, generated lyrics and supported metadata |
+| audio-cpp Stable Audio | Caption as prompt |
+| Python ACE-Step | Structured caption and lyrics, bypassing its native Simple expansion |
+
+Other audio-cpp families reject expanded requests before audio inference.
+The chat expansion may already have run when the backend reports this error.
+Choose **Backend default** to use that backend's existing behavior.
+The UI does not detect backend families or silently retry without expansion.

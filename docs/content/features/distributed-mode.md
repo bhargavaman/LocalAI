@@ -81,6 +81,16 @@ The frontend is a standard LocalAI instance with distributed mode enabled. These
 | `--model-config-resync-interval` | `LOCALAI_MODEL_CONFIG_RESYNC_INTERVAL` | `30s` | How often each frontend compares its model configs with the shared models directory, to apply a change whose NATS message it missed. A frontend that missed a message serves the old config for at most this long. See [Model configs across frontends](#model-configs-across-frontends). |
 | `--expose-node-header` | `LOCALAI_EXPOSE_NODE_HEADER` | `false` | When enabled, inference responses carry an `X-LocalAI-Node` header with the ID of the worker node that served the request. Coverage spans the OpenAI-compatible endpoints (chat completions, completions, embeddings, audio transcriptions, audio speech / TTS, image generations, image inpainting), the Jina rerank endpoint (`/v1/rerank`), the VAD endpoints (`/v1/vad`, `/vad`), and the Anthropic Messages (`/v1/messages`) and Ollama (`/api/chat`, `/api/generate`, `/api/embed`) shims. Useful for debugging, observability and load-balancer attribution. Off by default: the node ID reveals internal cluster topology and should not be exposed on a public endpoint. Best-effort: under heavy concurrency for the same model across multiple replicas, the header may reflect a recent routing decision rather than this exact request's. Acceptable for observability and debugging. |
 
+### Add-ons
+
+Every `local-ai run` process is its own add-on owner by default. With several
+frontend replicas, run the owner as one separate workload with its own volume, and
+start the frontends with `--addons-role=frontend`, so they forward add-on requests
+to it and hold no add-on state. The library sources and the backend library
+installs also go through the owner: a frontend follows the owner's sources and
+installs backends on its own node. See
+[Running the owner as its own workload]({{% relref "features/addons#running-the-owner-as-its-own-workload" %}}).
+
 ### The model load deadline scales with the checkpoint
 
 The `LoadModel` deadline starts *after* the backend is installed and the model files are staged, so it covers only the worker backend's own checkpoint read and pipeline init. That work is proportional to the bytes on disk, which makes any fixed deadline a model-size cliff rather than a timeout: a 70 GB video checkpoint on a Jetson Thor worker failed reproducibly against the old fixed 5m default (`rpc error: code = DeadlineExceeded` after 953.5s of wall clock, roughly 11m of which was backend install and staging), and simply raising the constant would only move the cliff to the next larger model while making a genuinely wedged *small* model hang for the whole inflated duration.
@@ -385,6 +395,22 @@ local-ai worker \
 
 **HTTP file transfer:** Each worker also runs a small HTTP server for file transfer (model files, configs). By default it listens on the gRPC base port - 1 (e.g., if gRPC base is 50051, HTTP is on 50050). gRPC ports grow upward from the base port as additional models are loaded. Set `--advertise-http-addr` if the auto-detected address is not routable from the frontend.
 {{% /notice %}}
+
+### Disabling backend installation on workers
+
+A worker installs a backend the first time the frontend schedules a model
+that needs it. On workers that must run only pre-installed or system-path
+backends, set `LOCALAI_DISABLE_BACKEND_INSTALL=1` on the worker: it then
+refuses frontend install and upgrade requests for backends it does not have,
+and a model that needs a missing backend fails to load on that node with a
+clear error instead of pulling an image. Set the same variable on the
+frontend so its own install and upgrade endpoints refuse as well — each
+process enforces the switch for the backends it owns. Model installs on the
+frontend are judged against the workers' backends, so a model whose backend
+is installed on any healthy worker, under its own name or an alias, is still
+accepted; a worker marked unhealthy does not count until its heartbeat
+returns. See
+[Disabling backend installation]({{% relref "features/backends#disabling-backend-installation" %}}).
 
 ### Ephemeral request-input storage
 
@@ -1496,3 +1522,30 @@ Further enhancements, surfaced from a survey of SGLang, vLLM production-stack, R
 - **Prefill/decode disaggregation routing** ([#10068](https://github.com/mudler/LocalAI/issues/10068)): route prefill and decode to separate pools with KV transfer.
 - **Per-user fairness (VTC)** ([#10069](https://github.com/mudler/LocalAI/issues/10069)): balance per-user token usage against pod load.
 - **Minor tuning + MCP parity** ([#10070](https://github.com/mudler/LocalAI/issues/10070)): per-model TTL override, probabilistic LRU updates, and MCP scheduling-config tool parity.
+
+## Per-model worker environment
+
+A model's `env` map is sent with each backend installation as a complete
+per-process snapshot. The worker applies it only to that model replica's child
+process, on top of the worker's inherited environment; it never changes the
+frontend or worker daemon environment. Models sharing a backend executable can
+therefore use different credentials or runtime settings without sharing them.
+An empty string is an explicit value, not an instruction to remove a variable.
+
+When a slot is installed again with changed overrides (including removal of the
+last override), the worker restarts its child rather than reusing a process with
+stale settings. Removing an override restores the worker's inherited value, if
+one exists. Unload/reload a running model after changing its environment; this
+is not live environment mutation of an already loaded child.
+
+This requires updated frontends **and** workers. Legacy install requests omit
+the snapshot and retain legacy reuse behavior; older workers ignore the added
+field and cannot provide per-model environment isolation. Upgrade workers before
+relying on this feature. Environment snapshots may contain secrets and travel
+over the control transport: restrict NATS access and enable its authentication
+and TLS for untrusted networks. They are not secret-store references.
+
+Install coalescing is per frontend instance and includes a keyed identity of
+the snapshot, so concurrent installs with different environments do not share an
+install reply. The worker owns process-local snapshots; they are rebuilt from
+model configuration on each install, not persisted as a new cluster state store.

@@ -26,12 +26,14 @@ import HomeUndoToast from '../components/home/HomeUndoToast'
 import { useResources } from '../hooks/useResources'
 import { usePolling } from '../hooks/usePolling'
 import { useOperations } from '../hooks/useOperations'
+import { useAddonPage } from '../addons/useAddonPage'
 import { fileToBase64, backendControlApi, systemApi, modelsApi, mcpApi, nodesApi } from '../utils/api'
 import { readAttachmentText, renderPdfPages, PdfNoTextError } from '../utils/pdf'
 import { greetingKey } from '../utils/greeting'
 import {
   listConversations, setActiveConversation, removeConversation,
 } from '../utils/homeConversations'
+import { chatsStorageKey } from '../utils/chatStore'
 // eslint-disable-next-line no-unused-vars
 import Skeleton from '../components/Skeleton'
 import { staggerStyle } from '../hooks/useStagger'
@@ -56,7 +58,9 @@ export default function Home() {
   const navigate = useNavigate()
   const { addToast } = useOutletContext()
   const { t, i18n } = useTranslation('home')
-  const { isAdmin } = useAuth()
+  const { isAdmin, user } = useAuth()
+  // The signed-in account's own chat cache (see chatStore).
+  const chatsKey = chatsStorageKey(user?.id)
   const branding = useBranding()
   const { resources } = useResources()
   const { operations } = useOperations()
@@ -92,7 +96,7 @@ export default function Home() {
   const [distributedMode, setDistributedMode] = useState(false)
   const [clusterData, setClusterData] = useState(null)
   const [stripOpen, setStripOpen] = useState(false)
-  const [conversations, setConversations] = useState(() => listConversations())
+  const [conversations, setConversations] = useState(() => listConversations(chatsKey))
   const [leavingId, setLeavingId] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
   const textareaRef = useRef(null)
@@ -366,19 +370,19 @@ export default function Home() {
 
   // ----- Conversations -----------------------------------------------------
 
-  const refreshConversations = useCallback(() => setConversations(listConversations()), [])
+  const refreshConversations = useCallback(() => setConversations(listConversations(chatsKey)), [chatsKey])
 
   // Another tab can write chats, and Chat writes them after a short delay. Read
   // again when the tab changes or comes back into focus.
   useEffect(() => {
-    const onStorage = (e) => { if (!e.key || e.key === 'localai_chats_data') refreshConversations() }
+    const onStorage = (e) => { if (!e.key || e.key === chatsKey) refreshConversations() }
     window.addEventListener('storage', onStorage)
     window.addEventListener('focus', refreshConversations)
     return () => {
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('focus', refreshConversations)
     }
-  }, [refreshConversations])
+  }, [chatsKey, refreshConversations])
 
   // A delete is final when its undo time ends. Until then the chat stays in
   // storage and only the row is hidden.
@@ -386,10 +390,10 @@ export default function Home() {
     const id = pendingRef.current
     if (!id) return
     pendingRef.current = null
-    removeConversation(id)
+    removeConversation(id, chatsKey)
     setPendingDelete(null)
     refreshConversations()
-  }, [refreshConversations])
+  }, [chatsKey, refreshConversations])
 
   const commitRef = useRef(commitDelete)
   commitRef.current = commitDelete
@@ -421,9 +425,9 @@ export default function Home() {
 
   const resumeConversation = useCallback((conv) => {
     commitDelete()
-    if (setActiveConversation(conv.id)) navigate('/app/chat')
+    if (setActiveConversation(conv.id, chatsKey)) navigate('/app/chat')
     else refreshConversations()
-  }, [commitDelete, navigate, refreshConversations])
+  }, [chatsKey, commitDelete, navigate, refreshConversations])
 
   const visibleConversations = useMemo(
     () => conversations.filter(c => c.id !== pendingDelete?.id),
@@ -445,9 +449,11 @@ export default function Home() {
   const stripBusy = !!stagingOp || !!failedOp
   useEffect(() => { if (stripBusy) setStripOpen(true) }, [stripBusy])
 
+  // Studio is an add-on: its command is offered only while it is installed.
+  const studioPage = useAddonPage('studio', 'studio')
   const slashContext = useMemo(
-    () => ({ isAdmin, assistantAvailable, hasModels: hasModels && !firstRun, loadedCount }),
-    [isAdmin, assistantAvailable, hasModels, firstRun, loadedCount],
+    () => ({ isAdmin, assistantAvailable, hasModels: hasModels && !firstRun, loadedCount, studioInstalled: Boolean(studioPage) }),
+    [isAdmin, assistantAvailable, hasModels, firstRun, loadedCount, studioPage],
   )
 
   const runAction = useCallback((id) => {
@@ -463,12 +469,12 @@ export default function Home() {
         setStripOpen(true)
         stripRef.current?.scrollIntoView?.({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' })
         break
-      case 'studio': navigate('/app/studio'); break
+      case 'studio': if (studioPage) navigate(studioPage); break
       case 'settings': navigate('/app/settings'); break
       case 'docs': window.open(DOCS_URL, '_blank', 'noopener,noreferrer'); break
       default: break
     }
-  }, [navigate, openNewChat, openAssistantChat])
+  }, [navigate, openNewChat, openAssistantChat, studioPage])
 
   // "/" from anywhere that is not a text field starts a command.
   useEffect(() => {
@@ -668,7 +674,7 @@ export default function Home() {
             onDelete={requestDelete}
             emptyHint={(
               <div className="home-examples" aria-label={t('jump.examples')}>
-                {(isAdmin ? ['/gallery', '/import'] : []).concat(isAdmin && assistantAvailable ? ['/assistant'] : [], ['/studio']).map(c => (
+                {(isAdmin ? ['/gallery', '/import'] : []).concat(isAdmin && assistantAvailable ? ['/assistant'] : [], studioPage ? ['/studio'] : []).map(c => (
                   <code key={c}>{c}</code>
                 ))}
               </div>

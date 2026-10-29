@@ -2,6 +2,8 @@ package openai
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -83,37 +85,39 @@ var _ = Describe("transcriptStreamer", func() {
 // streamLLMResponse drives a full streamed realtime turn: live transcript
 // deltas while the LLM generates, then the whole message is synthesized once.
 var _ = Describe("streamLLMResponse", func() {
-	It("streams transcript deltas then synthesizes the whole message once", func() {
-		on := true
-		m := &fakeModel{
-			predictTokens:   []string{"Hello", " world.", " How are you?"},
-			predictResp:     backend.LLMResponse{Response: "Hello world. How are you?"},
-			ttsStreamChunks: [][]byte{{9}},
-			ttsStreamRate:   24000,
-		}
-		session := &Session{
-			OutputSampleRate: 24000,
-			ModelInterface:   m,
-			ModelConfig: &config.ModelConfig{
-				Pipeline: config.Pipeline{Streaming: config.PipelineStreaming{LLM: &on, TTS: &on}},
-			},
-		}
-		conv := &Conversation{}
-		t := &fakeTransport{}
-		llmCfg := &config.ModelConfig{}
+	for _, clauseFlag := range []*bool{nil, new(false)} {
+		It(fmt.Sprintf("buffers the whole reply with clause chunking %v", clauseFlag), func() {
+			on := true
+			m := &fakeModel{
+				predictTokens:   []string{"Hello", " world.", " How are you?"},
+				predictResp:     backend.LLMResponse{Response: "Hello world. How are you?"},
+				ttsStreamChunks: [][]byte{{9}},
+				ttsStreamRate:   24000,
+			}
+			session := &Session{
+				OutputSampleRate: 24000,
+				ModelInterface:   m,
+				ModelConfig: &config.ModelConfig{
+					Pipeline: config.Pipeline{Streaming: config.PipelineStreaming{LLM: &on, TTS: &on, ClauseChunking: clauseFlag}},
+				},
+			}
+			conv := &Conversation{}
+			t := &fakeTransport{}
+			llmCfg := &config.ModelConfig{}
 
-		r := &liveResponse{id: "resp1"}
-		handled := streamLLMResponse(context.Background(), session, conv, t, r, nil, nil, llmCfg, nil, nil, 0)
+			r := &liveResponse{id: "resp1"}
+			handled := streamLLMResponse(context.Background(), session, conv, t, r, nil, nil, llmCfg, nil, nil, 0)
 
-		Expect(handled).To(BeTrue())
-		// One live transcript delta per streamed token.
-		Expect(t.countEvents(types.ServerEventTypeResponseOutputAudioTranscriptDelta)).To(Equal(3))
-		// The whole message is synthesized ONCE (not per sentence): a single
-		// emitSpeech replays the one TTS stream chunk.
-		Expect(t.countEvents(types.ServerEventTypeResponseOutputAudioDelta)).To(Equal(1))
-		Expect(t.transcriptDeltaText()).To(Equal("Hello world. How are you?"))
-	})
+			Expect(handled).To(BeTrue())
+			// One live transcript delta per streamed token.
+			Expect(t.countEvents(types.ServerEventTypeResponseOutputAudioTranscriptDelta)).To(Equal(3))
+			// The whole message is synthesized ONCE (not per sentence): a single
+			// emitSpeech replays the one TTS stream chunk.
+			Expect(t.countEvents(types.ServerEventTypeResponseOutputAudioDelta)).To(Equal(1))
+			Expect(t.transcriptDeltaText()).To(Equal("Hello world. How are you?"))
+		})
 
+	}
 	It("synthesizes each clause as it completes when clause chunking is enabled", func() {
 		on := true
 		m := &fakeModel{
@@ -222,6 +226,35 @@ var _ = Describe("streamLLMResponse", func() {
 })
 
 var _ = Describe("triggerResponse", func() {
+	// A barge-in cancels the response context while the LLM is still generating.
+	// The call then fails with the context error. That is a cancel, not a
+	// failure: the client must get response.done{cancelled} and no error, or it
+	// waits for a terminal that never comes.
+	It("ends as cancelled when the context is cancelled during the LLM call", func() {
+		m := &fakeModel{cfg: &config.ModelConfig{}, predictUntilCancel: true}
+		session := &Session{OutputSampleRate: 24000, ModelInterface: m, ModelConfig: &config.ModelConfig{}}
+		t := &fakeTransport{}
+		ctx, cancel := context.WithCancel(context.Background())
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			triggerResponse(ctx, session, &Conversation{}, t, nil)
+		}()
+		cancel()
+		Eventually(done, 2*time.Second).Should(BeClosed())
+
+		Expect(t.countEvents(types.ServerEventTypeResponseDone)).To(Equal(1))
+		Expect(t.countEvents(types.ServerEventTypeError)).To(BeZero())
+		var status types.ResponseStatus
+		for _, e := range t.events() {
+			if d, ok := e.(types.ResponseDoneEvent); ok {
+				status = d.Response.Status
+			}
+		}
+		Expect(status).To(Equal(types.ResponseStatusCancelled))
+	})
+
 	It("emits exactly one response.created and one response.done with output and usage", func() {
 		m := &fakeModel{
 			cfg: &config.ModelConfig{},

@@ -9,6 +9,7 @@ import (
 	mcpTools "github.com/mudler/LocalAI/core/http/endpoints/mcp"
 	"github.com/mudler/LocalAI/core/http/middleware"
 	"github.com/mudler/LocalAI/core/schema"
+	"github.com/mudler/LocalAI/core/services/chathistory"
 	compressionservice "github.com/mudler/LocalAI/core/services/compression"
 	"github.com/mudler/LocalAI/core/services/galleryop"
 	"github.com/mudler/LocalAI/core/services/monitoring"
@@ -22,6 +23,35 @@ import (
 	echoswagger "github.com/swaggo/echo-swagger"
 )
 
+// RegisterLibrarySourceRoutes registers the library-source routes. On a
+// combined or owner process they work on the local store. On a frontend with
+// add-ons on they forward to the owner, which is the only writer, after the
+// actor middleware. On a frontend with add-ons off there is no owner to reach,
+// and they answer unavailable.
+func RegisterLibrarySourceRoutes(router *echo.Echo, app *application.Application, appConfig *config.ApplicationConfig, adminMiddleware echo.MiddlewareFunc) {
+	librarySources := localai.LibrarySourcesEndpoints{Admin: app.LibraryAdmin()}
+	mws := []echo.MiddlewareFunc{adminMiddleware}
+	if app.AddonFrontend() {
+		if !app.AddonsEnabled() {
+			refuse := middleware.LibrarySourcesOnOwner()
+			router.GET("/api/library/sources", refuse, adminMiddleware)
+			router.POST("/api/library/sources", refuse, adminMiddleware)
+			router.POST("/api/library/sources/:id/enable", refuse, adminMiddleware)
+			router.POST("/api/library/sources/:id/disable", refuse, adminMiddleware)
+			router.PUT("/api/library/sources/:id", refuse, adminMiddleware)
+			router.DELETE("/api/library/sources/:id", refuse, adminMiddleware)
+			return
+		}
+		mws = append(mws, localai.LibraryActor(app))
+	}
+	router.GET("/api/library/sources", librarySources.List(), mws...)
+	router.POST("/api/library/sources", librarySources.Add(), mws...)
+	router.POST("/api/library/sources/:id/enable", librarySources.SetEnabled(true), mws...)
+	router.POST("/api/library/sources/:id/disable", librarySources.SetEnabled(false), mws...)
+	router.PUT("/api/library/sources/:id", librarySources.Update(), mws...)
+	router.DELETE("/api/library/sources/:id", librarySources.Remove(), mws...)
+}
+
 func RegisterLocalAIRoutes(router *echo.Echo,
 	requestExtractor *middleware.RequestExtractor,
 	cl *config.ModelConfigLoader,
@@ -33,13 +63,18 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 	app *application.Application,
 	adminMiddleware echo.MiddlewareFunc,
 	mcpJobsMw echo.MiddlewareFunc,
-	mcpMw echo.MiddlewareFunc) {
+	mcpMw echo.MiddlewareFunc,
+	chatHistoryMw echo.MiddlewareFunc) {
 
 	// Themed index first, then the library's wildcard for its own assets.
 	RegisterSwaggerTheme(router)
 	router.GET("/swagger/*", echoswagger.EchoWrapHandler(func(c *echoswagger.Config) {
 		c.URLs = []string{"doc.json"}
 	}))
+
+	// Library sources of the add-on, backend and model kinds: the same store
+	// and functions as `local-ai library`. Administrators only.
+	RegisterLibrarySourceRoutes(router, app, appConfig, adminMiddleware)
 
 	motion := localai.NewMotionEndpoints(app)
 	router.POST("/api/motion/sessions", motion.Create)
@@ -62,7 +97,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 
 		// Edit model page
 		router.GET("/models/edit/:name", localai.GetEditModelPage(cl, appConfig), adminMiddleware)
-		modelGalleryEndpointService := localai.CreateModelGalleryEndpointService(appConfig.Galleries, appConfig.BackendGalleries, appConfig.SystemState, galleryService, cl)
+		modelGalleryEndpointService := localai.CreateModelGalleryEndpointService(appConfig, galleryService, cl)
 		router.POST("/models/apply", modelGalleryEndpointService.ApplyModelGalleryEndpoint(), adminMiddleware)
 		router.POST("/models/delete/:name", modelGalleryEndpointService.DeleteModelGalleryEndpoint(), adminMiddleware)
 
@@ -76,7 +111,21 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 			appConfig.SystemState,
 			galleryService,
 			app.UpgradeChecker())
-		router.POST("/backends/apply", backendGalleryEndpointService.ApplyBackendEndpoint(appConfig.SystemState), adminMiddleware)
+		router.POST("/backends/apply", backendGalleryEndpointService.ApplyBackendEndpoint(appConfig.SystemState), adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
+		if lib := app.BackendLibrary(); lib != nil {
+			// On a frontend the owner resolves the entry and this node installs
+			// it, so the request carries the actor that the owner checks.
+			libMws := []echo.MiddlewareFunc{adminMiddleware}
+			if app.AddonFrontend() {
+				libMws = append(libMws, localai.LibraryActor(app))
+			}
+			router.POST("/backends/library/install", localai.InstallBackendFromLibraryEndpoint(lib, galleryService), append(libMws, middleware.RequireBackendInstallEnabled(appConfig))...)
+			router.GET("/backends/library/updates", localai.BackendLibraryUpdatesEndpoint(lib), libMws...)
+		} else if app.AddonFrontend() {
+			refuse := middleware.LibrarySourcesOnOwner()
+			router.POST("/backends/library/install", refuse, adminMiddleware)
+			router.GET("/backends/library/updates", refuse, adminMiddleware)
+		}
 		router.POST("/backends/delete/:name", backendGalleryEndpointService.DeleteBackendEndpoint(), adminMiddleware)
 		router.GET("/backends", backendGalleryEndpointService.ListBackendsEndpoint(), adminMiddleware)
 		router.GET("/backends/available", backendGalleryEndpointService.ListAvailableBackendsEndpoint(appConfig.SystemState, ClusterCapabilityProviderFor(app), ClusterInstalledProviderFor(app)), adminMiddleware)
@@ -85,7 +134,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		router.GET("/backends/jobs/:uuid", backendGalleryEndpointService.GetOpStatusEndpoint(), adminMiddleware)
 		router.GET("/backends/upgrades", backendGalleryEndpointService.GetUpgradesEndpoint(), adminMiddleware)
 		router.POST("/backends/upgrades/check", backendGalleryEndpointService.CheckUpgradesEndpoint(), adminMiddleware)
-		router.POST("/backends/upgrade/:name", backendGalleryEndpointService.UpgradeBackendEndpoint(), adminMiddleware)
+		router.POST("/backends/upgrade/:name", backendGalleryEndpointService.UpgradeBackendEndpoint(), adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
 		// Custom model import endpoint
 		router.POST("/models/import", localai.ImportModelEndpoint(cl, galleryService, appConfig, opcache), adminMiddleware)
 
@@ -121,6 +170,12 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		depthHandler,
 		requestExtractor.BuildFilteredFirstAvailableDefaultModel(config.BuildUsecaseFilterFn(config.FLAG_DEPTH)),
 		requestExtractor.SetModelAndConfig(func() schema.LocalAIRequest { return new(schema.DepthRequest) }))
+
+	forecastHandler := localai.ForecastEndpoint(cl, ml, appConfig)
+	router.POST("/v1/forecast",
+		forecastHandler,
+		requestExtractor.BuildFilteredFirstAvailableDefaultModel(config.BuildUsecaseFilterFn(config.FLAG_FORECAST)),
+		requestExtractor.SetModelAndConfig(func() schema.LocalAIRequest { return new(schema.ForecastRequest) }))
 
 	// Face recognition endpoints
 	faceMw := []echo.MiddlewareFunc{
@@ -407,6 +462,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 					"load_status":  "/api/models/:id/load-status",
 					"load_cancel":  "/api/models/:id/load-cancel",
 				},
+				// #nosec G101 -- route paths, not credentials.
 				"ai_functions": map[string]string{
 					"tts":            "/tts",
 					"tts_voices":     "/v1/audio/voices",
@@ -427,6 +483,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 					"prompts":          "/v1/mcp/prompts/:model",
 					"resources":        "/v1/mcp/resources/:model",
 				},
+				// #nosec G101 -- route paths, not credentials.
 				"p2p": map[string]string{
 					"nodes": "/api/p2p",
 					"token": "/api/p2p/token",
@@ -456,6 +513,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 				"config_patch":    true,
 				"vram_estimate":   true,
 				"model_storage":   true,
+				"backend_install": !appConfig.DisableBackendInstall,
 				"mcp":             !appConfig.DisableMCP,
 				"agents":          appConfig.AgentPool.Enabled,
 				"p2p":             appConfig.P2PToken != "",
@@ -470,16 +528,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 	router.GET("/api/instructions", localai.ListAPIInstructionsEndpoint())
 	router.GET("/api/instructions/:name", localai.GetAPIInstructionEndpoint())
 
-	router.GET("/api/features", func(c echo.Context) error {
-		return c.JSON(200, map[string]bool{
-			"agents":            appConfig.AgentPool.Enabled,
-			"mcp":               !appConfig.DisableMCP,
-			"fine_tuning":       true,
-			"quantization":      true,
-			"distributed":       appConfig.Distributed.Enabled,
-			"localai_assistant": !appConfig.DisableLocalAIAssistant && app.LocalAIAssistant() != nil,
-		})
-	})
+	RegisterFeatureRoutes(router, appConfig, app)
 
 	router.GET("/system", localai.SystemInformations(cl, ml, appConfig, monitoring.NewLocalProcessSampler()), adminMiddleware)
 
@@ -572,4 +621,25 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		router.POST("/api/agent/tasks/:name/execute", localai.ExecuteTaskByNameEndpoint(app), mcpJobsMw)
 	}
 
+	// Chat history persistence (#9432). Skipped entirely when the store is
+	// nil (WebUI disabled or no auth database) — registering routes that
+	// could only ever fail adds surface area for nothing.
+	if app != nil {
+		RegisterChatHistoryRoutes(router, app.ChatHistoryStore(), chatHistoryMw)
+	}
+}
+
+// RegisterChatHistoryRoutes wires the per-user conversation endpoints. A nil
+// store registers nothing, so the React UI sees 404 and stays on localStorage.
+func RegisterChatHistoryRoutes(router *echo.Echo, store *chathistory.Store, chatHistoryMw echo.MiddlewareFunc) {
+	if store == nil {
+		return
+	}
+	router.GET("/api/conversations", localai.ListConversationsEndpoint(store), chatHistoryMw)
+	router.POST("/api/conversations", localai.SaveConversationEndpoint(store), chatHistoryMw)
+	router.DELETE("/api/conversations", localai.DeleteAllConversationsEndpoint(store), chatHistoryMw)
+	router.PUT("/api/conversations/bulk", localai.BulkReplaceConversationsEndpoint(store), chatHistoryMw)
+	router.GET("/api/conversations/:id", localai.GetConversationEndpoint(store), chatHistoryMw)
+	router.PUT("/api/conversations/:id", localai.SaveConversationByIDEndpoint(store), chatHistoryMw)
+	router.DELETE("/api/conversations/:id", localai.DeleteConversationEndpoint(store), chatHistoryMw)
 }

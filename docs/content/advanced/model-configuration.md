@@ -157,7 +157,7 @@ behavior.
 
 The initially migrated backend families are `transformers` and its aliases,
 `diffusers`, `qwen-asr`, `fish-speech`, `nemo`, `voxcpm`, `qwen-tts`,
-`liquid-audio`, `vllm`, `vllm-omni`, and `sglang`. Automatic imports add
+`vllm`, `vllm-omni`, and `sglang`. Automatic imports add
 artifact declarations only for this set. Compatible external backends may opt
 in by declaring the artifact explicitly.
 
@@ -686,7 +686,7 @@ These load-time options control how the backend parses `<think>` reasoning block
 This is the load-time reasoning configuration. The orthogonal per-request `enable_thinking` chat-template kwarg toggles thinking on/off per call without restarting the model. It can be driven either by the YAML `reasoning.disable` field (model default) or per request via the OpenAI `reasoning_effort` field on `/v1/chat/completions`:
 
 - `reasoning_effort: "none"` disables thinking for that request (`enable_thinking=false`) - useful to run a single reasoning model like Qwen3 for low-latency tasks while still enabling reasoning on other requests.
-- `reasoning_effort: "minimal" | "low" | "medium" | "high"` enables thinking, unless the model config explicitly set `reasoning.disable: true` (an operator's explicit disable wins and is never re-enabled by a request).
+- `reasoning_effort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"` enables thinking, unless the model config explicitly set `reasoning.disable: true` (an operator's explicit disable wins and is never re-enabled by a request).
 {{% /notice %}}
 
 #### `reasoning_effort` as a chat-template kwarg
@@ -697,7 +697,7 @@ Set a per-model default in the config so every request inherits it (a per-reques
 
 ```yaml
 name: my-model
-reasoning_effort: none   # none | minimal | low | medium | high
+reasoning_effort: none   # none | minimal | low | medium | high | xhigh | max
 ```
 
 For [realtime pipelines]({{%relref "features/openai-realtime" %}}), set it on the pipeline so it applies to the pipeline's LLM without editing that model's own config:
@@ -833,6 +833,12 @@ The fields below come from upstream llama.cpp's **CLI completion tool** and are 
 
 These options apply when using the `vllm` backend:
 
+The `vllm` backend validates sampling parameters before generation. Stop strings
+work with streaming and non-streaming requests; an empty stop string is invalid.
+Presence and frequency penalties must be between -2 and 2. A temperature of `0`
+selects greedy decoding, which ignores `top_p` and `top_k`. A seed of `-1` uses
+vLLM's default random seed behavior.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `gpu_memory_utilization` | float32 | GPU memory utilization (0.0-1.0, default 0.9) |
@@ -909,6 +915,7 @@ Configure how the model handles function/tool calls:
 | `function.replace_function_results` | array | | Replace function call results with patterns |
 | `function.replace_llm_results` | array | | Replace LLM results with patterns |
 | `function.capture_llm_results` | array | | Capture LLM results as text (e.g., for "thinking" blocks) |
+| `function.xml_format_preset` | string | | Force an XML tool-call format: `qwen3-coder`, `qwen3.5`, `lfm3`, `glm-4.5`, `minimax-m2`, `kimi-k2` and others. Empty tries all of them |
 
 ### Grammar Configuration
 
@@ -1009,6 +1016,7 @@ Agent/autonomous agent configuration:
 | `agent.enable_planning` | bool | Enable planning capabilities |
 | `agent.enable_mcp_prompts` | bool | Enable MCP prompts |
 | `agent.enable_plan_re_evaluator` | bool | Enable plan re-evaluation |
+| `agent.max_generation_tokens` | int | Output-token cap for each completion in the agent loop (agent jobs, `/api/agent/jobs`). Bounds a single completion that keeps generating, which `max_iterations` and `loop_detection` do not. A request that already carries a cap keeps it, so a length retry can still raise it. `0` (default) keeps the client default of 16384 |
 
 ## Reasoning Configuration
 
@@ -1128,6 +1136,7 @@ Define pipelines for audio-to-audio processing and the [Realtime API]({{%relref 
 | `pipeline.llm` | string | LLM model name |
 | `pipeline.transcription` | string | Transcription model name |
 | `pipeline.vad` | string | Voice activity detection model name |
+| `pipeline.any_to_any` | bool | When `true`, a `realtime_audio` model runs as one speech-to-speech model (audio in, audio or text out) instead of the chained VAD, transcription, LLM and TTS path. Experimental. See [Speech-to-speech models]({{%relref "features/openai-realtime#speech-to-speech-models-experimental" %}}) |
 | `pipeline.turn_detection` | object | Realtime turn-detection defaults. Keys: `type` (`server_vad`/`semantic_vad`), `eagerness` (`low`/`medium`/`high`/`auto`), `retranscribe`, `vad_window_sec` (widen the per-tick VAD scan window; values below the automatic floor are ignored). See [Realtime turn detection]({{%relref "features/openai-realtime" %}}) |
 | `pipeline.classifier` | object | Realtime classifier mode: prefill-scored option selection instead of generation. Keys: `enabled`, `threshold`, `normalization` (`raw`/`mean`), `history_items`, `fallback` (`mode`: `none`/`reply`/`generate`, `reply`), `options` (list of `id`, `description`, `reply`, `tool` `{name, arguments}`), `address` (wake-word gate: `names`, `mode`: `ignore`/`reply`, `reply`), `model` (optional separate scoring config). See [Realtime classifier mode]({{%relref "features/openai-realtime#classifier-mode-localai-extension" %}}) |
 

@@ -218,7 +218,8 @@
     },
     "kind": {
       "model": "model",
-      "backend": "backend"
+      "backend": "backend",
+      "addon": "add-on"
     },
     "verb": {
       "installing": "Installing {{kind}}",
@@ -227,7 +228,9 @@
       "staging": "Staging model",
       "removing": "Removing {{kind}}",
       "failedRemoval": "Couldn't remove {{kind}}",
-      "failedStaging": "Couldn't stage model"
+      "failedStaging": "Couldn't stage model",
+      "upgrading": "Upgrading {{kind}}",
+      "failedUpgrade": "Couldn't upgrade {{kind}}"
     },
     "phase": {
       "resolving": "Resolving files",
@@ -260,7 +263,8 @@
       "all": "All",
       "models": "Models",
       "backends": "Backends",
-      "cluster": "Cluster"
+      "cluster": "Cluster",
+      "addons": "Add-ons"
     },
     "summaryRunning_one": "{{count}} operation running.",
     "summaryRunning_other": "{{count}} operations running.",
@@ -270,7 +274,11 @@
     "summaryQuiet_other": "Nothing running. {{count}} operations since startup.",
     "summaryIdle": "Nothing running.",
     "emptyFiltered": "No operations match this filter.",
-    "showAll": "Show all"
+    "showAll": "Show all",
+    "upgradeVersions": "{{from}} to {{to}}",
+    "rowUpgraded": "Upgraded in {{duration}}",
+    "rowUpgradedPlain": "Upgraded",
+    "viewInAddons": "View in Add-ons"
   },
   "backends": {
     "title": "Backend Management",
@@ -365,6 +373,9 @@
     "actionsFor": "Actions for {{name}}",
     "protected": "Protected",
     "protectedTitle": "System backends are managed outside the gallery",
+    "installDisabled": "Backend installation is disabled on this server. Backends are provided by the system and installed outside LocalAI.",
+    "installDisabledTitle": "Backend installation is disabled on this server",
+    "installDisabledShort": "Install disabled",
     "logs": "Logs",
     "usedBy_one": "Used by {{count}} model:",
     "usedBy_other": "Used by {{count}} models:",
@@ -373,6 +384,7 @@
     "clear": "Clear",
     "clearFilters": "Clear filters",
     "noMatches": "No installed backends match the current search and filters.",
+    "libraryEmpty": "The library {{name}} has no backends here.",
     "emptyTitle": "No backends installed yet",
     "emptyBody": "Install a backend from the Catalog to give this host a runtime for models.",
     "openCatalog": "Open the catalog",
@@ -420,8 +432,37 @@
       "repository": "Repository",
       "license": "License",
       "tags": "Tags",
-      "links": "Links"
-    }
+      "links": "Links",
+      "library": "Library",
+      "pinnedDigest": "Pinned digest"
+    },
+    "nodeRemoval": {
+      "action": "Remove from {{node}}…",
+      "title": "Remove {{name}} from {{node}}?",
+      "message": "This affects only this node and can stop models using this backend.",
+      "inventoryUnknown": "Inventory not verified.",
+      "inventoryError": "Inventory unavailable. Retry to verify protection.",
+      "unreachable": "Node is unavailable or not a healthy backend node.",
+      "absent": "Exact backend is not installed on this node.",
+      "protected": "System, meta, or unknown protection: removal is unavailable.",
+      "managed": "Verified user-managed installation",
+      "retry": "Retry inventory for {{node}}",
+      "failed": "Could not remove {{name}} from {{node}}: {{message}}",
+      "refreshFailed": "Backend data could not be refreshed. Displayed data may be stale. Retry refresh.",
+      "stale": "Deletion succeeded, but backend data could not be refreshed. Displayed data may be stale. Retry refresh; do not repeat deletion.",
+      "refresh": "Retry backend refresh"
+    },
+    "library": {
+      "from": "Library: {{library}}",
+      "pinned": "Pinned to {{digest}}",
+      "updated": "{{name}} updated from its library.",
+      "updateFailed": "The update failed. {{message}}"
+    },
+    "reviewButton": "Updates ({{count}})",
+    "reviewTitle": "Review backend updates",
+    "reviewDescription": "Nothing is upgraded until you choose here. Models that use an upgraded backend restart.",
+    "reviewDone": "Update started for {{name}}.",
+    "reviewFailed": "Update failed for {{name}}: {{message}}"
   },
   "logs": {
     "title": "Backend logs",

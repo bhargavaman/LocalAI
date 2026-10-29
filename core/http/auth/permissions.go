@@ -34,6 +34,7 @@ const (
 	FeatureLocalAIAssistant = "localai_assistant"
 
 	// General features (default OFF for new users)
+	FeatureAddons       = "addons"
 	FeatureFineTuning   = "fine_tuning"
 	FeatureQuantization = "quantization"
 
@@ -61,17 +62,19 @@ const (
 	FeatureVoiceRecognition    = "voice_recognition"
 	FeatureAudioTransform      = "audio_transform"
 	FeatureDecisions           = "decisions"
+	FeatureForecast            = "forecast"
 	// FeaturePIIFilter gates the synchronous PII analyze/redact service
 	// (POST /api/pii/{analyze,redact}). Default ON like the other API
 	// features; the admin-only events log is gated separately in-handler.
-	FeaturePIIFilter = "pii_filter"
+	FeaturePIIFilter   = "pii_filter"
+	FeatureChatHistory = "chat_history"
 )
 
 // AgentFeatures lists agent-related features (default OFF).
 var AgentFeatures = []string{FeatureAgents, FeatureSkills, FeatureCollections, FeatureMCPJobs, FeatureLocalAIAssistant}
 
 // GeneralFeatures lists general features (default OFF).
-var GeneralFeatures = []string{FeatureFineTuning, FeatureQuantization}
+var GeneralFeatures = []string{FeatureAddons, FeatureFineTuning, FeatureQuantization}
 
 // APIFeatures lists API endpoint features (default ON).
 var APIFeatures = []string{
@@ -80,7 +83,8 @@ var APIFeatures = []string{
 	FeatureVAD, FeatureDetection, FeatureVideo, Feature3D, FeatureMotion, FeatureEmbeddings, FeatureSound,
 	FeatureRealtime, FeatureModeration, FeatureRerank, FeatureTokenize, FeatureMCP, FeatureStores,
 	FeatureFaceRecognition, FeatureVoiceRecognition, FeatureAudioTransform,
-	FeaturePIIFilter, FeatureDecisions,
+	FeaturePIIFilter, FeatureDecisions, FeatureForecast,
+	FeatureChatHistory,
 }
 
 // AllFeatures lists all known features (used by UI and validation).
