@@ -138,7 +138,7 @@ test.describe('Add-on updates and the explicit upgrade through the real owner', 
     await state.memberPage.goto('/app/addons')
     const card = state.memberPage.locator('[data-app="tables"]')
     await expect(card.getByTestId('update-chip')).toBeVisible({ timeout: 25_000 })
-    await expect(card.locator('.ad-tile__state')).toHaveText('On')
+    await expect(card.locator('.ad-tile__state')).toHaveText('Running')
     await shoot(state.memberPage, 'updates-pending-chip-1280', 'update-chip')
     const read = await pageFetch(state.memberPage, '/api/addons/tables/update')
     expect(read.status).toBe(200)
@@ -173,31 +173,30 @@ test.describe('Add-on updates and the explicit upgrade through the real owner', 
     await outsider.context.close()
   })
 
-  test('updates: the sheet names the library, versions and digests, a cancel sends nothing, and the upgrade backs up and keeps the data', async ({ browser }) => {
+  test('updates: the dialog names the library, versions and digests, a cancel sends nothing, and the upgrade backs up and keeps the data', async ({ browser }) => {
     const admin = await browserAs(browser, 'admin')
     const api = await apiAs('admin')
     await openManage(admin.page)
     await expect(admin.page.getByTestId('update-state')).toHaveAttribute('data-state', 'update-available')
     state.candidate = (await installed(api)).update.digest
     await admin.page.getByTestId('update-upgrade').click()
-    const dialog = admin.page.getByTestId('update-review')
+    const dialog = admin.page.getByTestId('upgrade-confirm')
     await expect(dialog).toBeVisible()
-    await expect(dialog.getByTestId('update-review-detail')).toContainText('development')
-    await expect(dialog.getByTestId('update-review-detail')).toContainText(state.firstDigest.slice(0, 19))
-    await expect(dialog.getByTestId('update-review-detail')).toContainText(state.candidate.slice(0, 19))
-    await expect(dialog).toContainText('backs up the data')
-    await shoot(admin.page, 'updates-dialog-1280', 'update-review')
+    await expect(dialog).toContainText('development')
+    await expect(dialog).toContainText(state.firstDigest.slice(0, 19))
+    await expect(dialog).toContainText(state.candidate.slice(0, 19))
+    await expect(dialog).toContainText('backed up before anything changes')
+    await shoot(admin.page, 'updates-dialog-1280', 'upgrade-confirm')
     // Escape closes it and sends nothing.
     await admin.page.keyboard.press('Escape')
     await expect(dialog).toBeHidden()
     expect((await installed(api)).digest).toBe(state.firstDigest)
 
     await admin.page.getByTestId('update-upgrade').click()
-    await admin.page.getByTestId('update-review-selected').click()
+    await admin.page.getByRole('alertdialog').getByRole('button', { name: 'Upgrade' }).click()
     await expect(admin.page.getByTestId('upgrade-progress')).toBeVisible()
     await shoot(admin.page, 'updates-progress-1280', null, { settle: 0 })
     await expect(admin.page.getByTestId('upgrade-progress')).toBeHidden({ timeout: 90_000 })
-    await admin.page.getByTestId('update-review-close').click()
     await expect(admin.page.getByTestId('update-state')).toHaveAttribute('data-state', 'up-to-date', { timeout: 30_000 })
     const now = await installed(api)
     expect(now.digest).toBe(state.candidate)
@@ -239,13 +238,33 @@ test.describe('Add-on updates and the explicit upgrade through the real owner', 
     expect(results.map(r => r.status).sort(), JSON.stringify(results)).toEqual([200, 409])
     const loser = results.find(r => r.status === 409)
     expect(loser.json.error.type).toBe('upgrade_conflict')
+    const winnerIndex = results.findIndex(r => r.status === 200)
+    const winnerId = [one, two][winnerIndex]
+    const winnerPage = [a.page, b.page][winnerIndex]
+    expect(results[winnerIndex].json.payload.OperationID).toBe(winnerId)
+    expect(results[winnerIndex].json.payload.Phase).toBe('accepted')
+    // Acceptance does not publish a generation. Poll as the winning browser
+    // session so this read remains bound to the actor that submitted the work.
+    let terminal
+    await expect.poll(async () => {
+      const status = await pageFetch(winnerPage, '/api/addons/dispatch', {
+        method: 'POST', body: { addonId: 'tables', operationId: winnerId, action: 'operation-status', arguments: {} },
+      })
+      expect(status.status, JSON.stringify(status.json)).toBe(200)
+      terminal = status.json.payload
+      expect(terminal.OperationID).toBe(winnerId)
+      return terminal.Phase
+    }).toMatch(/^(completed|failed)$/)
+    expect(terminal.Phase, JSON.stringify(terminal)).toBe('completed')
+    expect(terminal.Generation).toBe(3)
     const after = await installed(api)
     expect(after.generation).toBe(3)
     expect(after.digest).toBe(now.update.digest)
     state.thirdDigest = after.digest
     // The winner's operation replays and does not run again.
-    const again = await pageFetch(a.page, '/api/addons/tables/upgrade', { method: 'POST', body: body(results[0].status === 200 ? one : two), headers: { 'X-LocalAI-Confirm': results[0].status === 200 ? one : two } })
+    const again = await pageFetch(winnerPage, '/api/addons/tables/upgrade', { method: 'POST', body: body(winnerId), headers: { 'X-LocalAI-Confirm': winnerId } })
     expect(again.status).toBe(200)
+    expect(again.json.payload).toEqual(terminal)
     expect((await installed(api)).generation).toBe(3)
     await a.context.close()
     await b.context.close()

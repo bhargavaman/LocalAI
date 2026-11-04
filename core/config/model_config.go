@@ -23,7 +23,6 @@ import (
 	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/modelartifacts"
 	"github.com/mudler/LocalAI/pkg/reasoning"
-	"github.com/mudler/cogito"
 	"github.com/mudler/xlog"
 	"gopkg.in/yaml.v3"
 )
@@ -60,9 +59,10 @@ type TTSVoice struct {
 type ModelConfig struct {
 	modelConfigFile string `yaml:"-" json:"-"`
 	modelTemplate   string `yaml:"-" json:"-"`
-	// evidenceCheck is set only from a profile alias's block, so a plain
-	// model config cannot switch it on by a top-level key.
+	// evidenceCheck and requireTool are set only from a profile alias's
+	// block, so a plain model config cannot switch them on by a top-level key.
 	evidenceCheck EvidenceCheckConfig `yaml:"-" json:"-"`
+	requireTool   bool                `yaml:"-" json:"-"`
 	// persistedConfigRevision is the revision of this model's persisted
 	// configuration, stamped when the loader materializes it and therefore
 	// before any per-request override is merged in. The request pipeline
@@ -677,12 +677,28 @@ type ProfileConfig struct {
 	MCP MCPConfig `yaml:"mcp,omitempty" json:"mcp,omitempty"`
 	// ClientTools overrides the target's client_tools policy.
 	ClientTools string `yaml:"client_tools,omitempty" json:"client_tools,omitempty"`
-	// EvidenceCheck marks answers whose numbers have no evidence in the request.
+	// EvidenceCheck marks answers whose numbers or links have no evidence in
+	// the request and can cite the URLs the tools returned.
 	EvidenceCheck EvidenceCheckConfig `yaml:"evidence_check,omitempty" json:"evidence_check,omitempty"`
+	// RequireTool makes the first model call of a request with server-side
+	// MCP tools call a tool (tool_choice "required"). Follow-up calls of the
+	// tool loop are made with the client's tool_choice again.
+	RequireTool bool `yaml:"require_tool,omitempty" json:"require_tool,omitempty"`
 }
 
 // DefaultEvidenceNote is appended when evidence_check.note is empty.
 const DefaultEvidenceNote = "_Note: this answer contains numbers that no tool returned in this turn — not verified._"
+
+// DefaultSourcesLabel heads the appended source line when
+// evidence_check.sources_label is empty.
+const DefaultSourcesLabel = "Sources"
+
+// URLsPlaceholder in evidence_check.urls_note is replaced by the links the
+// answer names without evidence.
+const URLsPlaceholder = "{urls}"
+
+// DefaultURLsNote is appended when evidence_check.urls_note is empty.
+const DefaultURLsNote = "_Note: this answer names links that no tool returned in this turn — not retrieved: " + URLsPlaceholder + "_"
 
 // @Description Output check of a profile alias
 type EvidenceCheckConfig struct {
@@ -690,6 +706,16 @@ type EvidenceCheckConfig struct {
 	Numbers bool `yaml:"numbers,omitempty" json:"numbers,omitempty"`
 	// Note replaces DefaultEvidenceNote.
 	Note string `yaml:"note,omitempty" json:"note,omitempty"`
+	// Sources appends the URLs returned by the request's tool calls to an
+	// answer that names no URL itself.
+	Sources bool `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// SourcesLabel replaces DefaultSourcesLabel.
+	SourcesLabel string `yaml:"sources_label,omitempty" json:"sources_label,omitempty"`
+	// URLs marks answers that name an http(s) link found neither in the
+	// request nor in a successful tool result of the request.
+	URLs bool `yaml:"urls,omitempty" json:"urls,omitempty"`
+	// URLsNote replaces DefaultURLsNote.
+	URLsNote string `yaml:"urls_note,omitempty" json:"urls_note,omitempty"`
 }
 
 // EvidenceCheck returns the evidence check a profile alias applied to this
@@ -703,6 +729,34 @@ func (e EvidenceCheckConfig) EvidenceNote() string {
 	}
 	return DefaultEvidenceNote
 }
+
+// SourcesHeading returns the configured label of the source line or the
+// default one.
+func (e EvidenceCheckConfig) SourcesHeading() string {
+	if e.SourcesLabel != "" {
+		return e.SourcesLabel
+	}
+	return DefaultSourcesLabel
+}
+
+// UnverifiedURLsNote returns the note for the given links: the configured or
+// default note with URLsPlaceholder replaced, or with the links appended when
+// the note has no placeholder.
+func (e EvidenceCheckConfig) UnverifiedURLsNote(urls []string) string {
+	note := e.URLsNote
+	if note == "" {
+		note = DefaultURLsNote
+	}
+	list := strings.Join(urls, ", ")
+	if strings.Contains(note, URLsPlaceholder) {
+		return strings.ReplaceAll(note, URLsPlaceholder, list)
+	}
+	return note + " " + list
+}
+
+// RequiresTool reports whether a profile alias asked for a forced tool call on
+// the first model call of a request; it is false for every other config.
+func (c ModelConfig) RequiresTool() bool { return c.requireTool }
 
 // IsZero reports whether the block sets nothing.
 func (p ProfileConfig) IsZero() bool { return p == ProfileConfig{} }
@@ -729,6 +783,7 @@ func (c *ModelConfig) applyProfileOverlay(alias *ModelConfig) {
 		c.ClientTools = p.ClientTools
 	}
 	c.evidenceCheck = p.EvidenceCheck
+	c.requireTool = p.RequireTool
 }
 
 // @Description PII filtering configuration. PII redaction is per-model so
@@ -942,33 +997,51 @@ type MCPConfig struct {
 
 // @Description Agent configuration
 type AgentConfig struct {
-	MaxAttempts           int  `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
-	MaxIterations         int  `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
-	EnableReasoning       bool `yaml:"enable_reasoning,omitempty" json:"enable_reasoning,omitempty"`
-	EnablePlanning        bool `yaml:"enable_planning,omitempty" json:"enable_planning,omitempty"`
-	EnableMCPPrompts      bool `yaml:"enable_mcp_prompts,omitempty" json:"enable_mcp_prompts,omitempty"`
-	EnablePlanReEvaluator bool `yaml:"enable_plan_re_evaluator,omitempty" json:"enable_plan_re_evaluator,omitempty"`
-	DisableSinkState      bool `yaml:"disable_sink_state,omitempty" json:"disable_sink_state,omitempty"`
-	LoopDetection         int  `yaml:"loop_detection,omitempty" json:"loop_detection,omitempty"`
-	MaxAdjustmentAttempts int  `yaml:"max_adjustment_attempts,omitempty" json:"max_adjustment_attempts,omitempty"`
-	ForceReasoningTool    bool `yaml:"force_reasoning_tool,omitempty" json:"force_reasoning_tool,omitempty"`
-	// MaxGenerationTokens caps the tokens a single completion may generate in
-	// the agent loop. Neither max_iterations nor loop_detection stops one
-	// completion that keeps generating; without a per-model value every model
-	// gets the client's fixed default, which is too low for some reasoning
-	// models and far above what others need. 0 keeps the client default.
+	// MaxAttempts, MaxIterations and ForceReasoningTool shape the tool loop of
+	// the chats and of /v1/chat/completions: how often a failed tool call is
+	// retried, how many tool rounds one turn may take, and whether the model
+	// must reason before it picks a tool.
+	MaxAttempts        int  `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	MaxIterations      int  `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
+	ForceReasoningTool bool `yaml:"force_reasoning_tool,omitempty" json:"force_reasoning_tool,omitempty"`
+	// MaxGenerationTokens capped the tokens of one completion in the agent jobs
+	// that were removed. It is still read so a model file that sets it loads, and
+	// it does nothing.
 	MaxGenerationTokens int `yaml:"max_generation_tokens,omitempty" json:"max_generation_tokens,omitempty"`
+
+	// removed names the keys of the old agent loop that the file sets. The new
+	// loop has no planning, plan re-evaluation, loop detection or reasoning
+	// switch, so they are read, reported once at load and ignored.
+	removed []string
 }
 
-// ApplyAgentGenerationCap puts agent.max_generation_tokens on the LLM client
-// the agent loop uses. The client applies it to every request that carries no
-// cap of its own, so a larger cap cogito sets when it retries a completion
-// truncated by length still wins. Unset leaves the client default in place.
-func (c *ModelConfig) ApplyAgentGenerationCap(llm interface{ SetMaxTokens(int) }) {
-	if c.Agent.MaxGenerationTokens > 0 {
-		llm.SetMaxTokens(c.Agent.MaxGenerationTokens)
+// removedAgentOptions are the agent: keys of the old (cogito) loop that the chats
+// loop does not support.
+var removedAgentOptions = []string{"enable_reasoning", "enable_planning", "enable_mcp_prompts", "enable_plan_re_evaluator",
+	"disable_sink_state", "loop_detection", "max_adjustment_attempts"}
+
+// UnmarshalYAML reads the agent options and notes the removed keys, so a model
+// file that still sets them keeps loading.
+func (a *AgentConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plain AgentConfig
+	if err := value.Decode((*plain)(a)); err != nil {
+		return err
 	}
+	var raw map[string]any
+	if err := value.Decode(&raw); err != nil {
+		return nil // the typed decode above already accepted the node
+	}
+	a.removed = a.removed[:0]
+	for _, k := range removedAgentOptions {
+		if _, ok := raw[k]; ok {
+			a.removed = append(a.removed, k)
+		}
+	}
+	return nil
 }
+
+// RemovedOptions returns the removed agent options that the model file sets.
+func (a AgentConfig) RemovedOptions() []string { return slices.Clone(a.removed) }
 
 // HasMCPServers returns true if any MCP servers (remote or stdio) are configured.
 func (c MCPConfig) HasMCPServers() bool {
@@ -1334,6 +1407,62 @@ func (c *ModelConfig) ApplyReasoningEffort(requestEffort string) {
 			c.ReasoningConfig.DisableReasoning = &enable
 		}
 	}
+}
+
+// ReasoningDisabled reports whether the effective chat-template toggle asks the
+// model not to think.
+//
+// The backend resolves enable_thinking with a fixed precedence: the client's
+// request metadata overrides the operator's reasoning config (also set by
+// reasoning_effort=none through ApplyReasoningEffort), which overrides the model
+// YAML chat_template_kwargs. Callers that inspect the extracted reasoning have
+// to apply the same precedence and value coercion, or they disagree with the
+// template: a request can re-enable thinking over reasoning.disable=true, and a
+// model can disable it through chat_template_kwargs alone.
+func (c *ModelConfig) ReasoningDisabled() bool {
+	if c == nil {
+		return false
+	}
+	// Build the metadata the backend forwards, then let the same resolver that
+	// gRPCPredictOpts uses apply the layering and the string-to-bool coercion.
+	meta := map[string]string{}
+	if c.ReasoningConfig.DisableReasoning != nil {
+		if *c.ReasoningConfig.DisableReasoning {
+			meta["enable_thinking"] = "false"
+		} else {
+			meta["enable_thinking"] = "true"
+		}
+	}
+	if raw, ok := c.RequestMetadata["enable_thinking"]; ok {
+		meta["enable_thinking"] = raw
+	}
+	value, ok := c.ResolveChatTemplateKwargs(meta)["enable_thinking"]
+	if !ok {
+		return false
+	}
+	return !chatTemplateTruthy(value)
+}
+
+// chatTemplateTruthy reports how a jinja template reads a chat_template_kwargs
+// value: bools and numbers follow Go truthiness, and any non-empty string is
+// true. That last rule is why coerceChatTemplateKwarg turns metadata
+// "true"/"false" into real booleans before they reach the template.
+func chatTemplateTruthy(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case string:
+		return v != ""
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case float64:
+		return v != 0
+	}
+	return true
 }
 
 // coerceChatTemplateKwarg coerces a request-metadata string value for use as a
@@ -2327,6 +2456,12 @@ func (c *ModelConfig) validateProfileFields() error {
 	if ec := c.Profile.EvidenceCheck; ec.Note != "" && !ec.Numbers {
 		return fmt.Errorf("profile.evidence_check.note has no effect without numbers: true")
 	}
+	if ec := c.Profile.EvidenceCheck; ec.SourcesLabel != "" && !ec.Sources {
+		return fmt.Errorf("profile.evidence_check.sources_label has no effect without sources: true")
+	}
+	if ec := c.Profile.EvidenceCheck; ec.URLsNote != "" && !ec.URLs {
+		return fmt.Errorf("profile.evidence_check.urls_note has no effect without urls: true")
+	}
 	return nil
 }
 
@@ -2816,55 +2951,11 @@ func (c *ModelConfig) GuessUsecases(u ModelConfigUsecase) bool {
 	return true
 }
 
-// BuildCogitoOptions generates cogito options from the model configuration
-// It accepts a context, MCP sessions, and optional callback functions for status, reasoning, tool calls, and tool results
-func (c *ModelConfig) BuildCogitoOptions() []cogito.Option {
-	cogitoOpts := []cogito.Option{
-		cogito.WithIterations(3),  // default to 3 iterations
-		cogito.WithMaxAttempts(3), // default to 3 attempts
-		cogito.WithForceReasoning(),
+// warnRemovedAgentOptions tells the operator that the file sets agent options
+// the chats loop does not have. They have no effect.
+func (c *ModelConfig) warnRemovedAgentOptions() {
+	if removed := c.Agent.RemovedOptions(); len(removed) > 0 {
+		xlog.Warn("Deprecated agent options are ignored: the chats loop has no planning, plan re-evaluation, loop detection or reasoning switch",
+			"model", c.Name, "file", c.modelConfigFile, "options", strings.Join(removed, ", "))
 	}
-
-	// Apply agent configuration options
-	if c.Agent.EnableReasoning {
-		cogitoOpts = append(cogitoOpts, cogito.WithForceReasoning())
-	}
-
-	if c.Agent.EnablePlanning {
-		cogitoOpts = append(cogitoOpts, cogito.EnableAutoPlan)
-	}
-
-	if c.Agent.EnableMCPPrompts {
-		cogitoOpts = append(cogitoOpts, cogito.EnableMCPPrompts)
-	}
-
-	if c.Agent.EnablePlanReEvaluator {
-		cogitoOpts = append(cogitoOpts, cogito.EnableAutoPlanReEvaluator)
-	}
-
-	if c.Agent.MaxIterations != 0 {
-		cogitoOpts = append(cogitoOpts, cogito.WithIterations(c.Agent.MaxIterations))
-	}
-
-	if c.Agent.MaxAttempts != 0 {
-		cogitoOpts = append(cogitoOpts, cogito.WithMaxAttempts(c.Agent.MaxAttempts))
-	}
-
-	if c.Agent.DisableSinkState {
-		cogitoOpts = append(cogitoOpts, cogito.DisableSinkState)
-	}
-
-	if c.Agent.LoopDetection != 0 {
-		cogitoOpts = append(cogitoOpts, cogito.WithLoopDetection(c.Agent.LoopDetection))
-	}
-
-	if c.Agent.MaxAdjustmentAttempts != 0 {
-		cogitoOpts = append(cogitoOpts, cogito.WithMaxAdjustmentAttempts(c.Agent.MaxAdjustmentAttempts))
-	}
-
-	if c.Agent.ForceReasoningTool {
-		cogitoOpts = append(cogitoOpts, cogito.WithForceReasoningTool())
-	}
-
-	return cogitoOpts
 }

@@ -1,9 +1,11 @@
 import { test, expect } from './coverage-fixtures.js'
 import { ADMIN, app, installedAddon, sessionFor, mockAddons, ok, fail } from './addons-fixtures.js'
 
-// The review step for add-on and backend upgrades: nothing runs until the
-// administrator confirms in the sheet, one failure does not stop the others,
-// and an add-on upgrade shows in Activity.
+// What follows an add-on upgrade after it is confirmed: Check for updates
+// reads every installed add-on, and an upgrade runs in the upgrade store, so it
+// goes on when the page is left and shows in Activity. The confirmation and the
+// "Upgrade all" dialog are covered by addons-upgrade-list.spec.js, and the
+// backend dialog by backends-runtime.spec.js.
 
 const CANDIDATE = `sha256:${'b'.repeat(64)}`
 const admin = { canStart: false, canStop: true }
@@ -31,75 +33,7 @@ function twoPending(over = {}) {
   }
 }
 
-test.describe('Add-on updates: review sheet', () => {
-  test('the badge opens a list of pending updates; an incompatible one cannot be selected and nothing is sent until confirmed', async ({ page }) => {
-    await signIn(page)
-    const state = await mockAddons(page, twoPending())
-    await page.goto('/app/addons')
-
-    const badge = page.getByTestId('addons-updates')
-    await expect(badge).toContainText('Updates (3)')
-    await badge.click()
-
-    const sheet = page.getByTestId('update-review')
-    const rows = sheet.getByTestId('update-review-row')
-    await expect(rows).toHaveCount(3)
-    const notes = rows.filter({ hasText: 'Notes' })
-    await expect(notes.getByTestId('update-review-versions')).toContainText('1.2.0')
-    await expect(notes.getByTestId('update-review-versions')).toContainText('1.3.0')
-    const cal = rows.filter({ hasText: 'Calendar' })
-    await expect(cal.getByRole('checkbox')).toBeDisabled()
-    await expect(cal.getByTestId('update-review-blocked')).toContainText('The host version does not fit')
-
-    // Nothing is selected: "Upgrade selected" is off, and "Upgrade all" leaves the blocked one out.
-    await expect(sheet.getByTestId('update-review-selected')).toBeDisabled()
-    await expect(sheet.getByTestId('update-review-all')).toContainText('Upgrade all (2)')
-    expect(state.log.upgrade).toHaveLength(0)
-
-    await notes.getByRole('checkbox').check()
-    await expect(sheet.getByTestId('update-review-selected')).toContainText('Upgrade selected (1)')
-    await sheet.getByTestId('update-review-selected').click()
-    await expect.poll(() => state.log.upgrade.length).toBe(1)
-    expect(state.log.upgrade[0].id).toBe('notes')
-    expect(state.log.upgrade[0].confirm).toBe(state.log.upgrade[0].operationId)
-    await expect(notes).toHaveAttribute('data-state', 'done')
-    await expect(sheet.getByTestId('update-review-summary')).toContainText('1 upgraded, 0 failed')
-  })
-
-  test('Upgrade all runs every upgradable add-on and continues past one that fails, then reports each', async ({ page }) => {
-    await signIn(page)
-    const state = await mockAddons(page, twoPending({
-      upgrade: ({ id }) => (id === 'notes' ? fail(409, 'upgrade_failed') : null),
-    }))
-    await page.goto('/app/addons')
-    await page.getByTestId('addons-updates').click()
-    const sheet = page.getByTestId('update-review')
-    await sheet.getByTestId('update-review-all').click()
-
-    await expect(sheet.getByTestId('update-review-summary')).toContainText('1 upgraded, 1 failed')
-    expect(state.log.upgrade.map(u => u.id)).toEqual(['notes', 'wiki'])
-    const rows = sheet.getByTestId('update-review-row')
-    await expect(rows.filter({ hasText: 'Notes' })).toHaveAttribute('data-state', 'failed')
-    await expect(rows.filter({ hasText: 'Notes' }).getByRole('alert')).toContainText('installed version is kept')
-    await expect(rows.filter({ hasText: 'Wiki' })).toHaveAttribute('data-state', 'done')
-    await expect(rows.filter({ hasText: 'Calendar' })).toHaveAttribute('data-state', 'idle')
-    // One toast per item.
-    await expect(page.getByText('Wiki upgraded to 1.0.0.')).toBeVisible()
-    await expect(page.getByText(/Notes was not upgraded/)).toBeVisible()
-  })
-
-  test('a card Upgrade action opens the sheet with that add-on checked', async ({ page }) => {
-    await signIn(page)
-    const state = await mockAddons(page, twoPending())
-    await page.goto('/app/addons')
-    await page.locator('[data-testid="addon-tile"][data-app="wiki"]').getByTestId('tile-upgrade').click()
-    const sheet = page.getByTestId('update-review')
-    await expect(sheet.getByTestId('update-review-row').filter({ hasText: 'Wiki' }).getByRole('checkbox')).toBeChecked()
-    await expect(sheet.getByTestId('update-review-row').filter({ hasText: 'Notes' }).getByRole('checkbox')).not.toBeChecked()
-    expect(state.log.upgrade).toHaveLength(0)
-    await page.locator('[data-testid="addon-tile"][data-app="plain"]').getByTestId('tile-upgrade').waitFor({ state: 'detached' })
-  })
-
+test.describe('Add-on updates: after the confirmation', () => {
   test('Check for updates reads every installed add-on and keeps going when one cannot be checked', async ({ page }) => {
     await signIn(page)
     const state = await mockAddons(page, twoPending({
@@ -113,25 +47,27 @@ test.describe('Add-on updates: review sheet', () => {
     expect(state.log.upgrade).toHaveLength(0)
   })
 
-  test('an add-on upgrade is listed in Activity while it runs, can be canceled, and is recorded when it ends', async ({ page }) => {
+  test('an add-on upgrade is listed in Activity while it runs, survives reload, and is recorded when it ends', async ({ page }) => {
     await signIn(page)
     await page.route('**/api/operations', route => route.fulfill({ json: { operations: [] } }))
     await page.route('**/api/operations/history', route => route.fulfill({ json: { operations: [] } }))
-    let release
-    const gate = new Promise(resolve => { release = resolve })
-    const state = await mockAddons(page, twoPending())
-    // The owner answers an upgrade only when the spec lets it.
-    await page.route(/\/api\/addons\/wiki\/upgrade$/, async route => {
-      await gate
-      const body = JSON.parse(route.request().postData() || '{}')
-      const a = state.installed.find(x => x.id === 'wiki')
-      a.generation += 1; a.version = a.update.version; delete a.update
-      return route.fulfill(ok({ OperationID: body.operationId, AddonID: 'wiki', Phase: 'completed', Generation: a.generation }))
+    let finished = false
+    let operationId
+    const state = await mockAddons(page, twoPending({
+      dispatch: body => {
+        if (body.action !== 'operation-status') return null
+        expect(body.operationId).toBe(operationId)
+        return ok({ OperationID: operationId, AddonID: 'wiki', Phase: finished ? 'completed' : 'running', stage: 'backing-up', Generation: finished ? 2 : 0 })
+      },
+    }))
+    await page.route(/\/api\/addons\/wiki\/upgrade$/, route => {
+      operationId = JSON.parse(route.request().postData() || '{}').operationId
+      state.log.upgrade.push({ operationId })
+      return route.fulfill(ok({ OperationID: operationId, AddonID: 'wiki', Phase: 'accepted', Generation: 0 }))
     })
     await page.goto('/app/addons')
-    await page.locator('[data-testid="addon-tile"][data-app="wiki"]').getByTestId('tile-upgrade').click()
-    await page.getByTestId('update-review-selected').click()
-    await page.getByTestId('update-review-close').click()
+    await page.locator('[data-testid="addon-tile"][data-app="wiki"]').getByTestId('update-upgrade-card').click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Upgrade' }).click()
 
     // Leave the page without a reload: the upgrade goes on.
     await page.evaluate(() => { window.history.pushState({}, '', '/app/activity'); window.dispatchEvent(new PopStateEvent('popstate')) })
@@ -140,7 +76,12 @@ test.describe('Add-on updates: review sheet', () => {
     await expect(card).toBeVisible()
     await expect(card).toContainText('Upgrading add-on')
     await expect(card).toContainText('0.9.0 to 1.0.0')
-    await expect(card.getByRole('button', { name: /cancel/i })).toBeVisible()
+    await expect(card.getByRole('button', { name: /cancel/i })).toHaveCount(0)
+    await expect(card.getByRole('progressbar')).toHaveCount(0)
+    await expect(card).toContainText('Creating and verifying backup')
+    await page.reload()
+    await expect(card).toContainText('Creating and verifying backup')
+    expect(state.log.upgrade).toHaveLength(1)
     await expect(card.getByRole('button', { name: /pause/i })).toHaveCount(0)
 
     await page.getByRole('button', { name: 'Add-ons', exact: true }).click()
@@ -149,7 +90,9 @@ test.describe('Add-on updates: review sheet', () => {
     await expect(card).toHaveCount(0)
     await page.getByRole('button', { name: 'Add-ons', exact: true }).click()
 
-    release()
+    const installed = state.installed.find(x => x.id === 'wiki')
+    installed.generation += 1; installed.version = installed.update.version; delete installed.update
+    finished = true
     await expect(card).toHaveCount(0)
     const record = page.locator('.activity-row').filter({ hasText: 'Wiki' })
     await expect(record).toContainText('Upgraded')
@@ -165,10 +108,9 @@ test.describe('Add-on updates: review sheet', () => {
       upgrade: () => { attempts += 1; return attempts === 1 ? fail(409, 'upgrade_failed') : null },
     }))
     await page.goto('/app/addons')
-    await page.locator('[data-testid="addon-tile"][data-app="wiki"]').getByTestId('tile-upgrade').click()
-    await page.getByTestId('update-review-selected').click()
-    await expect(page.getByTestId('update-review-summary')).toContainText('0 upgraded, 1 failed')
-    await page.getByTestId('update-review-close').click()
+    await page.locator('[data-testid="addon-tile"][data-app="wiki"]').getByTestId('update-upgrade-card').click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Upgrade' }).click()
+    await expect.poll(() => state.log.upgrade.length).toBe(1)
     await page.evaluate(() => { window.history.pushState({}, '', '/app/activity'); window.dispatchEvent(new PopStateEvent('popstate')) })
 
     const card = page.locator('.operation-card').filter({ hasText: 'Wiki' })
@@ -179,55 +121,5 @@ test.describe('Add-on updates: review sheet', () => {
     expect(state.log.upgrade[0].operationId).not.toBe(state.log.upgrade[1].operationId)
     await expect(card).toHaveCount(0)
     await expect(page.locator('.activity-row').filter({ hasText: 'Wiki' })).toContainText('Upgraded')
-  })
-})
-
-test.describe('Backend updates: review sheet', () => {
-  const installedBackends = ['llama-cpp', 'whisper'].map(Name => ({ Name, IsSystem: false, Version: '1.0.0', Metadata: { version: '1.0.0' } }))
-  const catalog = installedBackends.map(b => ({ id: b.Name, name: b.Name, description: b.Name, installed: true, version: '1.0.0', isMeta: true, isAlias: false, isDevelopment: false, tags: [] }))
-  const upgrades = Object.fromEntries(installedBackends.map(b => [b.Name, { backend_name: b.Name, installed_version: '1.0.0', available_version: '1.1.0' }]))
-
-  async function mock(page) {
-    await page.route('**/api/backends/upgrades', route => route.fulfill({ json: upgrades }))
-    await page.route('**/api/backends?*', route => route.fulfill({ json: { backends: catalog } }))
-    await page.route('**/backends', route => (new URL(route.request().url()).pathname === '/backends' ? route.fulfill({ json: installedBackends }) : route.continue()))
-    await page.route('**/api/nodes', route => route.fulfill({ json: [] }))
-  }
-
-  test('Updates opens the sheet; nothing is upgraded until confirmed, and one failure does not stop the next', async ({ page }) => {
-    await mock(page)
-    const sent = []
-    await page.route('**/api/backends/upgrade/*', route => {
-      const name = new URL(route.request().url()).pathname.split('/').at(-1)
-      sent.push(name)
-      return name === 'llama-cpp'
-        ? route.fulfill({ status: 500, json: { error: 'registry unavailable' } })
-        : route.fulfill({ json: { jobID: 'j1', uuid: 'j1', message: 'started' } })
-    })
-    await page.goto('/app/backends?view=installed')
-    await page.getByTestId('backends-updates').click()
-    const sheet = page.getByTestId('update-review')
-    await expect(sheet.getByTestId('update-review-row')).toHaveCount(2)
-    await expect(sheet.getByTestId('update-review-row').first().getByTestId('update-review-versions')).toContainText('v1.0.0')
-    await expect(sheet.getByTestId('update-review-row').first().getByTestId('update-review-versions')).toContainText('v1.1.0')
-    expect(sent).toEqual([])
-    await sheet.getByTestId('update-review-all').click()
-    await expect(sheet.getByTestId('update-review-summary')).toContainText('1 started, 1 failed')
-    expect(sent).toEqual(['llama-cpp', 'whisper'])
-    await expect(sheet.getByTestId('update-review-row').filter({ hasText: 'llama-cpp' }).getByRole('alert')).toContainText('registry unavailable')
-  })
-
-  test('a row Upgrade button opens the sheet with that backend checked instead of upgrading at once', async ({ page }) => {
-    await mock(page)
-    let calls = 0
-    await page.route('**/api/backends/upgrade/*', route => { calls += 1; return route.fulfill({ json: { jobID: 'j1' } }) })
-    await page.goto('/app/backends?view=installed&backend=whisper')
-    await page.getByRole('button', { name: /update to v1\.1\.0/i }).first().click()
-    const sheet = page.getByTestId('update-review')
-    await expect(sheet.getByTestId('update-review-row').filter({ hasText: 'whisper' }).getByRole('checkbox')).toBeChecked()
-    await expect(sheet.getByTestId('update-review-row').filter({ hasText: 'llama-cpp' }).getByRole('checkbox')).not.toBeChecked()
-    expect(calls).toBe(0)
-    await sheet.getByTestId('update-review-selected').click()
-    await expect.poll(() => calls).toBe(1)
   })
 })
