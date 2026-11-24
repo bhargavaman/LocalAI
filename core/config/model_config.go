@@ -72,6 +72,9 @@ type ModelConfig struct {
 	// than one per request body. Unexported, so it never enters the hash it
 	// describes and never reaches YAML or JSON.
 	persistedConfigRevision string `yaml:"-" json:"-"`
+	// batchFromHardware marks a Batch that ApplyHardwareDefaults wrote, so a
+	// later consumer can tell it from a `batch:` the user set.
+	batchFromHardware bool `yaml:"-" json:"-"`
 	// mcpSessionKey keys the MCP session cache when it must differ from Name.
 	// A profile alias that brings its own MCP servers resolves to its target's
 	// config (so Name, and with it the backend process, stays the target's),
@@ -95,6 +98,13 @@ type ModelConfig struct {
 	// on the target's backend process. Explicit block rather than honouring
 	// top-level fields so existing aliases keep behaving as pure redirects.
 	Profile ProfileConfig `yaml:"profile,omitempty" json:"profile,omitempty"`
+
+	// VisionAlias is only valid on an alias. When a request to the alias
+	// carries image input and the alias target cannot accept images, the
+	// request is served by this model instead, with the same profile overlay.
+	// It lets a text-only model back an alias without failing image requests.
+	// The model must exist and must not be an alias.
+	VisionAlias string `yaml:"vision_alias,omitempty" json:"vision_alias,omitempty"`
 
 	// Failover makes this config a failover chain over other models. Like an
 	// alias it has no backend of its own.
@@ -178,7 +188,7 @@ type ModelConfig struct {
 
 	// ConcurrencyGroups declares per-node mutual-exclusion groups: the model
 	// cannot be loaded alongside another model that shares any group name.
-	// See docs/content/advanced/vram-management.md for usage.
+	// See docs/content/models/vram-management.md for usage.
 	ConcurrencyGroups []string `yaml:"concurrency_groups,omitempty" json:"concurrency_groups,omitempty"`
 
 	Options   []string `yaml:"options,omitempty" json:"options,omitempty"`
@@ -316,6 +326,12 @@ type ProxyConfig struct {
 	// agentic/multi-turn workloads that re-send a large stable prefix.
 	// No effect for passthrough mode or non-Anthropic providers.
 	CachePrompt bool `yaml:"cache_prompt,omitempty" json:"cache_prompt,omitempty"`
+
+	// Remote is the id of a remote that owns this model.
+	// The key comes from the remote store when the model loads, so the
+	// config holds no credential. Mutually exclusive with APIKey, APIKeyEnv
+	// and APIKeyFile.
+	Remote string `yaml:"remote,omitempty" json:"remote,omitempty"`
 }
 
 // Proxy mode names. Validate() normalises an empty Mode to
@@ -352,6 +368,9 @@ func (p ProxyConfig) validateCredentialSources() error {
 	}
 	if sources > 1 {
 		return fmt.Errorf("proxy: api_key, api_key_env and api_key_file are mutually exclusive")
+	}
+	if sources > 0 && p.Remote != "" {
+		return fmt.Errorf("proxy: remote cannot be combined with api_key, api_key_env or api_key_file; the key comes from the remote")
 	}
 	return nil
 }
@@ -891,7 +910,8 @@ func (c *ModelConfig) PIIIsEnabled() bool {
 	if c.PII.Enabled != nil {
 		return *c.PII.Enabled
 	}
-	return c.Backend == model.CloudProxyBackend
+	b, ok := RemoteBackendFor(c.Backend)
+	return ok && b.PIIDefault
 }
 
 // PIIDetectors returns the names of the token-classification models that
@@ -922,7 +942,7 @@ var piiCoverableUsecases = []ModelConfigUsecase{FLAG_CHAT, FLAG_COMPLETION, FLAG
 // false naturally: HasUsecases short-circuits to false for any usecase a
 // declared score/token_classify model did not itself declare.
 func (c *ModelConfig) PIIFilterApplies() bool {
-	if c.Backend == model.CloudProxyBackend {
+	if b, ok := RemoteBackendFor(c.Backend); ok && b.PIIDefault {
 		return true
 	}
 	return slices.ContainsFunc(piiCoverableUsecases, c.HasUsecases)
@@ -1806,7 +1826,11 @@ type LLMConfig struct {
 	TrimSpace       []string `yaml:"trimspace,omitempty" json:"trimspace,omitempty"`
 	TrimSuffix      []string `yaml:"trimsuffix,omitempty" json:"trimsuffix,omitempty"`
 
-	ContextSize          *int             `yaml:"context_size,omitempty" json:"context_size,omitempty"`
+	ContextSize *int `yaml:"context_size,omitempty" json:"context_size,omitempty"`
+	// ContextAutoSized is set when ContextSize was chosen from the GGUF
+	// metadata and the detected memory, not by the operator, the model editor
+	// or the global default. It is runtime state and is never written.
+	ContextAutoSized     bool             `yaml:"-" json:"-"`
 	NUMA                 bool             `yaml:"numa,omitempty" json:"numa,omitempty"`
 	LoraAdapter          string           `yaml:"lora_adapter,omitempty" json:"lora_adapter,omitempty"`
 	LoraBase             string           `yaml:"lora_base,omitempty" json:"lora_base,omitempty"`
@@ -2074,6 +2098,15 @@ func (cfg *ModelConfig) SetDefaults(opts ...ConfigLoaderOption) {
 
 	if debug {
 		cfg.Debug = &trueV
+	}
+
+	// A context_size of 0 means "not set", the same as leaving the key out.
+	// Editors and templates write 0 as a placeholder; kept as an explicit value
+	// it would skip the GGUF-based sizing below and pin the window to the
+	// fallback. A negative value is a different request (full trained context)
+	// and is left alone for the GGUF hook to resolve.
+	if cfg.ContextSize != nil && *cfg.ContextSize == 0 {
+		cfg.ContextSize = nil
 	}
 
 	// If a context size was provided via LoadOptions, apply it before hooks so they
@@ -2441,6 +2474,9 @@ func (c *ModelConfig) validateProfileFields() error {
 		default:
 			return fmt.Errorf("%s: unknown value %q (allowed: %q)", key, value, ClientToolsDrop)
 		}
+	}
+	if c.VisionAlias != "" && !c.IsAlias() {
+		return fmt.Errorf("vision_alias is only valid on an alias config (model %q has no alias)", c.Name)
 	}
 	if c.Profile.IsZero() {
 		return nil
@@ -2958,4 +2994,10 @@ func (c *ModelConfig) warnRemovedAgentOptions() {
 		xlog.Warn("Deprecated agent options are ignored: the chats loop has no planning, plan re-evaluation, loop detection or reasoning switch",
 			"model", c.Name, "file", c.modelConfigFile, "options", strings.Join(removed, ", "))
 	}
+}
+
+// BatchIsManaged reports whether the physical batch is a LocalAI default
+// (unset, or written by the hardware heuristics) rather than a user value.
+func (c *ModelConfig) BatchIsManaged() bool {
+	return c.Batch == 0 || c.batchFromHardware
 }

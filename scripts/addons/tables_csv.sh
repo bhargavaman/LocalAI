@@ -55,7 +55,7 @@ run_go() {
     shift
     report="$cache/logs/tables-csv-$name.json"
     rm -f "$report"
-    go test -count=1 -p 2 -tags auth "$@" -ginkgo.json-report="$report" >"$cache/logs/tables-csv-$name.log" 2>&1 || { tail -40 "$cache/logs/tables-csv-$name.log" >&2; exit 1; }
+    go test -count=1 -p 2 -tags auth,nosqlite,purego_utp "$@" -ginkgo.json-report="$report" >"$cache/logs/tables-csv-$name.log" 2>&1 || { tail -40 "$cache/logs/tables-csv-$name.log" >&2; exit 1; }
     go_cases "$report"
 }
 run_go store ./addons/tables/internal/store -ginkgo.focus='CSV export'
@@ -66,7 +66,7 @@ FOUNDATION_SERVER="$root/tests/e2e-ui/ui-test-server" run_go replicas ./tests/ad
 # 3. The real owner, the real Tables executable, the built package.
 node "$pkg/build.mjs" >"$cache/logs/tables-csv-build.log" 2>&1 || { cat "$cache/logs/tables-csv-build.log" >&2; exit 1; }
 tables_exe="$cache/tmp/tables-csv-exe"
-CGO_ENABLED=1 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
+CGO_ENABLED=0 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
 fixture_dir="$cache/tmp/tables-csv-fixture"
 rm -rf "$fixture_dir"
 mkdir -p "$fixture_dir/tables"

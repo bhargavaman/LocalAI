@@ -3,7 +3,11 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +60,10 @@ type AddonConfig struct {
 	// a build that reads the backend gallery lists the library and leaves it
 	// off.
 	OfficialBackendLibrary bool
+	// WSLDistro is the WSL 2 distribution that runs the add-ons whose
+	// manifest has osSettings.windows.execution "wsl2" (Windows only). Empty is
+	// the default distribution of WSL.
+	WSLDistro string
 	// BackendMaxBytes bounds the compressed size of one backend image
 	// installed from a library; zero is 8 GiB. Add-ons keep their own limit.
 	BackendMaxBytes int64
@@ -158,6 +166,12 @@ type ApplicationConfig struct {
 	// other goroutines, since a runtime settings change can land at any time.
 	liveMaxBackendOps atomic.Int64
 
+	// MaxConcurrentModelOperations bounds how many model install, upgrade and
+	// delete operations run at once. Always >= 1. Operations on the same
+	// model never overlap.
+	MaxConcurrentModelOperations int
+	liveMaxModelOps              atomic.Int64
+
 	F16                          bool
 	Debug                        bool
 	LogClient                    bool
@@ -187,10 +201,8 @@ type ApplicationConfig struct {
 	PreloadModelsFromPath    string
 	CORSAllowOrigins         string
 	ApiKeys                  []string
-	P2PEnableLimits          bool
-	P2PToken                 string
-	P2PNetworkID             string
-	Federated                bool
+	// P2P configures the P2P layer (p2pnet): mode, discovery, relays.
+	P2P P2PSettings
 
 	// ExternalBaseURL is the externally visible base URL of this instance
 	// (scheme+host[:port]), set via LOCALAI_BASE_URL. When non-empty it is
@@ -218,6 +230,11 @@ type ApplicationConfig struct {
 	// HTTPS_PROXY=http://localai:port and trust the CA cert
 	// LocalAI exposes at /api/middleware/proxy-ca.crt.
 	MITMListen string
+
+	// TLSFingerprint is the SHA-256 of the certificate the API server presents,
+	// in lower case hex, or empty when it serves plain HTTP. The pairing of a
+	// client offers it so that the client can pin the certificate.
+	TLSFingerprint string
 
 	// PIIDefaultDetectors lists token-classification (NER) detector model
 	// names applied to any PII-enabled model that does not name its own
@@ -255,6 +272,13 @@ type ApplicationConfig struct {
 	AutoUpgradeBackends                         bool
 	AutoUpgradeAddons                           bool
 	PreferDevelopmentBackends                   bool
+
+	// UpgradeRunKeep is the most finished upgrade runs kept. Zero means 200
+	// (upgraderun.DefaultRetention), a negative value keeps any number.
+	UpgradeRunKeep int
+	// UpgradeRunRetentionDays is how long finished upgrade runs are kept.
+	// Zero means 30 days, a negative value keeps them forever.
+	UpgradeRunRetentionDays int
 
 	// RequireBackendIntegrity promotes a missing SHA256 (tarball/HTTP URIs)
 	// or missing verification policy (OCI URIs) from a warning to a hard
@@ -339,20 +363,31 @@ type ApplicationConfig struct {
 	// observability and load-balancer attribution.
 	ExposeNodeHeader bool
 
-	// LocalAI Assistant chat modality. Hard-disable the in-process admin MCP
-	// server with this flag; runtime-toggleable via /api/settings.
-	DisableLocalAIAssistant bool
-
 	// DisableSharedPages turns off the pages of shared folders: they are not
 	// listed as runnable, do not open and their bridge refuses every call.
 	// Runtime-toggleable via /api/settings (shared_pages_enabled).
 	DisableSharedPages bool
+
+	// DisableUserPageShares turns off the pages that people share from their
+	// own homes: nobody can share one, the ones already shared do not open
+	// and are listed as turned off, and their owners can still take them
+	// back. Runtime-toggleable via /api/settings (user_page_shares_enabled).
+	DisableUserPageShares bool
+
+	// DisablePageArea turns off the page area of Home for every user: a
+	// pageArea of home.json is ignored and the area says an administrator
+	// turned it off. Runtime-toggleable via /api/settings
+	// (home_page_area_enabled).
+	DisablePageArea bool
 
 	// ChatsHostExec is who gets the chats' built-in bash, which runs commands
 	// on this machine with no isolation: off, ask (administrators, with a card
 	// for each command) or on. Empty: off with accounts, ask without.
 	// Runtime-toggleable via /api/settings (chats_host_exec).
 	ChatsHostExec string
+	// ChatsAutoResume makes the server go on by itself with a chat turn that
+	// a restart interrupted (LOCALAI_CHATS_AUTO_RESUME). Read at startup.
+	ChatsAutoResume bool
 	// ChatsToolProviders pins, for a built-in chat tool or skill that several
 	// add-ons replace, the add-on that serves it (tool or skill name -> add-on
 	// ID). Tool and skill names never overlap.
@@ -413,6 +448,13 @@ type ApplicationConfig struct {
 	ChatsWebAllowPrivate    bool
 	ChatsWebPorts           string
 
+	// ClientJobsAllowAllTools lifts the read-only rule of the jobs that an add-on
+	// starts for a paired client: they may then use the write and act tools that
+	// the agent of the task is set up with, as an ordinary job of the task may,
+	// and no grant the agent does not hold. Off by default: such a job reads
+	// and reports only. It is read when a job runs.
+	ClientJobsAllowAllTools bool
+
 	// The network of the commands that chats run in the Sandbox, through the
 	// host proxy. Each is runtime-toggleable via /api/settings and read at
 	// each check, so no restart. ChatsEgressCeiling is the widest preset
@@ -445,6 +487,10 @@ type ApplicationConfig struct {
 	// 0: DefaultChatsMaxIterations. A model's agent.max_iterations wins.
 	// Runtime-settable via /api/settings (chats_max_iterations).
 	ChatsMaxIterations int
+	// ChatsAddonToolLimit is the most add-on tools one chat is offered, 0:
+	// DefaultChatsAddonToolLimit. Runtime-settable via /api/settings
+	// (chats_addon_tool_limit). Guarded by chatsLimitsMu.
+	ChatsAddonToolLimit int
 
 	// ChatsGoalMaxTurns is the most turns the server starts by itself for one
 	// goal of a chat, and ChatsGoalMaxSteps the most model requests the turns
@@ -455,18 +501,50 @@ type ApplicationConfig struct {
 	// The limits of the loops of the chats (a prompt a chat repeats by
 	// itself). Zero means the default. Runtime-settable via /api/settings
 	// (chats_loop_min_interval, chats_loop_max_runs, chats_loop_max_per_chat,
-	// chats_loop_max_per_user, chats_loop_daily_runs); read at each use.
+	// chats_loop_max_per_user, chats_loop_daily_runs,
+	// chats_loop_daily_script_checks); read at each use.
 	ChatsLoopMinInterval time.Duration
 	ChatsLoopMaxRuns     int
 	ChatsLoopMaxPerChat  int
 	ChatsLoopMaxPerUser  int
 	ChatsLoopDailyRuns   int
+	// ChatsLoopDailyScriptChecks is the number of checks of waits on a
+	// command one owner may spend in a UTC day. It is a budget apart from
+	// ChatsLoopDailyRuns: a check starts a process and calls no model.
+	ChatsLoopDailyScriptChecks int
+
+	// The limits of the triggers of the chats. Zero means the default.
+	// Runtime-settable via /api/settings (chats_trigger_run_limit,
+	// chats_trigger_max_per_user, chats_trigger_max_daily_cap); read at each use.
+	ChatsTriggerRunLimit    time.Duration
+	ChatsTriggerMaxPerUser  int
+	ChatsTriggerMaxDailyCap int
 
 	// DisableChatsSavedAgents switches off, for every chat, the saved agents
 	// as sub-agents (list_agents and the agent argument of spawn_agent).
 	// Stored as the negation (chats_saved_agents), so it is on by default;
 	// each chat still has to switch it on. Read at each turn.
 	DisableChatsSavedAgents bool
+
+	// DisableChatsLocalAIClient and DisableChatsLocalAIAdmin switch off, for
+	// every chat, the two built-in groups of LocalAI tools: the client tools
+	// (inference) and the admin tools (the LocalAI Assistant's management
+	// tools). Stored as the negation (chats_localai_client,
+	// chats_localai_admin), so both are on by default. Read at each turn.
+	DisableChatsLocalAIClient bool
+	DisableChatsLocalAIAdmin  bool
+
+	// AdminOffByDeprecatedOption is true when the admin group was switched
+	// off by the deprecated --disable-local-ai-assistant option or its
+	// variable. This is an operator choice: a stored chats_localai_admin=true,
+	// at startup or in a later runtime settings change, does not override it.
+	AdminOffByDeprecatedOption bool
+
+	// ChatsToolSearch is the setting chats_tool_search: whether the large
+	// LocalAI tool groups and the deferred add-on tools are replaced by the
+	// three tool-search tools. One of
+	// the ToolSearch* values; empty means auto. Read at each turn.
+	ChatsToolSearch string
 
 	// DisableChatsWorkFolder stops the steering of the chats' working files:
 	// the prompt no longer names the chat's work folder (Chats/<chat>/work)
@@ -483,6 +561,15 @@ type ApplicationConfig struct {
 	// pass of the indexer, so no restart.
 	DisableChatsIndexFiles bool
 	ChatsIndexMaxTextBytes int
+
+	// ChatsExtractMaxBytes and ChatsExtractMaxEntries are the limits of
+	// "Extract here" on the Files page (chats_extract_max_bytes and
+	// chats_extract_max_entries; 0: the defaults). ChatsExtractSevenZipRar
+	// turns on 7z and RAR archives (chats_extract_7z_rar; off by default).
+	// All three are read at each request.
+	ChatsExtractMaxBytes    int64
+	ChatsExtractMaxEntries  int
+	ChatsExtractSevenZipRar bool
 
 	// DisableChatSuggestions stops the assistant from offering things (to
 	// remember a name, to make a shortcut, to update a widget on a schedule)
@@ -568,7 +655,8 @@ func NewApplicationConfig(o ...AppOption) *ApplicationConfig {
 		VRAMPersistentCache:         true,
 		ArtifactDownloadConcurrency: modelartifacts.DefaultDownloadConcurrency,
 
-		MaxConcurrentBackendOperations: 1,
+		MaxConcurrentBackendOperations: 2,
+		MaxConcurrentModelOperations:   DefaultMaxConcurrentModelOperations,
 
 		LRUEvictionMaxRetries:    30,               // Default: 30 retries
 		LRUEvictionRetryInterval: 1 * time.Second,  // Default: 1 second
@@ -596,6 +684,7 @@ func NewApplicationConfig(o ...AppOption) *ApplicationConfig {
 		oo(opt)
 	}
 	opt.SetMaxConcurrentBackendOperations(opt.MaxConcurrentBackendOperations)
+	opt.SetMaxConcurrentModelOperations(opt.MaxConcurrentModelOperations)
 	opt.selectionState()
 	return opt
 }
@@ -648,12 +737,6 @@ func WithCors(b bool) AppOption {
 	}
 }
 
-func WithP2PNetworkID(s string) AppOption {
-	return func(o *ApplicationConfig) {
-		o.P2PNetworkID = s
-	}
-}
-
 func WithDisableCSRF(b bool) AppOption {
 	return func(o *ApplicationConfig) {
 		o.DisableCSRF = b
@@ -669,12 +752,6 @@ func WithDisableHTTPCompression(b bool) AppOption {
 func WithHTTPCompressionMinLength(n int) AppOption {
 	return func(o *ApplicationConfig) {
 		o.HTTPCompressionMinLength = n
-	}
-}
-
-func WithP2PToken(s string) AppOption {
-	return func(o *ApplicationConfig) {
-		o.P2PToken = s
 	}
 }
 
@@ -904,10 +981,6 @@ func WithPreferDevelopmentBackends(v bool) AppOption {
 	return func(o *ApplicationConfig) { o.PreferDevelopmentBackends = v }
 }
 
-var EnableFederated = func(o *ApplicationConfig) {
-	o.Federated = true
-}
-
 func WithExternalBackend(name string, uri string) AppOption {
 	return func(o *ApplicationConfig) {
 		if o.ExternalGRPCBackends == nil {
@@ -970,6 +1043,38 @@ func WithModelArtifactMaterializer(materializer ArtifactMaterializer) AppOption 
 			o.ModelArtifactMaterializer = materializer
 		}
 	}
+}
+
+// DefaultMaxConcurrentModelOperations is how many model operations run at
+// once unless the setting says otherwise. Two lets an upgrade or install run
+// beside a long download without a burst of parallel downloads.
+const DefaultMaxConcurrentModelOperations = 2
+
+// WithMaxConcurrentModelOperations sets how many model operations run at
+// once. Values below 1 fall back to 1.
+func WithMaxConcurrentModelOperations(n int) AppOption {
+	return func(o *ApplicationConfig) { o.SetMaxConcurrentModelOperations(n) }
+}
+
+// SetMaxConcurrentModelOperations stores the limit, clamped to at least 1.
+func (o *ApplicationConfig) SetMaxConcurrentModelOperations(n int) {
+	if n < 1 {
+		n = 1
+	}
+	o.MaxConcurrentModelOperations = n
+	o.liveMaxModelOps.Store(int64(n))
+}
+
+// ModelOperationLimit returns how many model operations may run at once.
+// It is safe to call while a runtime settings change is applied.
+func (o *ApplicationConfig) ModelOperationLimit() int {
+	if n := o.liveMaxModelOps.Load(); n >= 1 {
+		return int(n)
+	}
+	if o.MaxConcurrentModelOperations >= 1 {
+		return o.MaxConcurrentModelOperations
+	}
+	return 1
 }
 
 // WithMaxConcurrentBackendOperations sets how many backend operations run at
@@ -1161,6 +1266,14 @@ func WithDataPath(dataPath string) AppOption {
 func WithDisableStats(disable bool) AppOption {
 	return func(o *ApplicationConfig) {
 		o.DisableStats = disable
+	}
+}
+
+// WithTLSFingerprint records the fingerprint of the certificate of the API
+// server. CLI: --tls-cert, --tls-key and --tls-self-signed.
+func WithTLSFingerprint(fingerprint string) AppOption {
+	return func(o *ApplicationConfig) {
+		o.TLSFingerprint = fingerprint
 	}
 }
 
@@ -1432,6 +1545,12 @@ var (
 	DisableChats      = func(o *ApplicationConfig) { o.DisableChats = true }
 	DisableTriggers   = func(o *ApplicationConfig) { o.DisableTriggers = true }
 	DisableConnectors = func(o *ApplicationConfig) { o.DisableConnectors = true }
+	// DisableLocalAIAdminByDeprecatedOption is the option of the deprecated
+	// LOCALAI_DISABLE_ASSISTANT: it maps to chats_localai_admin=false.
+	DisableLocalAIAdminByDeprecatedOption = func(o *ApplicationConfig) {
+		o.DisableChatsLocalAIAdmin = true
+		o.AdminOffByDeprecatedOption = true
+	}
 	// DisableConnectorTalkback is the option of LOCALAI_DISABLE_CONNECTOR_TALKBACK.
 	DisableConnectorTalkback = func(o *ApplicationConfig) { o.DisableConnectorTalkback = true }
 	// SkipBindingCapsMigration is the option of LOCALAI_SKIP_BINDING_CAPS_MIGRATION.
@@ -1454,11 +1573,23 @@ func WithTriggerRunRetention(keep, days int) AppOption {
 	return func(o *ApplicationConfig) { o.TriggerRunKeep, o.TriggerRunRetentionDays = keep, days }
 }
 
+// WithUpgradeRunRetention sets how many finished upgrade runs are kept, and
+// for how many days.
+func WithUpgradeRunRetention(keep, days int) AppOption {
+	return func(o *ApplicationConfig) { o.UpgradeRunKeep, o.UpgradeRunRetentionDays = keep, days }
+}
+
 // Defaults of the agent jobs.
 const (
 	DefaultAgentJobRetentionDays = 30
 	DefaultMCPCIJobTimeout       = 10 * time.Minute
 )
+
+// WithChatsAutoResume sets whether the server resumes interrupted chat turns
+// by itself.
+func WithChatsAutoResume(on bool) AppOption {
+	return func(o *ApplicationConfig) { o.ChatsAutoResume = on }
+}
 
 // WithChatsHostExec sets who gets the chats' built-in bash: off, ask or on.
 func WithChatsHostExec(mode string) AppOption {
@@ -1474,12 +1605,17 @@ func WithDisableSharedPages(disabled bool) AppOption {
 	}
 }
 
-// WithDisableLocalAIAssistant hard-disables the in-process admin MCP server.
-// When set, the chat-handler branch for metadata.localai_assistant=true
-// returns a "feature unavailable" error.
-func WithDisableLocalAIAssistant(disabled bool) AppOption {
+// WithDisableUserPageShares turns off the pages that people share.
+func WithDisableUserPageShares(disabled bool) AppOption {
 	return func(o *ApplicationConfig) {
-		o.DisableLocalAIAssistant = disabled
+		o.DisableUserPageShares = disabled
+	}
+}
+
+// WithDisablePageArea turns off the page area of Home.
+func WithDisablePageArea(disabled bool) AppOption {
+	return func(o *ApplicationConfig) {
+		o.DisablePageArea = disabled
 	}
 }
 
@@ -1532,6 +1668,7 @@ func (o *ApplicationConfig) ApplyRuntimeSettings(settings *RuntimeSettings) (req
 	if settings == nil {
 		return false
 	}
+	defer o.keepAdminOffByOperator()
 	for _, f := range runtimeSettingsFields {
 		if f.snapshotOnly || !f.isSet(settings) {
 			continue
@@ -1581,6 +1718,16 @@ func (o *ApplicationConfig) ApplyRuntimeSettings(settings *RuntimeSettings) (req
 // 	}
 // }
 
+// keepAdminOffByOperator puts the admin tool group back off when the operator
+// switched it off with the deprecated flag or variable. An explicit disable
+// must not fail open because a stored or posted chats_localai_admin=true says
+// otherwise.
+func (o *ApplicationConfig) keepAdminOffByOperator() {
+	if o.AdminOffByDeprecatedOption {
+		o.DisableChatsLocalAIAdmin = true
+	}
+}
+
 // WithRouterDecisionLog retains routing decisions independently of billing stats.
 func WithRouterDecisionLog(enabled bool) AppOption {
 	return func(o *ApplicationConfig) { o.RouterDecisionLog = enabled }
@@ -1612,6 +1759,9 @@ const (
 	MaxChatsLoopMaxPerUser      = 200
 	DefaultChatsLoopDailyRuns   = 200
 	MaxChatsLoopDailyRuns       = 100000
+	// The same as loops.DefaultDailyScriptChecks and loops.MaxDailyScriptChecks.
+	DefaultChatsLoopDailyScriptChecks = 1500
+	MaxChatsLoopDailyScriptChecks     = 100000
 )
 
 // EffectiveChatsLoopMinInterval is chats_loop_min_interval as it applies now.
@@ -1660,6 +1810,51 @@ func (o *ApplicationConfig) EffectiveChatsLoopDailyRuns() int {
 	return inRange(o.ChatsLoopDailyRuns, MaxChatsLoopDailyRuns, DefaultChatsLoopDailyRuns)
 }
 
+// EffectiveChatsLoopDailyScriptChecks is chats_loop_daily_script_checks as it
+// applies now.
+func (o *ApplicationConfig) EffectiveChatsLoopDailyScriptChecks() int {
+	o.chatsLimitsMu.RLock()
+	defer o.chatsLimitsMu.RUnlock()
+	return inRange(o.ChatsLoopDailyScriptChecks, MaxChatsLoopDailyScriptChecks, DefaultChatsLoopDailyScriptChecks)
+}
+
+// Bounds and defaults of the trigger settings of the chats.
+const (
+	MinChatsTriggerRunLimit        = time.Minute
+	MaxChatsTriggerRunLimit        = 24 * time.Hour
+	DefaultChatsTriggerRunLimit    = 15 * time.Minute
+	DefaultChatsTriggerMaxPerUser  = 50
+	MaxChatsTriggerMaxPerUser      = 1000
+	DefaultChatsTriggerMaxDailyCap = 1000
+	MaxChatsTriggerMaxDailyCap     = 1000
+)
+
+// EffectiveChatsTriggerRunLimit is chats_trigger_run_limit as it applies now:
+// the longest one run of a trigger may take.
+func (o *ApplicationConfig) EffectiveChatsTriggerRunLimit() time.Duration {
+	o.chatsLimitsMu.RLock()
+	defer o.chatsLimitsMu.RUnlock()
+	if d := o.ChatsTriggerRunLimit; d >= MinChatsTriggerRunLimit && d <= MaxChatsTriggerRunLimit {
+		return d
+	}
+	return DefaultChatsTriggerRunLimit
+}
+
+// EffectiveChatsTriggerMaxPerUser is chats_trigger_max_per_user as it applies now.
+func (o *ApplicationConfig) EffectiveChatsTriggerMaxPerUser() int {
+	o.chatsLimitsMu.RLock()
+	defer o.chatsLimitsMu.RUnlock()
+	return inRange(o.ChatsTriggerMaxPerUser, MaxChatsTriggerMaxPerUser, DefaultChatsTriggerMaxPerUser)
+}
+
+// EffectiveChatsTriggerMaxDailyCap is chats_trigger_max_daily_cap as it
+// applies now: the most runs a day that one trigger may be set to.
+func (o *ApplicationConfig) EffectiveChatsTriggerMaxDailyCap() int {
+	o.chatsLimitsMu.RLock()
+	defer o.chatsLimitsMu.RUnlock()
+	return inRange(o.ChatsTriggerMaxDailyCap, MaxChatsTriggerMaxDailyCap, DefaultChatsTriggerMaxDailyCap)
+}
+
 // Bounds of chats_index_max_text_bytes.
 const (
 	MinChatsIndexMaxTextBytes     = 64 << 10
@@ -1674,6 +1869,62 @@ func (o *ApplicationConfig) EffectiveChatsIndexMaxTextBytes() int {
 		return n
 	}
 	return DefaultChatsIndexMaxTextBytes
+}
+
+// Bounds and defaults of the limits of "Extract here".
+const (
+	MinChatsExtractMaxBytes     int64 = 1 << 20
+	MaxChatsExtractMaxBytes     int64 = 64 << 30
+	DefaultChatsExtractMaxBytes int64 = 1 << 30
+
+	MinChatsExtractMaxEntries     = 1
+	MaxChatsExtractMaxEntries     = 1000000
+	DefaultChatsExtractMaxEntries = 20000
+)
+
+// EffectiveChatsExtractMaxBytes is the most bytes one archive may expand to:
+// the setting, or the default when it is unset or out of range.
+func (o *ApplicationConfig) EffectiveChatsExtractMaxBytes() int64 {
+	if n := o.ChatsExtractMaxBytes; n >= MinChatsExtractMaxBytes && n <= MaxChatsExtractMaxBytes {
+		return n
+	}
+	return DefaultChatsExtractMaxBytes
+}
+
+// EffectiveChatsExtractMaxEntries is the most entries one archive may have:
+// the setting, or the default when it is unset or out of range.
+func (o *ApplicationConfig) EffectiveChatsExtractMaxEntries() int {
+	if n := o.ChatsExtractMaxEntries; n >= MinChatsExtractMaxEntries && n <= MaxChatsExtractMaxEntries {
+		return n
+	}
+	return DefaultChatsExtractMaxEntries
+}
+
+// Default and bounds of chats_addon_tool_limit, the most add-on tools one chat
+// is offered. Every tool schema is sent to the model on every turn, so a high
+// limit costs context and makes the model choose worse; the floor keeps room
+// for the tools that replace built-in ones (shell, web) and a few add-ons.
+// Each add-on is also limited to 32 tools, whatever this setting says.
+const (
+	DefaultChatsAddonToolLimit = 64
+	MinChatsAddonToolLimit     = 16
+	MaxChatsAddonToolLimit     = 256
+)
+
+func (o *ApplicationConfig) setChatsAddonToolLimit(v int) {
+	o.chatsLimitsMu.Lock()
+	o.ChatsAddonToolLimit = v
+	o.chatsLimitsMu.Unlock()
+}
+
+// EffectiveChatsAddonToolLimit is chats_addon_tool_limit as it applies now.
+func (o *ApplicationConfig) EffectiveChatsAddonToolLimit() int {
+	o.chatsLimitsMu.RLock()
+	defer o.chatsLimitsMu.RUnlock()
+	if o.ChatsAddonToolLimit < MinChatsAddonToolLimit || o.ChatsAddonToolLimit > MaxChatsAddonToolLimit {
+		return DefaultChatsAddonToolLimit
+	}
+	return o.ChatsAddonToolLimit
 }
 
 // DefaultChatsEgressAuditDays is how long the Sandbox network audit keeps a
@@ -1730,6 +1981,24 @@ func (o *ApplicationConfig) EffectiveChatsMaxIterations() int {
 	return o.ChatsMaxIterations
 }
 
-func WithP2PEnableLimits(enabled bool) AppOption {
-	return func(o *ApplicationConfig) { o.P2PEnableLimits = enabled }
+// BrandingAssetURL returns the URL clients should use for an uploaded
+// branding asset of the given kind, or defaultURL when file is empty.
+//
+// The asset route is a fixed path that browsers cache, so a replacement
+// upload would keep showing the old image. The URL therefore carries a
+// version derived from the stored file's modification time; every upload
+// changes it and forces a fresh fetch.
+func (o *ApplicationConfig) BrandingAssetURL(kind, file, defaultURL string) string {
+	if file == "" {
+		return defaultURL
+	}
+	url := "/branding/asset/" + kind
+	if o.DynamicConfigsDir == "" || strings.ContainsAny(file, "/\\") {
+		return url
+	}
+	info, err := os.Stat(filepath.Join(o.DynamicConfigsDir, "branding", file))
+	if err != nil {
+		return url
+	}
+	return url + "?v=" + strconv.FormatInt(info.ModTime().UnixNano(), 36)
 }

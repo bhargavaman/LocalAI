@@ -54,7 +54,7 @@ var _ = Describe("registered addon routes with real authentication", func() {
 		Expect(gdb.Create(&auth.UserPermission{ID: uuid.NewString(), UserID: "granted", Permissions: auth.PermissionMap{auth.FeatureAddons: true}}).Error).To(Succeed())
 		e = echo.New()
 		e.Use(auth.Middleware(gdb, app.ApplicationConfig()))
-		routes.RegisterAddonRoutes(e, app)
+		routes.RegisterAddonRoutes(e, app, nil)
 	})
 	call := func(path, action string, mutate func(*http.Request)) *httptest.ResponseRecorder {
 		body := `{"addonId":"sample","operationId":"op","generation":1,"action":"` + action + `","arguments":{}}`
@@ -155,6 +155,9 @@ var _ = Describe("registered addon routes with real authentication", func() {
 			// issues its nonce. Browser session only, except the preview.
 			"POST /api/addons/host-grants/preview": true,
 			"POST /api/addons/host-grants/install": true,
+			// The install queue: approved installs that run in the background.
+			// Browser session only, like the install.
+			"POST /api/addons/host-grants/queue": true,
 			// Install from a file: staging a zip on the owner. It runs nothing.
 			"POST /api/addons/files": true,
 		}))
@@ -233,21 +236,43 @@ var _ = Describe("registered addon routes with real authentication", func() {
 			Expect(get(path, bearer("granted"))).To(Equal(reached), path)
 		}
 	})
-	It("lists every registered addon route in the feature registry", func() {
+	// registryMatches checks that the registry rows of the feature under a
+	// prefix are exactly the routes registered under it.
+	registryMatches := func(prefix string) {
 		registered := map[string]bool{}
 		for _, entry := range auth.RouteFeatureRegistry {
-			if entry.Feature == auth.FeatureAddons {
+			if entry.Feature == auth.FeatureAddons && strings.HasPrefix(entry.Pattern, prefix) {
 				registered[entry.Method+" "+entry.Pattern] = true
 			}
 		}
 		count := 0
 		for _, r := range e.Routes() {
-			if strings.HasPrefix(r.Path, "/api/addons") && (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+			if strings.HasPrefix(r.Path, prefix) && (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) {
 				count++
 				Expect(registered).To(HaveKey(r.Method+" "+r.Path), "an addon route without a feature registry entry")
 			}
 		}
 		Expect(count).To(Equal(len(registered)), "the registry holds exactly the registered addon routes")
+	}
+	It("lists every registered addon route in the feature registry", func() { registryMatches("/api/addons") })
+	It("keeps the sharing routes out of the feature registry and open to accounts without the add-ons feature", func() {
+		for _, entry := range auth.RouteFeatureRegistry {
+			Expect(entry.Pattern).NotTo(HavePrefix("/api/shares"), "a kind names the feature its resources need, not the route")
+		}
+		get := func(path string, mutate func(*http.Request)) int {
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			mutate(r)
+			w := httptest.NewRecorder()
+			e.ServeHTTP(w, r)
+			return w.Code
+		}
+		for _, path := range []string{"/api/shares/example:note", "/api/shares/example:note/r1/grants", "/api/shares/example:note/r1/users?q=ab"} {
+			Expect(get(path, forged)).To(Equal(http.StatusUnauthorized), path)
+		}
+		// The listing accepts a key and reaches the handler, which has no
+		// gateway here, with or without the add-ons feature.
+		Expect(get("/api/shares/example:note", bearer("plain"))).To(Equal(reached))
+		Expect(get("/api/shares/example:note", bearer("granted"))).To(Equal(reached))
 	})
 	It("gates the apps routes by authentication, feature and administration", func() {
 		do := func(method, path, body string, mutate func(*http.Request)) int {
@@ -321,7 +346,7 @@ var _ = Describe("explicit local-owner mode on the registered routes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		e := echo.New()
 		e.Use(auth.Middleware(app.AuthDB(), app.ApplicationConfig()))
-		routes.RegisterAddonRoutes(e, app)
+		routes.RegisterAddonRoutes(e, app, nil)
 		return e, app
 	}
 	post := func(e *echo.Echo, action string, mutate func(*http.Request)) int {

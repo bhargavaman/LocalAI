@@ -240,6 +240,11 @@ export function detectSource(input) {
     return { kind: 'huggingface', ref, file, ok: parts.length >= 2, scheme: lower.startsWith('http') ? 'https' : lower.split('://')[0] }
   }
   if (/^(oci|ocifile):\/\//i.test(uri)) return { kind: 'oci', ref: uri.replace(/^[a-z]+:\/\//i, ''), file: '', ok: true, scheme: lower.split('://')[0] }
+  if (/^pirateface:\/\//i.test(uri)) return { kind: 'pirateface', ref: uri.replace(/^pirateface:\/\//i, ''), file: '', ok: true, scheme: 'pirateface' }
+  if (/^magnet:\?/i.test(uri)) {
+    const hash = uri.match(/[?&]xt=urn:btih:([^&]+)/i)?.[1] || ''
+    return { kind: 'magnet', ref: hash, file: '', ok: hash !== '', scheme: 'magnet' }
+  }
   if (/^ollama:\/\//i.test(uri)) return { kind: 'ollama', ref: uri.replace(/^ollama:\/\//i, ''), file: '', ok: true, scheme: 'ollama' }
   if (/^https?:\/\//i.test(uri)) {
     const file = fileOf(uri.replace(/^https?:\/\/[^/]+/i, ''))
@@ -347,34 +352,4 @@ export function fitFor(neededBytes, freeBytes) {
   if (ratio > 1) return 'over'
   if (ratio > 0.85) return 'tight'
   return 'fits'
-}
-
-// ---- Explorer ------------------------------------------------------------------------
-
-// A token cut for display: its first and last characters. The token itself is
-// what the copy button and the join commands carry.
-export function shortToken(token) {
-  const t = `${token || ''}`
-  return t.length <= 16 ? t : `${t.slice(0, 6)}…${t.slice(-6)}`
-}
-
-export function workerCount(network) {
-  return (network?.Clusters || []).reduce((n, c) => n + (c?.Workers?.length || 0), 0)
-}
-
-// Networks with the most workers first, then by name. The server sorts by cluster
-// count; the page counts workers, which is what a person wants to join.
-export function sortNetworks(list) {
-  return [...(Array.isArray(list) ? list : [])].sort((a, b) =>
-    workerCount(b) - workerCount(a) || `${a.name}`.localeCompare(`${b.name}`))
-}
-
-// The two commands that start a federated node on a network, as the server's own
-// explorer page prints them.
-export function joinCommands(token, networkId) {
-  const env = `ADDRESS=":80" LOCALAI_P2P_NETWORK_ID=${networkId} LOCALAI_P2P_LOGLEVEL=debug TOKEN="${token}"`
-  return {
-    docker: `docker run -d --restart=always -e ADDRESS=":80" -e LOCALAI_P2P_NETWORK_ID=${networkId} -e LOCALAI_P2P_LOGLEVEL=debug --name local-ai -e TOKEN="${token}" --net host -ti localai/localai:master federated --debug`,
-    cli: `${env} local-ai federated --debug`,
-  }
 }

@@ -21,10 +21,10 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/mudler/LocalAI/addons/telegram/transport"
+	"github.com/mudler/LocalAI/core/services/notify"
 	"github.com/mudler/LocalAI/core/services/studio"
 	"github.com/mudler/LocalAI/core/services/studio/agents"
 	"github.com/mudler/LocalAI/core/services/studio/connectors"
-	"github.com/mudler/LocalAI/core/services/studio/notify"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/studiotest"
 	"github.com/mudler/LocalAI/core/services/studio/workspace"
@@ -44,6 +44,7 @@ type scriptedBot struct {
 	sentTo   []int64
 	sentIDs  []int64    // the message ID of each sendMessage
 	edits    []botEdit  // editMessageText calls
+	deleted  []int64    // message IDs of deleteMessage calls
 	drafts   []botDraft // sendMessageDraft calls
 	modes    []string   // the parse_mode of each sendMessage
 	files    []botFile  // sendDocument and sendPhoto calls
@@ -104,10 +105,12 @@ func newScriptedBot() *scriptedBot {
 		defer b.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if f := b.fail[method]; f != nil {
-			code, out := f()
-			w.WriteHeader(code)
-			_, _ = w.Write([]byte(out))
-			return
+			// A forced answer with code 0 lets the call through.
+			if code, out := f(); code != 0 {
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(out))
+				return
+			}
 		}
 		switch method {
 		case "getMe":
@@ -149,6 +152,9 @@ func newScriptedBot() *scriptedBot {
 		case "editMessageText":
 			mode, _ := body["parse_mode"].(string)
 			b.edits = append(b.edits, botEdit{ID: int64(body["message_id"].(float64)), Text: shown(body), Mode: mode, At: time.Now()})
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case "deleteMessage":
+			b.deleted = append(b.deleted, int64(body["message_id"].(float64)))
 			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		case "sendMessageDraft":
 			b.drafts = append(b.drafts, botDraft{Chat: int64(body["chat_id"].(float64)), ID: int64(body["draft_id"].(float64)), Text: body["text"].(string), At: time.Now()})
@@ -314,6 +320,7 @@ func newConnRigOpts(sh *shared, store connectors.Store, tr *studiobot.BotTranspo
 	c, err := studio.NewConnectors(r.svc, o)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(c.Close)
+	tr.UseAuthority(c)     // as the application does: every call is authorized by the stored binding
 	r.svc.SetConnectors(c) // as the application does: the chats see their bindings
 	ctx, cancel := context.WithCancel(context.Background())
 	DeferCleanup(cancel)
@@ -349,6 +356,8 @@ func (c *connRig) bind(in studio.ConnectorInput) connectors.Binding {
 		in.AgentID = c.agent.ID
 	}
 	in.Enabled = true
+	// Many specs bind the same fake bot twice on purpose.
+	in.ConfirmDuplicate = studio.DuplicateConfirmation
 	if in.Reply == "" {
 		// The specs written before the reply modes read the answer as the
 		// one message the bot sends; the live modes have their own specs.
@@ -741,8 +750,8 @@ var _ = Describe("connectors", func() {
 		off := r.bind(studio.ConnectorInput{Name: "Off", NotifyChat: "999"})
 		_, err := r.conns.SetConnectorEnabled(context.Background(), alice, off.ID, false)
 		Expect(err).NotTo(HaveOccurred())
-		r.conns.Forward(context.Background(), notify.Notification{Principal: alice, Title: "Nightly failed", Body: "took longer than 15m", Link: "/app/chats/c1"})
-		r.conns.Forward(context.Background(), notify.Notification{Principal: "bob", Title: "Bob's", Body: "x"})
+		r.conns.Forward(context.Background(), notify.Notification{Principal: alice, Source: notify.SourceTrigger, Title: "Nightly failed", Body: "took longer than 15m", Link: "/app/chats/c1"})
+		r.conns.Forward(context.Background(), notify.Notification{Principal: "bob", Source: notify.SourceTrigger, Title: "Bob's", Body: "x"})
 		waitFor("the message", func() bool { return len(bot.answers()) == 1 })
 		time.Sleep(60 * time.Millisecond)
 		bot.mu.Lock()
@@ -754,6 +763,24 @@ var _ = Describe("connectors", func() {
 		Expect(bot.sentTo[0]).To(BeNumerically("==", 314), "sent %q to %v", bot.sent, bot.sentTo)
 	})
 
+	It("forwards what a trigger or a connector sent, and never what the system sent", func() {
+		sh, bot := newShared(), newScriptedBot()
+		r := newConnRig(sh, connStore(), bot, connSay("ok"), nil)
+		r.bind(studio.ConnectorInput{NotifyChat: "314"})
+		ctx := context.Background()
+		// The system's news: updates, a finished install, the conversion, an item with no source.
+		for _, n := range []notify.Notification{
+			{Principal: alice, Source: notify.SourceSystem, Kind: notify.KindNeedsAttention, Title: "2 backend updates available", Body: "llama-cpp, whisper"},
+			{Principal: alice, Source: notify.SourceSystem, Kind: notify.KindRunEnded, Title: "Model installed", Body: "qwen3-8b"},
+			{Principal: alice, Title: "No source", Body: "x"},
+		} {
+			r.conns.Forward(ctx, n)
+		}
+		Consistently(func() int { return len(bot.answers()) }, "300ms").Should(BeZero(), "a system notification reached the chat")
+		r.conns.Forward(ctx, notify.Notification{Principal: alice, Source: notify.SourceConnector, Kind: notify.KindNeedsAttention, Title: "A connector stopped", Body: "bad token"})
+		waitFor("the connector notice", func() bool { return len(bot.answers()) == 1 })
+	})
+
 	It("a failed send does not fail the notification", func() {
 		sh, bot := newShared(), newScriptedBot()
 		bot.fail["sendMessage"] = func() (int, string) { return 400, `{"ok":false,"error_code":400,"description":"chat not found"}` }
@@ -761,7 +788,7 @@ var _ = Describe("connectors", func() {
 		r.bind(studio.ConnectorInput{NotifyChat: "314"})
 		// The inbox hook runs after the notification is stored.
 		r.inbox.OnAdd(func(n notify.Notification) { r.conns.Forward(context.Background(), n) })
-		n, err := r.inbox.Add(context.Background(), notify.Notification{Principal: alice, Title: "T", Body: "B"})
+		n, err := r.inbox.Add(context.Background(), notify.Notification{Principal: alice, Source: notify.SourceTrigger, Title: "T", Body: "B"})
 		Expect(err).NotTo(HaveOccurred(), "the notification was not stored")
 		Expect(n.ID).NotTo(BeNumerically("==", 0), "the notification was not stored: %v", err)
 		got, _ := r.inbox.Count(context.Background(), alice)
@@ -785,7 +812,7 @@ var _ = Describe("connectors", func() {
 					case <-stop:
 						return
 					default:
-						r.conns.Forward(ctx, notify.Notification{Principal: alice, Title: "T", Body: "B"})
+						r.conns.Forward(ctx, notify.Notification{Principal: alice, Source: notify.SourceTrigger, Title: "T", Body: "B"})
 					}
 				}
 			})
@@ -898,3 +925,10 @@ func (c *connRig) agentBinding() string {
 	Expect(list).To(HaveLen(1))
 	return list[0].ID
 }
+
+// englishReplies fixes the reply language of a binding to English. A spec that
+// reads the text of a host sentence needs it when the person's message holds a
+// random proposal code: with auto, the language detection reads that code, and
+// one in about 1500 is a stop word of another language (A2JE reads as French,
+// from "je"), so the reply comes in that language.
+func englishReplies() *string { l := "en"; return &l }

@@ -37,6 +37,8 @@ export function normalizeOperation(payload) {
     failureCode: p.failureCode || '',
     generation: Number(p.Generation ?? p.generation ?? 0),
     runtimeState: p.runtimeState || '',
+    // The job of /api/operations that carries an upgrade waiting in the queue.
+    jobId: p.jobId || p.JobID || '',
   }
 }
 
@@ -115,8 +117,14 @@ export function createAddonsApi({ fetch: fetchImpl, base = p => p } = {}) {
     dispatchFile,
     apps: {
       async list(signal) {
+        return (await api.apps.read(signal)).apps
+      },
+      // The server fails closed: when the owner does not answer it sends a
+      // typed 503, never an older list. A page that wants to keep showing its
+      // last list keeps it in its own memory.
+      async read(signal) {
         const out = await call('/api/addons/apps', { signal })
-        return Array.isArray(out?.apps) ? out.apps : []
+        return { apps: Array.isArray(out?.apps) ? out.apps : [] }
       },
       async start(id, { operationId, generation }, signal) {
         const out = await call(`/api/addons/apps/${encodeURIComponent(id)}/start`, { method: 'POST', body: { operationId, generation }, signal })
@@ -181,9 +189,11 @@ export function createAddonsApi({ fetch: fetchImpl, base = p => p } = {}) {
       },
       // Starts the install and follows the job to its end. onStatus gets every
       // status of the job. It resolves with the final status and throws an
-      // AddonsError for a refusal of the request or a failed job.
+      // AddonsError for a refusal of the request or a failed job. `signal`
+      // ends the following only: the request that starts the job is sent
+      // whatever the page does next, so one click never needs the page open.
       async install({ sourceId, name, version }, signal, { onStatus, pollMs = 500 } = {}) {
-        const job = await call('/backends/library/install', { method: 'POST', body: { sourceId, name, version }, signal })
+        const job = await call('/backends/library/install', { method: 'POST', body: { sourceId, name, version } })
         const id = job && job.id
         if (!id) return job
         for (;;) {
@@ -269,11 +279,22 @@ export function createAddonsCatalogAdapter(api, { pageSize = 24 } = {}) {
     id: release.id ?? release.addonId,
     title: release.name || (release.id ?? release.addonId),
     description: release.description || release.ui?.description || '',
+    // The other languages of the title and description, from the library.
+    titles: release.ui?.titles || {},
+    descriptions: release.ui?.descriptions || {},
     version: release.version,
     sourceId: release.sourceId,
+    // True only when the host stamped the entry as coming from the official
+    // library. A host that does not send it leaves the dialog warning.
+    official: release.official === true,
+    // Who signed it, for a non-official library that pins a signer. The host
+    // stamps it; the page only shows it.
+    signer: typeof release.signer === 'string' ? release.signer : '',
     // The kind of the entry: addon when the library does not say.
     kind: release.kind || 'addon',
     alias: release.alias || '',
+    // A short text from the add-on: what it needs before it works.
+    setup: typeof release.setup === 'string' ? release.setup : '',
     channel: release.channel || '',
     digest: release.digest || '',
     platform: { os: release.os, arch: release.arch },
@@ -301,7 +322,15 @@ export function createAddonsCatalogAdapter(api, { pageSize = 24 } = {}) {
       // Backends belong to the Backends page. The request asks for add-ons
       // only; an entry that still says it is a backend is dropped here too.
       const releases = (Array.isArray(payload?.releases) ? payload.releases : []).filter(r => !r.kind || r.kind === 'addon')
-      return { entries: releases.map(toEntry), total: Number(payload?.total) || 0, offset }
+      // The libraries the owner could not read. The entries of the others are
+      // in the page; each failed one says why, and when it last loaded.
+      const failed = (Array.isArray(payload?.failed) ? payload.failed : []).map(f => ({
+        sourceId: String(f?.sourceId || ''),
+        name: String(f?.name || f?.sourceId || ''),
+        error: String(f?.error || ''),
+        lastSuccess: f?.lastSuccess || '',
+      }))
+      return { entries: releases.map(toEntry), total: Number(payload?.total) || 0, offset, failed }
     },
     async details(key, signal) {
       const [sourceId, addonId, version] = String(key).split('/')

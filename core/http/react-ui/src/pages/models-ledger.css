@@ -170,21 +170,8 @@
 .ledger-density { margin-left: auto; }
 .ledger-density .dk-seg { width: 36px; padding: 0; justify-content: center; }
 
-/* The backend select is the shared component with inline styles; here it takes
-   the kit's control look so it sits level with the search field. */
+/* The backend filter is a ListPicker chip. */
 .models-filters__backend { flex: 0 0 auto; min-width: 0; }
-.models-filters__backend > div { min-width: 170px !important; }
-.models-filters__backend button.input {
-  height: 40px;
-  padding: 0 var(--dk-space-3) !important;
-  border: 1px solid var(--dk-control-edge) !important;
-  border-radius: var(--dk-radius-2) !important;
-  background: var(--dk-card) !important;
-  color: var(--dk-text) !important;
-  font: var(--dk-weight-regular) var(--dk-text-13) / 1 var(--dk-font-body) !important;
-}
-.models-filters__backend button.input:hover { background: var(--dk-hover) !important; }
-.models-filters__backend button.input .lai-icon { font-size: 14px !important; }
 
 /* Facets: one row that scrolls sideways instead of wrapping into a block. */
 .ledger-controls__row--facets { flex-wrap: nowrap; }
@@ -226,8 +213,7 @@
 }
 .models-filters__context .dk-range-wrap { flex: 1; min-width: 0; }
 
-.ledger-states { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
-.ledger-states .dk-seg { gap: var(--dk-space-2); }
+.ledger-states { max-width: 100%; }
 
 .ledger-banner {
   flex: none;
@@ -321,7 +307,7 @@
   box-shadow: inset 0 0 0 1px var(--dk-edge);
   color: transparent;
 }
-.ledger-mark .lai-icon { font-size: 12px; }
+.ledger-mark .lai-icon { font-size: var(--fs-meta); }
 tr[data-selected="true"] .ledger-mark {
   background: var(--dk-accent);
   box-shadow: none;
@@ -340,8 +326,21 @@ tr[data-selected="true"] .ledger-mark {
 /* The ellipsis has to sit on the text itself: it does not apply to the text
    inside a flex container. */
 .ledger-name__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ledger-name__pin { flex: none; display: inline-flex; color: var(--dk-muted); font-size: 13px; }
+.ledger-name__pin { flex: none; display: inline-flex; color: var(--dk-muted); font-size: var(--fs-small); }
 .ledger-table .dk-table-sub { max-width: none; }
+.ledger-origin {
+  flex: none;
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--dk-border);
+  border-radius: var(--dk-radius-1);
+  color: var(--dk-muted);
+  font-family: var(--dk-font-body, var(--dk-font-sans, sans-serif));
+  font-size: var(--dk-text-11, 11px);
+  line-height: 16px;
+  white-space: nowrap;
+}
 .ledger-builds::before { content: "\00a0\00b7\00a0"; }
 
 .ledger-size { color: var(--dk-text); }
@@ -371,6 +370,7 @@ tr[data-selected="true"] .ledger-mark {
 .ledger-state { gap: 8px; }
 .ledger-state[data-state="disabled"] { color: var(--dk-muted); }
 .ledger-state[data-state="running"] { color: var(--dk-ok-text); font-weight: var(--dk-weight-semibold); }
+.ledger-state[data-state="unavailable"] { color: var(--dk-warn-text); }
 
 /* Group rows: a quiet heading that folds its section. */
 .ledger-group > td { height: 36px; padding: 0; background: var(--dk-inset); border-bottom-color: var(--dk-edge); }
@@ -395,7 +395,7 @@ tr[data-selected="true"] .ledger-mark {
 .ledger-group__count { margin-left: auto; font-family: var(--font-sans); font-weight: var(--dk-weight-regular); font-variant-numeric: tabular-nums; }
 
 /* Skeleton rows keep the table's own shape while the gallery loads. */
-.ledger-skeleton .dk-skeleton, .zero-pane__hero .dk-skeleton { display: block; height: 12px; border-radius: 6px; background: var(--dk-hover); }
+.ledger-skeleton .dk-skeleton, .zero-pane__hero .dk-skeleton { display: block; height: 12px; border-radius: var(--r-sm); background: var(--dk-hover); }
 .zero-pane__hero .dk-skeleton--title { width: 60%; height: 24px; }
 .ledger-skeleton__name { width: 55%; margin-bottom: 8px; }
 .ledger-skeleton__sub { width: 35%; height: 10px !important; }
@@ -442,7 +442,7 @@ tr[data-selected="true"] .ledger-mark {
 }
 .ledger-fit[data-fit="spill"] .ledger-fit__words { color: var(--dk-warn-text); }
 .ledger-fit[data-fit="over"] .ledger-fit__words { color: var(--dk-error-text); }
-.ledger-fit__icon { font-size: 12px; }
+.ledger-fit__icon { font-size: var(--fs-meta); }
 
 /* --- Inspector ----------------------------------------------------------- */
 
@@ -518,7 +518,7 @@ tr[data-selected="true"] .ledger-mark {
 .ledger__pane .discover__chart-axis { border-top-color: var(--dk-control-edge); }
 .ledger__pane .discover__chart-axis span { color: var(--dk-muted); }
 .ledger__pane .discover__chart-col:hover .discover__chart-bar { filter: none; background: var(--dk-accent-text); }
-.ledger__pane .discover__chart-col:focus-visible { outline: 2px solid var(--dk-accent); outline-offset: 2px; border-radius: 4px; }
+.ledger__pane .discover__chart-col:focus-visible { outline: 2px solid var(--dk-accent); outline-offset: 2px; border-radius: var(--r-xs); }
 .ledger__pane .discover__chart-verdict--ok { color: var(--dk-ok-text); }
 .ledger__pane .discover__chart-verdict--warn { color: var(--dk-warn-text); }
 .ledger__pane .discover__chart-verdict--bad { color: var(--dk-error-text); }
@@ -570,29 +570,8 @@ tr[data-selected="true"] .ledger-mark {
   color: var(--dk-muted);
 }
 .ledger__pane .resource-row__detail-grid dd { margin: 0; font-size: var(--dk-text-13); min-width: 0; overflow-wrap: anywhere; }
-.ledger__pane .badge-row { display: flex; flex-wrap: wrap; gap: var(--dk-space-1); }
-
-/* --- Empty ---------------------------------------------------------------- */
-
-.ledger-empty {
-  flex: 1;
-  display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: var(--dk-space-2);
-  padding: var(--dk-space-6) var(--dk-space-4);
-  border: 1px solid var(--dk-edge);
-  border-radius: var(--dk-radius-3);
-  background: var(--dk-card);
-  text-align: center;
-}
-.ledger-empty--page { margin-top: var(--dk-space-3); min-height: 280px; }
-.ledger-empty__actions { display: flex; gap: var(--dk-space-2); margin-top: var(--dk-space-2); }
 
 /* --- Cleanup sheet --------------------------------------------------------- */
-
-.ledger-sheet { width: min(560px, 100%); }
-.ledger-sheet .dk-sheet-head { border-bottom: 1px solid var(--dk-edge); padding-bottom: var(--dk-space-3); }
 
 .ledger-sheet__body { display: flex; flex-direction: column; gap: var(--dk-space-3); padding-top: 0; }
 
@@ -674,7 +653,7 @@ tr[data-selected="true"] .ledger-mark {
   cursor: pointer;
   text-align: left;
 }
-.ledger-protected__toggle:focus-visible { outline: 2px solid var(--dk-accent); outline-offset: 2px; border-radius: 6px; }
+.ledger-protected__toggle:focus-visible { outline: 2px solid var(--dk-accent); outline-offset: 2px; border-radius: var(--r-sm); }
 
 .ledger-effect { justify-content: space-between; align-items: center; flex-wrap: nowrap; gap: var(--dk-space-3); }
 .ledger-effect__text { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; font-size: var(--dk-text-13); }
@@ -684,7 +663,7 @@ tr[data-selected="true"] .ledger-mark {
 
 .ledger-confirm { display: grid; gap: var(--dk-space-3); font-size: var(--dk-text-13); }
 .ledger-confirm p { margin: 0; }
-.confirm-dialog:has(.ledger-confirm) { max-width: 520px; }
+.dk-dialog:has(.ledger-confirm) { width: min(520px, 100%); }
 .ledger-confirm__table, .ledger-confirm__table tbody { display: block; width: 100%; }
 .ledger-confirm__table { max-height: 36vh; overflow-y: auto; }
 /* One row per model: the name and its size on a line, the reason under it. */
@@ -723,14 +702,9 @@ tr[data-selected="true"] .ledger-mark {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dk-accent-text) 40%, transparent);
 }
 
-/* Density and state segments share one height. */
+/* The density segment. */
 .models-page .ledger-density { padding: 4px; }
 .models-page .ledger-density .dk-seg { width: 40px; height: 36px; }
-.models-page .ledger-states { padding: 4px; gap: var(--dk-space-1); }
-.models-page .ledger-states .dk-seg { height: 36px; padding: 0 var(--dk-space-4); gap: var(--dk-space-2); }
-.models-page .ledger-states .dk-seg[aria-selected="true"] {
-  box-shadow: var(--dk-shadow-rest), inset 0 0 0 1px var(--dk-edge), inset 0 -2px 0 var(--dk-accent);
-}
 
 .models-page .ledger-bar { margin-bottom: var(--dk-space-3); min-height: 32px; }
 
@@ -740,7 +714,6 @@ tr[data-selected="true"] .ledger-mark {
   .models-page .ledger-refine .filter-bar-group__toggle { min-height: 44px; }
   .models-page .ledger-facets .dk-chip { height: 40px; }
   .models-page .ledger-density .dk-seg { width: 44px; height: 40px; }
-  .models-page .ledger-states .dk-seg { height: 40px; }
 }
 
 /* --- Narrow ---------------------------------------------------------------- */
@@ -807,7 +780,7 @@ tr[data-selected="true"] .ledger-mark {
     justify-content: space-between;
     gap: var(--sp-3);
   }
-  .models-filters__sheet[data-open="true"] .models-filters__backend > div { width: 100%; }
+  .models-filters__sheet[data-open="true"] .models-filters__backend > .list-picker { width: 100%; }
   .models-filters__sheet[data-open="true"] .ledger-refine { flex-direction: column; align-items: stretch; }
   .models-filters__sheet[data-open="true"] .ledger-density { margin-left: 0; align-self: flex-start; }
   .models-filters__sheet[data-open="true"] .ledger-facets { flex-wrap: wrap; overflow: visible; padding: 0; mask-image: none; }
@@ -816,7 +789,7 @@ tr[data-selected="true"] .ledger-mark {
     position: fixed;
     inset: 0;
     z-index: var(--dk-z-veil);
-    background: var(--dk-scrim, rgb(0 0 0 / .4));
+    background: var(--dk-scrim);
     animation: dk-veil-in var(--dur-base) var(--ease-out) both;
   }
 
@@ -860,6 +833,8 @@ tr[data-selected="true"] .ledger-mark {
   .ledger-table tbody tr.dk-table-loading > td.ledger-name-cell { grid-column: 2; grid-row: 1; }
   .ledger-table tbody tr.ledger-group { display: block; }
   .ledger-table tbody tr.ledger-group > td { display: block; }
+  .ledger-table tbody tr.ledger-section-note { display: block; }
+  .ledger-table tbody tr.ledger-section-note > td { display: block; }
   .ledger-table tbody tr.dk-table-loading { display: grid; grid-template-columns: 20px 1fr auto; }
   .ledger-table tbody tr.dk-table-loading > td { display: block; padding: 6px; border: 0; }
   .ledger-fit__bar { max-width: 96px; }
@@ -880,9 +855,9 @@ tr[data-selected="true"] .ledger-mark {
 
 /* The undo toast sits in the open part of the page, beside a side sheet and
    above a bottom sheet, never on top of the effect bar. */
-.ledger-veil ~ .dk-toast-region { left: calc((100% - min(560px, 100%)) / 2); }
+body:has(.ledger-veil) .dk-toast-region { left: calc((100% - min(480px, 100%)) / 2); }
 @media (max-width: 640px) {
-  .ledger-veil ~ .dk-toast-region { left: 50%; bottom: auto; top: var(--dk-space-3); }
+  body:has(.ledger-veil) .dk-toast-region { left: 50%; bottom: auto; top: var(--dk-space-3); }
 }
 
 /* The arrow at the end of a row: opens the model's own page. */
@@ -910,3 +885,104 @@ tr[data-selected="true"] .ledger-mark {
 
 /* Sizes in the cleanup legend: sans, tabular figures. */
 .ledger-space__fig { font-variant-numeric: tabular-nums; }
+
+/* Online sources: Hugging Face and Pirate Face rows go through the same table. */
+.ledger-group--static > td { cursor: default; }
+.ledger-group__toggle--static { cursor: default; }
+.ledger-group__toggle--static:hover { color: var(--dk-muted); }
+.ledger-group__tag,
+.dk-chip__tag {
+  padding: 1px 6px;
+  border: 1px solid var(--dk-edge);
+  border-radius: var(--radius-full);
+  font: var(--dk-weight-semibold) 10px / 1.4 var(--dk-font-body);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--dk-muted);
+}
+.dk-chip__tag { margin-left: var(--dk-space-2); }
+.ledger-group__count { margin-left: auto; }
+.ledger-builds--gated { color: var(--dk-warn-text, var(--dk-muted)); font-weight: var(--dk-weight-semibold); }
+/* A line under an online section of the table: a failure with its retry, a
+   note, or the button that asks for more rows. */
+.ledger-section-note > td { height: auto; padding: var(--dk-space-3) var(--dk-space-4); border-bottom-color: var(--dk-edge); }
+.ledger-section-note__row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--dk-space-3); }
+.ledger-section-note__row--center { justify-content: center; }
+.ledger-section-note__text { font-size: var(--dk-text-12); color: var(--dk-muted); }
+.ledger-more { display: flex; justify-content: center; padding: var(--dk-space-3) 0; }
+.remote-notices { display: flex; flex-direction: column; gap: var(--dk-space-2); margin-bottom: var(--dk-space-3); }
+.ledger-estimate-note { margin: 0 0 var(--dk-space-3); font-size: var(--dk-text-12); color: var(--dk-muted); }
+
+/* A choice among builds of one repository: no info control and no backend
+   column, and the name keeps room so it is never squeezed out by the badges.
+   The status track may shrink below its content, so its badges wrap: on a
+   phone a long badge such as "Spills to CPU" drops to a second line instead
+   of leaving the pane. */
+.variant-list--choice {
+  grid-template-columns: 0 minmax(9ch, auto) 0 max-content max-content minmax(0, max-content) max-content 1fr;
+  column-gap: var(--spacing-sm);
+  /* The list sits in a table cell, and a table sizes a cell to the
+     min-content of what is in it. Without this the cell grows to the sum of
+     the tracks and the table leaves the pane. The list then takes the width
+     the cell has. */
+  contain: inline-size;
+}
+/* On a phone the label column of the detail table takes a third of the pane,
+   which leaves the builds too little room for their badges. The row with the
+   builds puts its label above them instead. */
+@media (max-width: 639px) {
+  .ledger-detail__table:has(.variant-list--choice),
+  .ledger-detail__table:has(.variant-list--choice) > tbody,
+  .ledger-detail__table:has(.variant-list--choice) > tbody > tr:has(.variant-list--choice),
+  .ledger-detail__table:has(.variant-list--choice) > tbody > tr:has(.variant-list--choice) > * {
+    display: block;
+  }
+  .variant-list--choice { grid-template-columns: 0 minmax(9ch, auto) 0 max-content max-content minmax(14ch, max-content) max-content 1fr; }
+}
+
+/* --- Sources of the online search ------------------------------------------ */
+
+.source-filters {
+  display: contents;
+}
+
+.source-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dk-space-2);
+  min-height: 40px;
+  font-size: var(--dk-text-13);
+  color: var(--dk-text);
+}
+
+.source-filter__label {
+  color: var(--dk-muted);
+  white-space: nowrap;
+}
+
+.source-filter__range { display: inline-flex; align-items: center; gap: var(--dk-space-2); }
+.source-filter__unit { color: var(--dk-muted); }
+.source-filter__text { width: 12rem; }
+
+.source-hint {
+  margin: 0 0 var(--dk-space-3);
+  font-size: var(--dk-text-13);
+  color: var(--dk-muted);
+}
+
+.source-panel__help { margin: 0 0 var(--dk-space-4); color: var(--dk-muted); font-size: var(--dk-text-13); }
+.source-panel__list { list-style: none; margin: 0 0 var(--dk-space-4); padding: 0; }
+.source-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dk-space-4);
+  padding: var(--dk-space-3) 0;
+  border-bottom: 1px solid var(--dk-edge);
+}
+.source-panel__name { display: flex; align-items: center; flex-wrap: wrap; gap: var(--dk-space-2); }
+.source-panel__kind { color: var(--dk-muted); font-size: var(--dk-text-12); }
+
+.source-filter .ui-slider { width: auto; }
+.source-filter .ui-slider__range { flex: none; width: 8rem; }
+.source-filter .ui-slider__box { width: 4.5rem; }

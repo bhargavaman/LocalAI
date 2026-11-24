@@ -26,7 +26,14 @@ function phoneNow() {
 //   messages         the transcript
 //   ready            the chat's transcript is read: the watermark is taken then
 //   running          a turn runs now (its own messages count as new)
-export function useChatPreviewPane({ chatId, userId, files, loaded, messages, ready, running }) {
+//   madeHere         the id of the chat this page created: all of it is new
+//   startedTurn      { chat, turn } of the last turn this page saw start: that
+//                    turn and the ones after it are new, even when the chat
+//                    is read only after the turn has ended
+//   blocked          another panel holds the right side (the dock is open):
+//                    nothing opens by itself, and what a turn produced then
+//                    counts as seen
+export function useChatPreviewPane({ chatId, userId, files, loaded, messages, ready, running, blocked = false, madeHere = null, startedTurn = null }) {
   const key = closedKey(userId)
   const [open, setOpen] = useState(false)
   const [focus, setFocus] = useState(null)
@@ -45,14 +52,23 @@ export function useChatPreviewPane({ chatId, userId, files, loaded, messages, re
     seen.current = new Set()
   }, [chatId])
   useEffect(() => {
-    if (!chatId || !ready || !loaded || since.id === chatId) return
+    if (!chatId || since.id === chatId) return
+    // A chat this page created has nothing old in it. Waiting for the first
+    // read would take the watermark after a quick first turn has ended, and
+    // that turn's file would count as old.
+    if (madeHere === chatId) {
+      setSince({ id: chatId, turn: 0, seq: 0 })
+      return
+    }
+    if (!ready || !loaded) return
     const lastTurn = messages.reduce((n, m) => Math.max(n, m.turn || 0), 0)
-    const turn = running ? Math.max(0, lastTurn - 1) : lastTurn
+    let turn = running ? Math.max(0, lastTurn - 1) : lastTurn
+    if (startedTurn?.chat === chatId) turn = Math.min(turn, startedTurn.turn - 1)
     // A running turn's own answers are new: the watermark is the last
     // message of the turns before it.
     const seq = messages.filter(m => (m.turn || 0) <= turn).reduce((n, m) => Math.max(n, m.seq || 0), 0)
     setSince({ id: chatId, turn, seq })
-  }, [chatId, ready, loaded, running, messages, since.id])
+  }, [chatId, ready, loaded, running, messages, since.id, madeHere, startedTurn])
 
   const ask = useCallback((target, by) => {
     setFocus(f => ({ path: target.type === 'file' ? target.path : undefined, block: target.type === 'block' ? target.id : undefined, by, n: (f?.n || 0) + 1 }))
@@ -64,11 +80,11 @@ export function useChatPreviewPane({ chatId, userId, files, loaded, messages, re
     const k = targetKey(target)
     if (!k || seen.current.has(k)) return
     seen.current.add(k)
-    if (phoneNow() || isClosed(browserStorage(), key, chatId)) return
+    if (phoneNow() || blocked || isClosed(browserStorage(), key, chatId)) return
     setOpen(true)
     ask(target, 'auto')
     setAnnouncement(target.name)
-  }, [chatId, since, files, messages, key, ask])
+  }, [chatId, since, files, messages, key, ask, blocked])
 
   // Opening by hand forgets that the pane was closed in this chat.
   const reopen = useCallback(() => {
@@ -90,9 +106,12 @@ export function useChatPreviewPane({ chatId, userId, files, loaded, messages, re
     setAnnouncement('')
     setClosed(browserStorage(), key, chatId, true)
   }, [key, chatId])
+  // Gives the side to another panel: it closes without the "closed by the
+  // person" mark, so the pane may open by itself again later.
+  const hide = useCallback(() => { setOpen(false); setAnnouncement('') }, [])
   const toggle = useCallback(() => { if (open) close(); else reopen() }, [open, close, reopen])
   // A deleted chat leaves nothing behind.
   const forget = useCallback((id) => setClosed(browserStorage(), key, id, false), [key])
 
-  return { open, focus, blocks, announcement, openFile, openBlock, close, toggle, forget }
+  return { open, focus, blocks, announcement, openFile, openBlock, close, hide, toggle, forget }
 }

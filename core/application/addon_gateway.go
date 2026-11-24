@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ func (a *Application) AddonToolProvider() *mcpTools.AddonToolProvider {
 	if a.addonGateway == nil {
 		return nil
 	}
-	p := mcpTools.NewAddonToolProvider(addontools.NewToolAdapter(a.addonGateway), a.AddonOwnershipMode())
+	p := mcpTools.NewAddonToolProvider(addontools.NewToolAdapter(a.addonGateway).WithToolLimit(a.addonToolLimit), a.AddonOwnershipMode())
 	if db := a.AuthDB(); db != nil {
 		has := addonFeatureCheck(db)
 		authority := a.addonAuthority()
@@ -188,7 +189,16 @@ func (a *Application) RegisterAddonWorkspace(f *files.Service) error {
 	return hostops.RegisterWorkspace(a.addonHostOps.Broker, &hostops.WorkspaceHost{
 		Store:     f.Store(),
 		Principal: func(actor contract.Actor) string { return addonWorkspacePrincipal(a.authDB != nil)(actor) },
-		DataDir:   func(id string) string { return filepath.Join(root, id) },
+		// An add-on in WSL 2 keeps its data in the file system of its
+		// distribution; the supervisor knows the path this host reaches.
+		DataDir: func(id string) string {
+			if a.addonHostDataDir != nil {
+				if d := a.addonHostDataDir(id); d != "" {
+					return d
+				}
+			}
+			return filepath.Join(root, id)
+		},
 		// The chats service is built after the broker: it is looked up at
 		// each call. A chat's call gets the chat's access, so a chat whose
 		// agent has a folder reaches only that folder through an add-on;
@@ -351,7 +361,11 @@ func (a *Application) startAddonGateway() error {
 	if mode == auth.AddonModeLocalOwner {
 		xlog.Warn(localOwnerWarning)
 	}
-	g := &gateway.Gateway{Transfers: a.transfers(), Limits: c.Limits, Manager: a.addonManager, ConnectorAuthority: connectorAuthority{a}, Revalidate: auth.AddonRevalidate(a.authDB, mode)}
+	account := auth.AccountRevalidate(a.authDB, mode)
+	g := &gateway.Gateway{Transfers: a.transfers(), Limits: c.Limits, Manager: a.addonManager, ConnectorAuthority: connectorAuthority{a}, Revalidate: auth.AddonRevalidate(a.authDB, mode),
+		// The sharing calls of the kinds that are not add-ons check the
+		// account alone; the policy adds the feature the kind names.
+		RevalidateAccount: func(ctx context.Context, actor contract.Actor) error { return account(ctx, actor, "") }}
 	if cfg.InstanceID != cfg.OwnerID {
 		g.Forward = carrier
 		a.addonGateway = g
@@ -378,6 +392,15 @@ func (a *Application) startAddonGateway() error {
 	}
 	if e := a.wireHostGrantsOwner(g); e != nil {
 		return e
+	}
+	// The OAuth logins of connections and the OAuth clients of add-ons are
+	// served here, where the descriptors are read; frontends forward them.
+	// The connector service can start after the gateway, so it is read at
+	// call time.
+	g.OAuthOwner = studio.OAuthOwner{
+		Connectors: a.studioConnectorsHook.Load,
+		Principal:  addonWorkspacePrincipal(a.authDB != nil),
+		Admin:      g.HostSettingsAdmin,
 	}
 	// Only the owner holds the policy store. Other frontends reach it through the
 	// gateway, and without it the gateway keeps denying every resource.
@@ -410,6 +433,10 @@ func (a *Application) startAddonGateway() error {
 	// host surface only, never by a chat turn.
 	brokerOpts.ConfirmPerson = confirmPerson(mode)
 	brokerOpts.Credentials = credentialSource{a}
+	// The person may relax the confirmation of a tool that the manifest marks
+	// approvalOverridable. The host decides from the chat of the call.
+	brokerOpts.RelaxApproval = a.addonApprovalRelaxed
+	brokerOpts.OnRelaxedRun = a.recordRelaxedRun
 	// A deletion trusts only an explicit answer of the add-on.
 	confirmed := a.addonResourceExists
 	if confirmed == nil {
@@ -422,16 +449,28 @@ func (a *Application) startAddonGateway() error {
 	}
 	p := policy.New(store, policy.Options{
 		Revalidate:      g.Revalidate,
+		Account:         account,
 		CreateAuthority: addonCreateAuthority(a.addonManager, g.Revalidate),
 		Proposals:       broker,
 	})
 	broker.Attach(p)
+	// The services whose resources are shared through the policy register
+	// their kinds before anything is reconciled or served, so a pending
+	// record of a kind is settled by its own backing check at startup.
+	if e = a.registerShareKinds(p); e != nil {
+		_ = broker.Close()
+		_ = store.Close()
+		return e
+	}
 	// Recovery gets the owner's access state. A restore or a purge that a
 	// crash stopped is finished now, before anything is served; an add-on
 	// that needs recovery stays unavailable until an administrator acts.
 	if a.addonManager != nil {
 		if rec := a.addonManager.DataRecovery(); rec != nil {
-			rec.SetPolicy(&policy.RecoveryPort{Policy: p, Broker: broker})
+			rec.SetPolicy(oauthPurgePort{
+				PolicyPort: &policy.RecoveryPort{Policy: p, Broker: broker},
+				store:      func() connectors.Store { return a.studioConnStore },
+			})
 			if e = rec.Reconcile(a.applicationConfig.Context); e != nil {
 				xlog.Warn("addons: a data recovery journal could not be finished yet", "error", e)
 			}
@@ -464,6 +503,15 @@ func (a *Application) startAddonGateway() error {
 	if rep.Kept > 0 {
 		xlog.Warn("addons: pending resource registrations could not be settled yet and stay pending", "settled", rep.Settled, "kept", rep.Kept)
 	}
+	// Share records whose resource is gone (an agent deleted while the
+	// record could not be dropped) are dropped now, before anything is
+	// served, so they never hold quota for good. A failed check keeps the
+	// record for the next start.
+	if sweep, e := p.SweepOrphans(a.applicationConfig.Context); e != nil {
+		xlog.Warn("addons: the share records could not be checked", "error", e)
+	} else if sweep.Dropped > 0 || sweep.Kept > 0 {
+		xlog.Info("addons: share records of deleted resources dropped", "dropped", sweep.Dropped, "unchecked", sweep.Kept)
+	}
 	// The conversation selections and the UI-only resource management sit
 	// beside the policy store and are held only here.
 	selections, e = resources.OpenSelections(filepath.Join(cfg.Root, "selections"), resources.SelectionOptions{})
@@ -477,6 +525,10 @@ func (a *Application) startAddonGateway() error {
 	}
 	manage := resources.New(resourceOpts)
 	g.Resources = manage
+	g.Sharing = manage
+	// The services of the frontends look up, create and run the resources
+	// of their kinds through the leases of the owner.
+	g.ShareAuthority = policy.NewShareHost(a.applicationConfig.Context, p)
 	// The owner serves the library calls of the frontends. A node with no
 	// source store (no catalog) has nothing to serve.
 	if a.addonSources != nil {
@@ -627,7 +679,13 @@ func (a *Application) StudioAddonTools() studio.AddonTools {
 	if db := a.AuthDB(); db != nil {
 		has = addonFeatureCheck(db)
 	}
-	return &studioAddons{adapter: addontools.NewChatToolAdapter(a.addonGateway).WithConnectionNames(a.chatConnectionName), mode: a.AddonOwnershipMode(), hostOps: a.addonAuthority(), ids: a.installedAddonIDs, has: has}
+	return &studioAddons{gw: a.addonGateway, adapter: addontools.NewChatToolAdapter(a.addonGateway).WithConnectionNames(a.chatConnectionName).WithToolLimit(a.addonToolLimit), mode: a.AddonOwnershipMode(), hostOps: a.addonAuthority(), ids: a.installedAddonIDs, has: has, startFailure: a.addonStartFailure}
+}
+
+// addonToolLimit is the cap on add-on tools one chat is offered now
+// (chats_addon_tool_limit).
+func (a *Application) addonToolLimit() int {
+	return a.applicationConfig.EffectiveChatsAddonToolLimit()
 }
 
 // lateStudioAddons asks for the broker at each call: the chats service starts
@@ -658,11 +716,31 @@ func (l lateStudioAddons) AddonSkills(ctx context.Context, user string) ([]studi
 	return nil, nil
 }
 
+// AddonShadowers forwards to the broker when it lists the add-ons that replace
+// a built-in chat tool in any state. Without it the chats see only the add-ons
+// whose tools a discovery lists, and miss one that is stopped or cut by the
+// tool cap.
+func (l lateStudioAddons) AddonShadowers(ctx context.Context, user string) ([]studio.AddonShadower, error) {
+	if g, ok := l.a.StudioAddonTools().(studio.ShadowLister); ok {
+		return g.AddonShadowers(ctx, user)
+	}
+	return nil, nil
+}
+
 // AddonContextFiles forwards to the broker when it knows the context files of
 // the add-ons.
 func (l lateStudioAddons) AddonContextFiles(ctx context.Context, user string) ([]studio.AddonContextSet, error) {
 	if g, ok := l.a.StudioAddonTools().(studio.AddonContextLister); ok {
 		return g.AddonContextFiles(ctx, user)
+	}
+	return nil, nil
+}
+
+// AddonProviders forwards to the broker when it knows the provider slots the
+// add-ons declare.
+func (l lateStudioAddons) AddonProviders(ctx context.Context, user string) ([]studio.AddonProviderSet, error) {
+	if g, ok := l.a.StudioAddonTools().(studio.AddonProviderLister); ok {
+		return g.AddonProviders(ctx, user)
 	}
 	return nil, nil
 }
@@ -682,6 +760,28 @@ func (l lateStudioAddons) AddonListings(ctx context.Context, user string) ([]stu
 		return g.AddonListings(ctx, user)
 	}
 	return nil, nil
+}
+
+// ToolsScoped forwards to the broker when it caps its tools.
+func (l lateStudioAddons) ToolsScoped(ctx context.Context, user string, excluded func(string) bool) ([]studio.AddonTool, *studio.ToolCap, error) {
+	if g, ok := l.a.StudioAddonTools().(studio.AddonToolScoper); ok {
+		return g.ToolsScoped(ctx, user, excluded)
+	}
+	b := l.a.StudioAddonTools()
+	if b == nil {
+		return nil, nil, nil
+	}
+	tools, err := b.Tools(ctx, user)
+	return tools, nil, err
+}
+
+// ResourceChoices forwards to the broker when it can list the resources a
+// person may give to an agent.
+func (l lateStudioAddons) ResourceChoices(ctx context.Context, user, addonID string) ([]studio.ResourceChoice, bool, error) {
+	if g, ok := l.a.StudioAddonTools().(studio.AddonResourceChooser); ok {
+		return g.ResourceChoices(ctx, user, addonID)
+	}
+	return nil, false, studio.ErrNotScoped
 }
 
 // Isolation forwards to the broker when it can say how commands are isolated.
@@ -709,6 +809,38 @@ func (l lateStudioAddons) Network(ctx context.Context, user, addonID string) (st
 	return studio.AddonNetwork{}, false
 }
 
+// HeldState, ConfirmHeld and CancelHeld forward to the broker (see
+// studio.AddonHolds).
+func (l lateStudioAddons) HeldState(ctx context.Context, user, id string) (studio.AddonHeld, error) {
+	if b, ok := l.a.StudioAddonTools().(studio.AddonHolds); ok {
+		return b.HeldState(ctx, user, id)
+	}
+	return studio.AddonHeld{}, gateway.ErrUnavailable
+}
+
+func (l lateStudioAddons) ConfirmHeld(ctx context.Context, user, id, digest string) (studio.AddonHeldResult, error) {
+	if b, ok := l.a.StudioAddonTools().(studio.AddonHolds); ok {
+		return b.ConfirmHeld(ctx, user, id, digest)
+	}
+	return studio.AddonHeldResult{}, gateway.ErrUnavailable
+}
+
+func (l lateStudioAddons) CancelHeld(ctx context.Context, user, id string) error {
+	if b, ok := l.a.StudioAddonTools().(studio.AddonHolds); ok {
+		return b.CancelHeld(ctx, user, id)
+	}
+	return gateway.ErrUnavailable
+}
+
+// CallJobs runs the jobs tool of an add-on (see studio.AddonJobCaller).
+func (l lateStudioAddons) CallJobs(ctx context.Context, user, conv, addonID string, args contract.JobArgs) (contract.JobReply, error) {
+	b, ok := l.a.StudioAddonTools().(studio.AddonJobCaller)
+	if !ok {
+		return contract.JobReply{}, gateway.ErrUnavailable
+	}
+	return b.CallJobs(ctx, user, conv, addonID, args)
+}
+
 func (l lateStudioAddons) Call(ctx context.Context, user, conv, name string, args json.RawMessage) (string, error) {
 	b := l.a.StudioAddonTools()
 	if b == nil {
@@ -717,7 +849,19 @@ func (l lateStudioAddons) Call(ctx context.Context, user, conv, name string, arg
 	return b.Call(ctx, user, conv, name, args)
 }
 
+// CallProvider runs a tool of a provider for a call that no chat made (see
+// studio.AddonProviderCaller).
+func (l lateStudioAddons) CallProvider(ctx context.Context, user, name string, args json.RawMessage) (string, error) {
+	b, ok := l.a.StudioAddonTools().(studio.AddonProviderCaller)
+	if !ok {
+		return "", gateway.ErrUnavailable
+	}
+	return b.CallProvider(ctx, user, name, args)
+}
+
 type studioAddons struct {
+	// gw answers the held writes that a messaging chat confirms or drops.
+	gw      *gateway.Gateway
 	adapter *addontools.ToolAdapter
 	mode    string
 	// hostOps says which host operations an add-on may call. An add-on that may
@@ -727,6 +871,10 @@ type studioAddons struct {
 	ids func() []string
 	// has answers whether a user holds a host feature. Nil offers every tool.
 	has func(userID, feature string) bool
+	// startFailure says why an enabled add-on did not start, when the owner of
+	// this process knows a reason for people (see Manager.StartFailure). Nil
+	// or "" says nothing.
+	startFailure func(addonID string) string
 }
 
 // hostOpFeatures maps the prefix of a host operation to the feature the host
@@ -783,6 +931,16 @@ func filterByFeature(tools []studio.AddonTool, hostOps hostops.Authority, has fu
 	return out
 }
 
+// addonStartFailure is why an enabled add-on of the owner in this process did
+// not start, when there is a reason for people. A frontend has no owner here
+// and says nothing.
+func (a *Application) addonStartFailure(id string) string {
+	if a.addonManager == nil {
+		return ""
+	}
+	return a.addonManager.StartFailure(id)
+}
+
 // installed lists the installed add-ons, or none when no list is wired.
 func (s *studioAddons) installed() []string {
 	if s.ids == nil {
@@ -809,6 +967,12 @@ func hasWorkspaceOperation(operations []string) bool {
 func (s *studioAddons) Unavailable(ctx context.Context, user, addonID string, workspace bool) string {
 	if !workspace && s.needsWorkspace(addonID) {
 		return "the Files workspace is off on this server, so there is no place for files or code"
+	}
+	// An add-on that could not start has no status of its own to give.
+	if s.startFailure != nil {
+		if reason := s.startFailure(addonID); reason != "" {
+			return reason
+		}
 	}
 	value, explanation := studio.ExecutionObservation(ctx, user, addonID)
 	if value.Readiness == "unavailable" {
@@ -871,18 +1035,34 @@ func (s *studioAddons) actor(user string) (contract.Actor, error) {
 }
 
 func (s *studioAddons) Tools(ctx context.Context, user string) ([]studio.AddonTool, error) {
+	tools, _, err := s.ToolsScoped(ctx, user, nil)
+	return tools, err
+}
+
+// ToolsScoped lists the tools of the user less the add-ons that excluded names
+// (nil keeps all). The people who may not use an add-on, for want of a feature
+// its host operations need, are excluded here too, before the cap, so a model
+// is not offered a tool that can only answer "no permission" and such an
+// add-on takes no room. The second result says what the cap on add-on tools
+// left out, or is nil when it cut nothing.
+func (s *studioAddons) ToolsScoped(ctx context.Context, user string, excluded func(string) bool) ([]studio.AddonTool, *studio.ToolCap, error) {
 	actor, err := s.actor(user)
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	defs, err := s.adapter.Discover(ctx, actor)
+	denied := addonsWithoutFeature(s.hostOps, s.installed(), s.has, actor)
+	skip := func(id string) bool { return denied[id] || (excluded != nil && excluded(id)) }
+	if len(denied) == 0 && excluded == nil {
+		skip = nil
+	}
+	defs, report, err := s.adapter.DiscoverWithReport(ctx, actor, skip)
 	if errors.Is(err, gateway.ErrForbidden) {
 		// A user without the add-ons feature has no add-on tools. The chat
 		// and its tools panel still work.
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]studio.AddonTool, 0, len(defs))
 	for _, d := range defs {
@@ -891,9 +1071,17 @@ func (s *studioAddons) Tools(ctx context.Context, user string) ([]studio.AddonTo
 			continue
 		}
 		out = append(out, studio.AddonTool{Name: d.Name, AddonID: d.AddonID, Description: d.Description, Schema: raw, Action: d.Kind != contract.ToolKindRead,
-			Shadows: d.Shadows, Execution: d.Execution, InstalledAt: d.InstalledAt, Permission: d.Permission, Credentialed: d.Credentialed})
+			Shadows: d.Shadows, Execution: d.Execution, InstalledAt: d.InstalledAt, Permission: d.Permission, Credentialed: d.Credentialed, OwnerData: d.OwnerData, ApprovalOverridable: d.ApprovalOverridable, Tool: d.Tool, ResourceScoped: d.ResourceScoped, Deferred: d.Deferred})
 	}
-	return filterByFeature(out, s.hostOps, s.has, actor), nil
+	out = filterByFeature(out, s.hostOps, s.has, actor)
+	if !report.Truncated() {
+		return out, nil, nil
+	}
+	capped := &studio.ToolCap{Cap: report.Cap, Offered: report.Offered, Cut: report.Cut}
+	for _, a := range report.Addons {
+		capped.Addons = append(capped.Addons, studio.ToolCapAddon{ID: a.ID, Title: a.Title, Cut: a.Cut})
+	}
+	return out, capped, nil
 }
 
 // AddonSkills lists the add-ons that ship skills and that the user can see,
@@ -949,6 +1137,32 @@ func (s *studioAddons) AddonContextFiles(ctx context.Context, user string) ([]st
 	return out, nil
 }
 
+// AddonProviders lists the add-ons that declare provider slots and that the
+// user can see, less those whose host operations need a feature the user lacks:
+// the same rule as their tools. The host decides which one serves a slot.
+func (s *studioAddons) AddonProviders(ctx context.Context, user string) ([]studio.AddonProviderSet, error) {
+	actor, err := s.actor(user)
+	if err != nil {
+		return nil, nil
+	}
+	list, err := s.adapter.Providers(ctx, actor)
+	if errors.Is(err, gateway.ErrForbidden) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	denied := addonsWithoutFeature(s.hostOps, s.installed(), s.has, actor)
+	out := make([]studio.AddonProviderSet, 0, len(list))
+	for _, a := range list {
+		if denied[a.AddonID] {
+			continue
+		}
+		out = append(out, studio.AddonProviderSet{AddonID: a.AddonID, Title: a.Title, Description: a.Description, Provides: a.Provides, ModelSearch: a.ModelSearch, Running: a.Running})
+	}
+	return out, nil
+}
+
 // AddonUserSettings lists the per-person settings the add-ons declare, for the
 // host rules that read one by its role. The same visibility rule as the context
 // files: an add-on the user cannot see brings nothing.
@@ -987,9 +1201,35 @@ func (s *studioAddons) AddonListings(ctx context.Context, user string) ([]studio
 	}
 	out := make([]studio.AddonListing, 0, len(list))
 	for _, a := range list {
-		out = append(out, studio.AddonListing{AddonID: a.AddonID, Title: a.Title, Description: a.Description})
+		l := studio.AddonListing{AddonID: a.AddonID, Title: a.Title, Description: a.Description}
+		if r := a.Resources; r != nil {
+			l.Resources = &studio.ResourceLabel{Noun: r.Noun, NounPlural: r.NounPlural, Translations: r.Translations}
+		}
+		out = append(out, l)
 	}
 	return out, nil
+}
+
+// ResourceChoices lists the resources of an add-on that scopes its resources
+// per agent which the user may use now: the declared listing of the host,
+// before any limit of an agent.
+func (s *studioAddons) ResourceChoices(ctx context.Context, user, addonID string) ([]studio.ResourceChoice, bool, error) {
+	actor, err := s.actor(user)
+	if err != nil {
+		return nil, false, studio.ErrNotScoped
+	}
+	rows, truncated, err := s.adapter.ResourceChoices(ctx, actor, addonID)
+	switch {
+	case errors.Is(err, addontools.ErrUnknownTool), errors.Is(err, gateway.ErrForbidden):
+		return nil, false, studio.ErrNotScoped
+	case err != nil:
+		return nil, false, err
+	}
+	out := make([]studio.ResourceChoice, len(rows))
+	for i, r := range rows {
+		out[i] = studio.ResourceChoice{ID: r.ID, Name: r.Name, Role: r.Role}
+	}
+	return out, truncated, nil
 }
 
 // AddonShadowers lists the add-ons that replace a built-in chat tool and that
@@ -1030,14 +1270,112 @@ func (s *studioAddons) Call(ctx context.Context, user, conv, name string, args j
 	if err != nil {
 		return "", err
 	}
-	return studioAddonText(res), nil
+	return studioAddonText(ctx, res), nil
+}
+
+// CallJobs runs the jobs tool of an add-on for a chat (see
+// studio.AddonJobCaller). The call is bound to the chat as Call binds it.
+func (s *studioAddons) CallJobs(ctx context.Context, user, conv, addonID string, args contract.JobArgs) (contract.JobReply, error) {
+	actor, err := s.actor(user)
+	if err != nil {
+		return contract.JobReply{}, err
+	}
+	r, err := s.adapter.ExecuteJobs(ctx, actor, addontools.NewChatCall(user, conv), addonID, args)
+	if errors.Is(err, addontools.ErrNoJobs) {
+		return contract.JobReply{}, studio.ErrAddonNoJobs
+	}
+	return r, err
+}
+
+// HeldState says where the stored proposal of the user is.
+func (s *studioAddons) HeldState(ctx context.Context, user, id string) (studio.AddonHeld, error) {
+	actor, err := s.actor(user)
+	if err != nil || s.gw == nil {
+		return studio.AddonHeld{}, gateway.ErrForbidden
+	}
+	p, err := s.gw.GetProposal(ctx, actor, id)
+	if err != nil {
+		return studio.AddonHeld{}, err
+	}
+	return studio.AddonHeld{State: string(p.State), Digest: p.Digest}, nil
+}
+
+// ConfirmHeld runs the stored proposal for a paired sender who confirmed it in
+// a messaging chat. The studio service checked the sender; the mark tells the
+// owner so, and it honors it only for a proposal that waits because the
+// connection asks first.
+func (s *studioAddons) ConfirmHeld(ctx context.Context, user, id, digest string) (studio.AddonHeldResult, error) {
+	actor, err := s.actor(user)
+	if err != nil || s.gw == nil {
+		return studio.AddonHeldResult{}, &studio.AddonHoldFailure{Reason: "forbidden"}
+	}
+	p, err := s.gw.ConfirmProposal(gateway.WithChatConfirmed(ctx), actor, id, digest)
+	if err != nil {
+		reason, status := addontools.FailureOf(err)
+		return studio.AddonHeldResult{}, &studio.AddonHoldFailure{Reason: reason, Status: status}
+	}
+	res := studio.AddonHeldResult{Applied: p.State == gateway.ProposalApplied}
+	if p.Receipt != nil {
+		res.Link, res.ID = safeReceiptRef(p.Receipt.Result.Payload)
+		n, _ := contract.ParseUndoNote(p.Receipt.Result.Payload)
+		res.Undoable = n.Available
+	}
+	return res, nil
+}
+
+// CancelHeld withdraws the stored proposal.
+func (s *studioAddons) CancelHeld(ctx context.Context, user, id string) error {
+	actor, err := s.actor(user)
+	if err != nil || s.gw == nil {
+		return gateway.ErrForbidden
+	}
+	_, err = s.gw.CancelProposal(ctx, actor, id)
+	return err
+}
+
+// safeReceiptRef reads, from the payload of a receipt, a link and an ID that
+// are safe to repeat in a chat: an https address without credentials, short
+// and on one line, and a number or short word. Anything else is left out.
+func safeReceiptRef(payload json.RawMessage) (link, id string) {
+	var m map[string]any
+	if json.Unmarshal(payload, &m) != nil {
+		return "", ""
+	}
+	if u, ok := m["url"].(string); ok && len(u) <= 300 && strings.HasPrefix(u, "https://") && !strings.ContainsAny(u, " \t\r\n<>@") {
+		link = u
+	}
+	switch v := m["number"].(type) {
+	case float64:
+		id = "#" + strconv.FormatInt(int64(v), 10)
+	}
+	if id == "" {
+		if v, ok := m["id"].(float64); ok {
+			id = strconv.FormatInt(int64(v), 10)
+		}
+	}
+	return link, id
+}
+
+// CallProvider runs one tool of an add-on as the person, outside any chat: the
+// export and the forget of a provider come from the settings page. The call is
+// not bound to a chat, so a tool that works on a resource names it.
+func (s *studioAddons) CallProvider(ctx context.Context, user, name string, args json.RawMessage) (string, error) {
+	actor, err := s.actor(user)
+	if err != nil {
+		return "", err
+	}
+	res, err := s.adapter.Execute(ctx, actor, name, args)
+	if err != nil {
+		return "", err
+	}
+	return studioAddonText(ctx, res), nil
 }
 
 // studioAddonText is what the model reads for a result. A change the chat made
 // comes as an "applied" document whose note says what was done and whether the
 // person can undo it (undoable, changeId and a one-line undo, or a reason). A change that stays a proposal (the owner could not apply
 // it) is not applied, and the text says who can apply it.
-func studioAddonText(res addontools.ToolResult) string {
+func studioAddonText(ctx context.Context, res addontools.ToolResult) string {
 	if res.Kind == addontools.ResultProposal && res.Proposal != nil {
 		// A change that runs with a credential names the connection it will be
 		// made with, so the person, and the connector chat that relays this
@@ -1046,11 +1384,33 @@ func studioAddonText(res addontools.ToolResult) string {
 		if res.Proposal.Connection != "" {
 			with = " It will be made " + res.Proposal.Connection + "; say which connection in your message."
 		}
-		return fmt.Sprintf("The add-on %s proposed a change (%s, proposal %s).%s Nothing has been changed. "+
-			"Tell the user to review and confirm it on the Add-ons page. Do not say the change was made.",
-			res.Proposal.AddonID, res.Proposal.Action, res.Proposal.ID, with)
+		return fmt.Sprintf("The add-on %s proposed a change (%s, proposal %s).%s Nothing has been changed. %s Do not say the change was made.",
+			res.Proposal.AddonID, res.Proposal.Action, res.Proposal.ID, with, heldSentence(addontools.SurfaceOf(ctx), res.Proposal.Hold))
 	}
 	return res.JSON()
+}
+
+// heldSentence says, for the model, why a change waits and who can confirm it.
+// A person at the web UI confirms it. This is the text for a change the host
+// did not ask for in a messaging chat: when the connection only asks first and
+// a paired sender can answer, the studio service asks in the chat and tells the
+// model so itself. What reaches this text in a messaging chat is a tool that
+// always asks, a chat nobody paired can answer in, or a chat with too many
+// waiting.
+func heldSentence(surface, hold string) string {
+	why := ""
+	switch hold {
+	case "write_mode_propose":
+		why = " because the connection is set to ask before it changes anything"
+	case "approval_always":
+		why = " because this tool always asks first"
+	}
+	if surface == addontools.SurfaceMessaging {
+		return "It is waiting" + why + " for the owner, who can confirm or cancel it in the web UI on the Add-ons page; it cannot be confirmed from this chat; the host did not ask for it here. " +
+			"Tell the sender in one sentence that the change is waiting for the owner."
+	}
+	return "It is waiting" + why + " for the user to confirm: they can confirm or cancel it on the Add-ons page. " +
+		"Tell the user in one sentence that the change is waiting for them."
 }
 
 // Resolve at call time: the connector service can start after the private gateway.
@@ -1064,12 +1424,32 @@ func (c connectorAuthority) AuthorizeConnector(ctx context.Context, scope studio
 }
 
 // credentialSource gives the tool calls of an add-on that declares credentials
-// the token and the allowed resource of the caller's own binding. It is the
-// owner's: the sealed tokens are on the owner only. The connector service can
-// start after the gateway, so it is resolved at call time.
+// the token and the allowed resource of the caller's own binding. It is wired
+// on the process that runs the add-ons, so the add-on's answer to a
+// credential, and the renewal it may need, are handled where the add-on runs;
+// a frontend only forwards the call. The sealed tokens themselves are in the
+// connector store, which every process with the database shares. The
+// connector service can start after the gateway, so it is resolved at call
+// time.
 type credentialSource struct{ a *Application }
 
 func (c credentialSource) Credential(ctx context.Context, actor contract.Actor, addonID, key string) (gateway.CredentialGrant, error) {
+	return c.grant(ctx, actor, addonID, func(user, bindingID string) (studio.CredentialGrant, error) {
+		return c.a.studioConnectors.CredentialFor(ctx, user, addonID, bindingID, key)
+	})
+}
+
+// DefaultCredential serves a call that left out an optional resource argument:
+// the one resource of the connection the call uses.
+func (c credentialSource) DefaultCredential(ctx context.Context, actor contract.Actor, addonID string) (gateway.CredentialGrant, error) {
+	return c.grant(ctx, actor, addonID, func(user, bindingID string) (studio.CredentialGrant, error) {
+		return c.a.studioConnectors.DefaultCredentialFor(ctx, user, addonID, bindingID)
+	})
+}
+
+var _ gateway.DefaultCredentialSource = credentialSource{}
+
+func (c credentialSource) grant(ctx context.Context, actor contract.Actor, addonID string, open func(user, bindingID string) (studio.CredentialGrant, error)) (gateway.CredentialGrant, error) {
 	if c.a.studioConnectors == nil {
 		return gateway.CredentialGrant{}, gateway.ErrUnavailable
 	}
@@ -1082,22 +1462,77 @@ func (c credentialSource) Credential(ctx context.Context, actor contract.Actor, 
 	if err != nil {
 		return gateway.CredentialGrant{}, err
 	}
-	grant, err := c.a.studioConnectors.CredentialFor(ctx, user, addonID, bindingID, key)
+	grant, err := open(user, bindingID)
+	return c.answer(addonID, grant, err)
+}
+
+// RenewCredential renews the OAuth token of a call that the add-on rejected
+// (gateway.CredentialRenewer). The binding is the one the rejected grant came
+// from: the host chose it for this call and no caller input names it.
+func (c credentialSource) RenewCredential(ctx context.Context, actor contract.Actor, addonID string, rejected gateway.CredentialGrant, final bool) (gateway.CredentialGrant, error) {
+	if c.a.studioConnectors == nil {
+		return gateway.CredentialGrant{}, gateway.ErrUnavailable
+	}
+	user := addonWorkspacePrincipal(c.a.authDB != nil)(actor)
+	if user == "" {
+		return gateway.CredentialGrant{}, &gateway.CredentialRefusal{Code: gateway.CodeNoCredential}
+	}
+	grant, err := c.a.studioConnectors.RenewCredential(ctx, user, addonID, rejected.BindingID, rejected.ResourceKey, rejected.Version, final)
+	return c.answer(addonID, grant, err)
+}
+
+// credentialRefusals maps an error of the credential store to the refusal code
+// the add-on runtime reports. The first match wins.
+var credentialRefusals = []struct {
+	errs []error
+	code string
+}{
+	{[]error{connectors.ErrNoConnection}, gateway.CodeSelectConnection},
+	{[]error{connectors.ErrNoCredential, studio.ErrTokenGuarded}, gateway.CodeNoCredential},
+	{[]error{studio.ErrOwnerReconnectNeeded}, gateway.CodeOwnerReconnectNeeded},
+	{[]error{studio.ErrReconnectNeeded}, gateway.CodeReconnectNeeded},
+}
+
+func (c credentialSource) answer(addonID string, grant studio.CredentialGrant, err error) (gateway.CredentialGrant, error) {
 	var notAllowed *connectors.NotAllowedError
+	var limited *contract.ErrRateLimited
+	for _, r := range credentialRefusals {
+		for _, target := range r.errs {
+			if errors.Is(err, target) {
+				return gateway.CredentialGrant{}, &gateway.CredentialRefusal{Code: r.code}
+			}
+		}
+	}
 	switch {
 	case err == nil:
 		return gateway.CredentialGrant{Credential: grant.Secret, ResourceKey: grant.Resource.Key, ResourceID: grant.Resource.ID, WriteMode: grant.WriteMode,
-			BindingID: grant.BindingID, BindingName: grant.BindingName}, nil
-	case errors.Is(err, connectors.ErrNoConnection):
-		return gateway.CredentialGrant{}, &gateway.CredentialRefusal{Code: gateway.CodeSelectConnection}
-	case errors.Is(err, connectors.ErrNoCredential):
-		return gateway.CredentialGrant{}, &gateway.CredentialRefusal{Code: gateway.CodeNoCredential}
+			GrantedScopes: grant.Scopes, Version: grant.Version, BindingID: grant.BindingID, BindingName: grant.BindingName, Hold: sharedHold(grant.Hold)}, nil
 	case errors.As(err, &notAllowed):
 		return gateway.CredentialGrant{}, &gateway.CredentialRefusal{Code: gateway.CodeResourceNotAllowed, Allowed: notAllowed.Allowed}
+	case errors.As(err, &limited):
+		// The token endpoint asked to wait; the call is retried like an
+		// add-on's own 429.
+		return gateway.CredentialGrant{}, limited
 	}
 	// The cause may name a binding; it stays out of the error that travels.
 	xlog.Warn("addons: the credential of a binding could not be read", "addon", addonID)
 	return gateway.CredentialGrant{}, gateway.ErrUnavailable
+}
+
+// sharedHold turns the hold of a binding shared with the caller into the hold
+// of the gateway. A share that is gone gives the refusal of a binding the
+// person does not have, the answer of an unknown binding.
+func sharedHold(hold func(context.Context, func(context.Context) error) error) func(context.Context, func(context.Context) error) error {
+	if hold == nil {
+		return nil
+	}
+	return func(ctx context.Context, run func(context.Context) error) error {
+		err := hold(ctx, run)
+		if errors.Is(err, connectors.ErrNoCredential) {
+			return &gateway.CredentialRefusal{Code: gateway.CodeNoCredential}
+		}
+		return err
+	}
 }
 
 // connectionFor names the binding a credentialed call uses. The host never
@@ -1116,7 +1551,7 @@ func (c credentialSource) Credential(ctx context.Context, actor contract.Actor, 
 func (c credentialSource) connectionFor(ctx context.Context, user, addonID string) (string, error) {
 	override := gateway.ConnectionOverride(ctx)
 	if b, ok := hostops.BindingOf(ctx); ok && c.a.studioStore != nil {
-		rec, err := c.a.studioStore.GetChat(ctx, b.Principal, b.ChatID)
+		rec, err := c.a.effectiveChat(ctx, b.Principal, b.ChatID)
 		if err != nil || rec.Principal != b.Principal {
 			return "", &gateway.CredentialRefusal{Code: gateway.CodeSelectConnection}
 		}
@@ -1165,4 +1600,35 @@ func (a *Application) chatConnectionName(ctx context.Context, conversationID, bi
 		return ""
 	}
 	return a.studioConnectors.ConnectionName(ctx, b.Principal, bindingID)
+}
+
+// addonApprovalRelaxed says whether the person's own setting lets a tool of an
+// add-on run without a confirmation for this call. All of these must hold, and
+// any doubt is no:
+//
+//   - the call belongs to a chat the host bound to it (a call without a chat
+//     asks), and the chat is the actor's own;
+//   - the person chose "skip" for this tool and the chat qualifies: the
+//     person's own chat, or a messaging chat whose senders are all paired
+//     (see studio.Service.ApprovalRelaxed).
+func (a *Application) addonApprovalRelaxed(ctx context.Context, actor contract.Actor, addonID, tool string) bool {
+	b, ok := hostops.BindingOf(ctx)
+	if !ok || a.studioService == nil {
+		return false
+	}
+	user := addonWorkspacePrincipal(a.authDB != nil)(actor)
+	if user == "" || b.Principal != user {
+		return false
+	}
+	return a.studioService.ApprovalRelaxed(ctx, user, b.ChatID, addonID, tool)
+}
+
+// recordRelaxedRun adds a run without a confirmation to the recent decisions of
+// the connection that acted, next to the broker's own audit line.
+func (a *Application) recordRelaxedRun(ctx context.Context, run policy.RelaxedRun) {
+	b, ok := hostops.BindingOf(ctx)
+	if !ok || a.studioService == nil || run.ConnectionID == "" {
+		return
+	}
+	a.studioService.RecordRelaxedRun(run.ConnectionID, b.ChatID, run.Tool, run.Outcome)
 }

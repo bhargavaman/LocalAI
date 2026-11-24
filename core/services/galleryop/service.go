@@ -29,9 +29,16 @@ type GalleryService struct {
 	backendManager BackendManager
 	statuses       map[string]*OpStatus
 	cancellations  map[string]cancellationActions
+	// modelUpgrader runs model upgrade operations; nil until wired.
+	modelUpgrader ModelUpgrader
+	// modelLock is the cluster-wide lock of one model, taken around the
+	// commit of an install; nil (standalone) takes none.
+	modelLock gallery.ModelLock
 
 	// backendScheduler runs backend operations; set by Start.
 	backendScheduler *opScheduler
+	// modelScheduler runs model operations; set by Start.
+	modelScheduler *opScheduler
 
 	// Distributed mode (nil when not in distributed mode).
 	// natsClient is a messaging.Broadcaster (Publisher + Subscribe)
@@ -51,6 +58,13 @@ type GalleryService struct {
 	// SubjectCacheInvalidateBackends subscriber, so every replica's
 	// UpgradeChecker stays in sync.
 	OnBackendOpCompleted func()
+
+	// OnOpFinished is fired once on the frontend that ran a model or backend
+	// operation, when it reached a terminal state: completed, failed or
+	// cancelled. The Application wires it to the notification center. It runs
+	// off the worker goroutine, and never for an operation with no ID (the
+	// automatic update passes call the managers directly).
+	OnOpFinished func(OpResult)
 
 	// OnModelsChanged is fired on peer replicas when SOMEONE else publishes
 	// SubjectCacheInvalidateModels. The Application wires this to
@@ -156,8 +170,27 @@ func (g *GalleryService) DeleteBackend(name string) error {
 	return mgr.DeleteBackend(name)
 }
 
+// opWriteRejected reports whether next must not replace prev. A processed
+// operation is terminal and absorbing: a handler error or a late progress tick
+// that lands after a cancel (or after completion) would otherwise drop the
+// Cancelled flag and persist "failed" or reopen the operation. The one write
+// let through is a Processed+Cancelled update to an already cancelled
+// operation, because the handler reports its own cancellation that way and
+// the result is the same terminal state.
+func opWriteRejected(prev, next *OpStatus) bool {
+	if prev == nil || next == nil || !prev.Processed {
+		return false
+	}
+	return !(prev.Cancelled && next.Cancelled && next.Processed)
+}
+
 func (g *GalleryService) UpdateStatus(s string, op *OpStatus) {
 	g.Lock()
+	if opWriteRejected(g.statuses[s], op) {
+		g.Unlock()
+		xlog.Debug("Ignoring status update on a finished gallery operation", "op_id", s)
+		return
+	}
 	// Preserve any per-node entries already accumulated by UpdateNodeProgress:
 	// the legacy progressCb path (used by the Phase 2 install bridge) calls
 	// UpdateStatus with a fresh *OpStatus on every tick, which would otherwise
@@ -176,6 +209,10 @@ func (g *GalleryService) UpdateStatus(s string, op *OpStatus) {
 			// an install".
 			if !op.Deletion {
 				op.Deletion = prev.Deletion
+			}
+			// Same for an upgrade: only admission knows it.
+			if !op.Upgrade {
+				op.Upgrade = prev.Upgrade
 			}
 		}
 	}
@@ -198,7 +235,9 @@ func (g *GalleryService) UpdateStatus(s string, op *OpStatus) {
 			if op.Cancelled {
 				status = "cancelled"
 			}
-			if err := store.UpdateStatus(s, status, errMsg); err != nil {
+			if err := store.UpdateStatusWithOutcome(s, status, errMsg, distributed.OperationOutcome{
+				ErrorKey: op.ErrorKey, RolledBack: op.RolledBack, Unconfirmed: op.Unconfirmed,
+			}); err != nil {
 				xlog.Warn("Failed to persist gallery operation status", "op_id", s, "error", err)
 			}
 		} else {
@@ -276,6 +315,9 @@ func (g *GalleryService) mergeStatus(opID string, op *OpStatus) {
 	}
 	g.Lock()
 	defer g.Unlock()
+	if opWriteRejected(g.statuses[opID], op) {
+		return
+	}
 	if len(op.Nodes) == 0 {
 		if prev := g.statuses[opID]; prev != nil && len(prev.Nodes) > 0 {
 			op.Nodes = prev.Nodes
@@ -301,6 +343,9 @@ func (g *GalleryService) UpdateNodeProgress(opID, nodeID string, np NodeProgress
 	if status == nil {
 		status = &OpStatus{}
 		g.statuses[opID] = status
+	}
+	if status.Processed {
+		return
 	}
 	merged := false
 	for i := range status.Nodes {
@@ -402,6 +447,10 @@ func (g *GalleryService) failStaleStatus(id string) {
 	})
 }
 
+// ErrNotCancellable refuses a cancel or a pause of an operation whose status
+// says it cannot stop now.
+var ErrNotCancellable = errors.New("the operation can no longer be stopped")
+
 // CancelOperation cancels an in-progress operation by its ID.
 //
 // In distributed mode the UI's cancel click may land on a different replica
@@ -427,6 +476,14 @@ func (g *GalleryService) stopOperation(id string, pause bool) error {
 		g.Unlock()
 		return fmt.Errorf("operation %q is already cancelled", id)
 	}
+	// A running operation says when a stop would leave a half-done change:
+	// a removal, or a model upgrade once the model is stopped. Refuse it
+	// here, before the context is cancelled, instead of hoping the handler
+	// ignores the cancel.
+	if status, ok := g.statuses[id]; ok && !status.Processed && !status.Cancellable {
+		g.Unlock()
+		return fmt.Errorf("operation %q cannot be %s now: %w", id, stopWord(pause), ErrNotCancellable)
+	}
 
 	actions, localExists := g.cancellations[id]
 	if localExists {
@@ -444,12 +501,12 @@ func (g *GalleryService) stopOperation(id string, pause bool) error {
 	if status, ok := g.statuses[id]; ok {
 		status.Cancelled = true
 		status.Processed = true
-		status.Message = map[bool]string{true: "paused", false: "cancelled"}[pause]
+		status.Message = stopWord(pause)
 	} else {
 		g.statuses[id] = &OpStatus{
 			Cancelled:   true,
 			Processed:   true,
-			Message:     map[bool]string{true: "paused", false: "cancelled"}[pause],
+			Message:     stopWord(pause),
 			Cancellable: false,
 		}
 	}
@@ -492,6 +549,13 @@ func (g *GalleryService) stopOperation(id string, pause bool) error {
 // already cancelled this op locally treats the inbound event as a no-op.
 func (g *GalleryService) applyCancel(id string, pause bool) {
 	g.Lock()
+	if status, ok := g.statuses[id]; ok && !status.Processed && !status.Cancellable {
+		// The peer that published the cancel checked an older status; this
+		// replica runs the operation and knows it can no longer stop.
+		g.Unlock()
+		xlog.Warn("Ignoring a cancel of an operation that can no longer be stopped", "op_id", id)
+		return
+	}
 	actions, hasCancel := g.cancellations[id]
 	if hasCancel {
 		delete(g.cancellations, id)
@@ -503,12 +567,12 @@ func (g *GalleryService) applyCancel(id string, pause bool) {
 		}
 		status.Cancelled = true
 		status.Processed = true
-		status.Message = map[bool]string{true: "paused", false: "cancelled"}[pause]
+		status.Message = stopWord(pause)
 	} else {
 		g.statuses[id] = &OpStatus{
 			Cancelled:   true,
 			Processed:   true,
-			Message:     map[bool]string{true: "paused", false: "cancelled"}[pause],
+			Message:     stopWord(pause),
 			Cancellable: false,
 		}
 	}
@@ -598,12 +662,12 @@ func (g *GalleryService) Start(c context.Context, cl *config.ModelConfigLoader, 
 	if !g.appConfig.OpaqueErrors {
 		updateError = func(id string, e error) {
 			xlog.Error("Gallery operation failed", "op_id", id, "error", e)
-			g.UpdateStatus(id, &OpStatus{Error: e, Processed: true, Message: "error: " + e.Error()})
+			g.UpdateStatus(id, &OpStatus{Error: e, ErrorKey: string(gallery.UpgradeCodeOf(e)), RolledBack: gallery.UpgradeRolledBack(e), Processed: true, Message: "error: " + e.Error()})
 		}
 	} else {
 		updateError = func(id string, e error) {
 			xlog.Error("Gallery operation failed", "op_id", id, "error", e)
-			g.UpdateStatus(id, &OpStatus{Error: fmt.Errorf("an error occurred"), Processed: true})
+			g.UpdateStatus(id, &OpStatus{Error: fmt.Errorf("an error occurred"), ErrorKey: string(gallery.UpgradeCodeOf(e)), RolledBack: gallery.UpgradeRolledBack(e), Processed: true})
 		}
 	}
 
@@ -648,11 +712,25 @@ func (g *GalleryService) Start(c context.Context, cl *config.ModelConfigLoader, 
 		}
 	}()
 
+	// Model operations (install, delete, upgrade) go through their own
+	// scheduler, like backend operations. A single serial loop made an
+	// upgrade wait for every upgrade before it. Operations on the same model
+	// still run one at a time.
+	modelSched := newOpScheduler(func() int { return g.maxConcurrentModelOps() })
+	g.modelScheduler = modelSched
+
 	go func() {
+		ticker := time.NewTicker(schedulerPollInterval)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-c.Done():
+				modelSched.abandonAll()
 				return
+			case <-ticker.C:
+				if modelSched.hasPending() {
+					modelSched.kick()
+				}
 			case op := <-g.ModelGalleryChannel:
 				// Create context if not provided
 				if op.Context == nil {
@@ -661,36 +739,62 @@ func (g *GalleryService) Start(c context.Context, cl *config.ModelConfigLoader, 
 				} else if op.CancelFunc != nil {
 					g.storeCancellation(op.ID, op.CancelFunc, op.PauseFunc)
 				}
-				// Create DB record for distributed tracking
-				if g.galleryStore != nil {
-					opType := "model_install"
-					if op.Delete {
-						opType = "model_delete"
-					}
-					if err := g.galleryStore.Create(&distributed.GalleryOperationRecord{
-						ID:                 op.ID,
-						GalleryElementName: op.GalleryElementName,
-						OpType:             opType,
-						Status:             "pending",
-						// Create runs at dequeue, so this is the running-phase
-						// value: a running delete is not cancellable, an install
-						// is. The queued phase before this point is cancellable
-						// either way (see markQueued).
-						Cancellable: !op.Delete,
-					}); err != nil {
-						xlog.Warn("Failed to create gallery operation record", "op_id", op.ID, "error", err)
-					}
-				}
-				err := runOpHandler(func() error { return g.modelHandler(&op, cl, systemState) })
-				if err != nil {
-					updateError(op.ID, err)
-				}
-				g.removeCancellation(op.ID)
+				modelSched.submit(&opTask{
+					key: backendOpKey(op.GalleryElementName, ""),
+					ctx: op.Context,
+					run: func() { g.runModelOp(&op, cl, systemState, updateError) },
+					abandon: func() {
+						g.abandonQueued(op.ID, op.GalleryElementName)
+						g.removeCancellation(op.ID)
+					},
+				})
 			}
 		}
 	}()
 
 	return nil
+}
+
+// maxConcurrentModelOps is the number of model operations allowed to run at
+// once. It follows the runtime setting.
+func (g *GalleryService) maxConcurrentModelOps() int {
+	if g.appConfig == nil {
+		return 1
+	}
+	return g.appConfig.ModelOperationLimit()
+}
+
+// runModelOp runs one model operation once the scheduler gives it a slot.
+func (g *GalleryService) runModelOp(op *ManagementOp[gallery.GalleryModel, gallery.ModelConfig], cl *config.ModelConfigLoader, systemState *system.SystemState, updateError func(string, error)) {
+	// Create DB record for distributed tracking
+	if g.galleryStore != nil {
+		opType := "model_install"
+		switch {
+		case op.Delete:
+			opType = "model_delete"
+		case op.Upgrade:
+			opType = "model_upgrade"
+		}
+		if err := g.galleryStore.Create(&distributed.GalleryOperationRecord{
+			ID:                 op.ID,
+			GalleryElementName: op.GalleryElementName,
+			OpType:             opType,
+			Status:             "pending",
+			// Create runs at dequeue, so this is the running-phase
+			// value: a running delete is not cancellable, an install
+			// is. The queued phase before this point is cancellable
+			// either way (see markQueued).
+			Cancellable: !op.Delete,
+		}); err != nil {
+			xlog.Warn("Failed to create gallery operation record", "op_id", op.ID, "error", err)
+		}
+	}
+	err := runOpHandler(func() error { return g.modelHandler(op, cl, systemState) })
+	if err != nil {
+		updateError(op.ID, err)
+	}
+	g.announceOp(op.ID, op.GalleryElementName, false, op.Delete, op.Upgrade, op.InRun, err)
+	g.removeCancellation(op.ID)
 }
 
 // maxConcurrentBackendOps is the number of backend operations allowed to run
@@ -707,8 +811,11 @@ func (g *GalleryService) runBackendOp(op *ManagementOp[gallery.GalleryBackend, a
 	// Create DB record for distributed tracking
 	if g.galleryStore != nil {
 		opType := "backend_install"
-		if op.Delete {
+		switch {
+		case op.Delete:
 			opType = "backend_delete"
+		case op.Upgrade:
+			opType = "backend_upgrade"
 		}
 		if err := g.galleryStore.Create(&distributed.GalleryOperationRecord{
 			ID:                 op.ID,
@@ -729,6 +836,10 @@ func (g *GalleryService) runBackendOp(op *ManagementOp[gallery.GalleryBackend, a
 		}
 	}
 	err := runOpHandler(func() error { return g.backendHandler(op, systemState) })
+	if err != nil && op.Upgrade {
+		// A panic leaves the handler without its own code.
+		err = gallery.WithUpgradeCode(gallery.UpgradeFailureUnknown, err)
+	}
 	if err != nil {
 		updateError(op.ID, err)
 	} else if g.OnBackendOpCompleted != nil {
@@ -737,6 +848,8 @@ func (g *GalleryService) runBackendOp(op *ManagementOp[gallery.GalleryBackend, a
 		// callback doesn't stall the next queued operation.
 		go g.OnBackendOpCompleted()
 	}
+	// The backend handler renames the element when the install derived a name.
+	g.announceOp(op.ID, op.GalleryElementName, true, op.Delete, op.Upgrade, op.InRun, err)
 	g.removeCancellation(op.ID)
 }
 
@@ -881,8 +994,131 @@ func (g *GalleryService) Hydrate() error {
 		if op.Error != "" {
 			st.Error = errors.New(op.Error)
 		}
+		st.ErrorKey = op.ErrorKey
+		st.RolledBack = op.RolledBack
+		st.Unconfirmed = op.Unconfirmed
 		g.statuses[op.ID] = st
 	}
 	xlog.Info("Hydrated gallery service statuses from store", "count", len(ops))
 	return nil
+}
+
+// ModelUpgrader runs the upgrade of an installed model (modelupdates). It
+// reports each phase through progress and returns when the upgrade is
+// confirmed, rolled back or failed.
+type ModelUpgrader interface {
+	UpgradeModel(ctx context.Context, opID, name string, opts ModelUpgradeOptions, progress func(*OpStatus)) error
+}
+
+// SetModelLock sets the cluster-wide lock of one model that an install takes
+// around its commit, so it neither runs into an upgrade on another frontend
+// nor replaces its journal.
+func (g *GalleryService) SetModelLock(lock gallery.ModelLock) {
+	g.Lock()
+	defer g.Unlock()
+	g.modelLock = lock
+}
+
+func (g *GalleryService) getModelLock() gallery.ModelLock {
+	g.Lock()
+	defer g.Unlock()
+	return g.modelLock
+}
+
+// SetModelUpgrader sets what runs model upgrade operations. Without one a
+// model upgrade operation fails.
+func (g *GalleryService) SetModelUpgrader(u ModelUpgrader) {
+	g.Lock()
+	defer g.Unlock()
+	g.modelUpgrader = u
+}
+
+func (g *GalleryService) getModelUpgrader() ModelUpgrader {
+	g.Lock()
+	defer g.Unlock()
+	return g.modelUpgrader
+}
+
+// SetOnOpFinished sets the OnOpFinished hook. It is safe while operations run.
+func (g *GalleryService) SetOnOpFinished(f func(OpResult)) {
+	g.Lock()
+	defer g.Unlock()
+	g.OnOpFinished = f
+}
+
+// OpOutcome is how an operation ended.
+type OpOutcome string
+
+const (
+	OpCompleted OpOutcome = "completed"
+	OpFailed    OpOutcome = "failed"
+	OpCancelled OpOutcome = "cancelled"
+)
+
+// OpResult is what OnOpFinished reports.
+type OpResult struct {
+	ID       string
+	Name     string
+	Backend  bool // a backend operation; false for a model
+	Deletion bool
+	Upgrade  bool
+	// Addon is an add-on install or upgrade; Backend is false then.
+	Addon bool
+	// NeedsApproval is a failed add-on install that waits for the
+	// administrator to review its host access again.
+	NeedsApproval bool
+	// InRun is an operation an upgrade run started; the run reports it.
+	InRun   bool
+	Outcome OpOutcome
+	// Err is the reason of a failure, as the operation reports it.
+	Err string
+}
+
+// announceOp reports the end of an operation to OnOpFinished. The final status
+// decides: a cancelled operation is cancelled whatever error it returned, one
+// that wrote "completed" is completed (a model removed with files left over
+// returns an error after that), and an error otherwise is a failure. An
+// operation that ended in none of these (another frontend already runs the
+// same element) says nothing.
+func (g *GalleryService) announceOp(id, name string, backend, deletion, upgrade, inRun bool, err error) {
+	if id == "" {
+		return
+	}
+	g.Lock()
+	cb := g.OnOpFinished
+	st := g.statuses[id]
+	var cancelled, completed bool
+	var statusErr error
+	if st != nil {
+		cancelled, completed, statusErr = st.Cancelled, st.Processed && st.Message == MessageCompleted && st.Error == nil, st.Error
+	}
+	g.Unlock()
+	if cb == nil {
+		return
+	}
+	res := OpResult{ID: id, Name: name, Backend: backend, Deletion: deletion, Upgrade: upgrade, InRun: inRun}
+	switch {
+	case cancelled:
+		res.Outcome = OpCancelled
+	case completed:
+		res.Outcome = OpCompleted
+	case err != nil || statusErr != nil:
+		res.Outcome = OpFailed
+		if statusErr != nil {
+			res.Err = statusErr.Error()
+		} else {
+			res.Err = err.Error()
+		}
+	default:
+		return
+	}
+	go cb(res)
+}
+
+// stopWord is how an operation that ended on a stop reads: paused or cancelled.
+func stopWord(pause bool) string {
+	if pause {
+		return "paused"
+	}
+	return "cancelled"
 }

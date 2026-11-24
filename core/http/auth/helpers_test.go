@@ -77,6 +77,8 @@ func newAuthTestApp(db *gorm.DB, appConfig *config.ApplicationConfig) *echo.Echo
 	e.POST("/mcp/chat/completions", ok)
 	e.GET("/api/settings", ok)
 	e.POST("/api/settings", ok)
+	// The hook of an event trigger: public only on its own route pattern.
+	e.POST("/api/chats/triggers/:id/hook", ok)
 
 	// Failover chain reads and the event stream: standard auth, no admin gate.
 	e.GET("/api/failover", ok)
@@ -99,6 +101,8 @@ func newCatchAllAuthTestApp(db *gorm.DB, appConfig *config.ApplicationConfig) *e
 	e.Use(auth.Middleware(db, appConfig))
 	e.Any("/", ok)
 	e.Any("/*", ok)
+	// The hook of an event trigger is public only on its own route pattern.
+	e.POST("/api/chats/triggers/:id/hook", ok)
 	return e
 }
 
@@ -119,6 +123,17 @@ func newNodeSelfServiceTestApp(db *gorm.DB, appConfig *config.ApplicationConfig,
 		"",
 		natsauth.Config{},
 	)
+	return e
+}
+
+// newClusterTestApp uses the real cluster route registration, with no registry,
+// so a request that the global auth middleware lets through reaches a handler
+// that answers 503 and one that it stops gets 401.
+func newClusterTestApp(db *gorm.DB, appConfig *config.ApplicationConfig) *echo.Echo {
+	e := echo.New()
+	e.Use(auth.Middleware(db, appConfig))
+	routes.RegisterClusterRoutes(e, nil, nil, nil, nil)
+	e.GET("/api/cluster/other", ok)
 	return e
 }
 
@@ -157,7 +172,7 @@ func newAdminTestApp(db *gorm.DB, appConfig *config.ApplicationConfig) *echo.Ech
 	e.GET("/api/models", ok, adminMw)
 	e.GET("/api/backends", ok, adminMw)
 	e.GET("/api/resources", ok, adminMw)
-	e.GET("/api/p2p/workers", ok, adminMw)
+	e.GET("/api/p2p/status", ok, adminMw)
 
 	// Agent task/job routes (admin only)
 	e.POST("/api/agent/tasks", ok, adminMw)

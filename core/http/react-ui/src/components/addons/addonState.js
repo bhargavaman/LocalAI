@@ -86,6 +86,44 @@ export function localizedText(app, field, language) {
   return fallback || ''
 }
 
+// An installed record with its title and description in the user's language,
+// for the dialogs and cards that name an add-on. The English text stays in
+// englishTitle and englishDescription, which the search reads too.
+export function localizeRecord(rec, language) {
+  if (!rec) return rec
+  return {
+    ...rec,
+    title: localizedText(rec, 'title', language) || rec.title,
+    description: localizedText(rec, 'description', language),
+    englishTitle: rec.title,
+    englishDescription: rec.description || '',
+  }
+}
+
+// A library entry with its title and description in the user's language. The
+// entry carries the other languages in titles and descriptions (from the
+// library); a language without text, and English, keep the entry's own text.
+export function localizeEntry(entry, language) {
+  if (!entry) return entry
+  return {
+    ...entry,
+    title: localizedText({ id: entry.id, name: entry.title, title: entry.title, titles: entry.titles }, 'title', language) || entry.title,
+    description: localizedText({ description: entry.description, descriptions: entry.descriptions }, 'description', language),
+    englishTitle: entry.title,
+    englishDescription: entry.description || '',
+  }
+}
+
+// One page of library entries in the alphabetical order of the user's language,
+// by the title that the person reads. The id breaks a tie, so the order is
+// stable. It orders the page as drawn; the library still pages by its own key.
+export function sortEntriesByTitle(entries, language) {
+  let collator
+  try { collator = new Intl.Collator(language || undefined, { sensitivity: 'base', numeric: true }) } catch { collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true }) }
+  const title = (e) => localizeEntry(e, language).title || e.id
+  return [...(entries || [])].sort((a, b) => collator.compare(title(a), title(b)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
 // The name to show for an add-on the list does not carry (not installed, or
 // not usable by this viewer): its identifier with a capital first letter, so
 // the page says "Voice" and not "voice".
@@ -253,4 +291,129 @@ export function skillShadowNotes(entry, installed) {
 export function skillsOf(app) {
   const list = Array.isArray(app?.skills) ? app.skills : []
   return list.filter(s => s && typeof s.name === 'string').map(s => ({ name: s.name, replaces: s.shadows === s.name }))
+}
+
+// ---- Operations on the owner ----------------------------------------------
+
+const OPERATION_KINDS = new Set(['install', 'upgrade', 'uninstall', 'enable', 'disable'])
+const OPERATION_PHASES = new Set(['queued', 'downloading', 'backing-up', 'installing', 'migrating', 'starting', 'working'])
+
+// The operation the owner runs on an add-on now, as the list reports it. A kind
+// or phase this page does not know is shown as plain work, never dropped:
+// the add-on is still being changed.
+export function operationOf(app) {
+  const op = app && typeof app === 'object' ? app.operation : null
+  if (!op || typeof op !== 'object') return null
+  return {
+    kind: OPERATION_KINDS.has(op.kind) ? op.kind : 'working',
+    phase: OPERATION_PHASES.has(op.phase) ? op.phase : 'working',
+    since: typeof op.since === 'string' ? op.since : '',
+  }
+}
+
+// The titles of the add-ons the owner is upgrading, for the busy banner.
+export function upgradingTitles(apps) {
+  return (Array.isArray(apps) ? apps : [])
+    .filter(a => a && a.operation && a.operation.kind === 'upgrade')
+    .map(a => a.title || a.id)
+}
+
+// Why the list on screen may be out of date: 'busy' (the owner did not answer
+// in time), 'unreachable' or '' when it is current.
+export function staleKind({ error, stale }) {
+  if (!stale) return ''
+  if (error && error.kind === 'busy') return 'busy'
+  if (error) return 'unreachable'
+  return 'busy'
+}
+
+// ---- The last list a browser got -------------------------------------------
+
+const LAST_KEY = 'localai.addons.lastKnownApps.v1'
+
+// A page loaded while the owner is busy has no list in memory. The last list
+// this browser tab got for the same person stands in for it, marked stale.
+// Storage can be absent or full: every call is allowed to do nothing.
+export function saveLastKnown(storage, actor, apps) {
+  try {
+    storage.setItem(LAST_KEY, JSON.stringify({ actor, apps, at: Date.now() }))
+  } catch { /* the page works without it */ }
+}
+
+export function loadLastKnown(storage, actor, maxAgeMs = 24 * 3600 * 1000, now = Date.now()) {
+  try {
+    const raw = JSON.parse(storage.getItem(LAST_KEY) || 'null')
+    if (!raw || raw.actor !== actor || !Array.isArray(raw.apps) || !Number.isFinite(raw.at) || now - raw.at > maxAgeMs) return null
+    return raw.apps
+  } catch {
+    return null
+  }
+}
+
+// Whether the dialog warns that an add-on does not come from the official
+// library. An add-on runs as trusted code on this server whatever its source,
+// so the warning is the default: it is dropped only when the host stamped the
+// entry official and the preview of the owner does not say otherwise (the
+// preview also checks the signature). A host that sends neither answer warns.
+export function untrustedSource(entry, preview) {
+  if (preview && preview.official === false) return true
+  return !entry || entry.official !== true
+}
+
+// Who signed an add-on that is not official: the identity the administrator
+// pinned for its library, which the host stamps on the entry and on the
+// preview. It is shown as data next to the warning, never instead of it, and
+// the host sends it only for a signed, non-official source. The preview wins
+// because the host builds it for this install. It is not proof by itself: a
+// preview from an index hint is not verified yet, and the install enforces
+// the pinned signer it carries. An official entry names nobody.
+export function signedBy(entry, preview) {
+  if (entry && entry.official === true) return ''
+  const pick = (v) => (v && typeof v.signer === 'string' ? v.signer.trim() : '')
+  return pick(preview) || pick(entry)
+}
+
+// ---- Icons, groups and categories ---------------------------------------------
+
+// The category of an add-on, for the groups of the installed list and the
+// filter of the library. The host sends no category, so it is read from what
+// it does send, never from an id: an add-on that serves a connector kind is a
+// chat app; one that gives chat tools is a tool; one with a page only is a
+// "models" page; anything else is a tool.
+export const CATEGORIES = ['chat', 'tools', 'models']
+
+export function categoryOf(item, { connector = false } = {}) {
+  if (connector) return 'chat'
+  // A library entry names its page under ui; an installed add-on says hasUI.
+  const added = item && item.ui ? addedByEntry(item) : addedByAddon(item || {})
+  if (added.tools > 0) return 'tools'
+  return added.page ? 'models' : 'tools'
+}
+
+// The groups of the installed list, in the order they are drawn. Built-in pages
+// of the host have their own group, last.
+export const GROUPS = ['chat', 'tools', 'models', 'builtin']
+
+export function groupOf(tile, { connectorAddons } = {}) {
+  if (tile.source === 'builtin') return 'builtin'
+  return categoryOf(tile.app || { id: tile.id }, { connector: Boolean(connectorAddons && connectorAddons.has(tile.id)) })
+}
+
+// The rows split into the groups, empty groups left out, each row in the order
+// it came in.
+export function groupTiles(tiles, opts) {
+  const out = GROUPS.map(id => ({ id, tiles: [] }))
+  for (const tile of tiles) out.find(g => g.id === groupOf(tile, opts)).tiles.push(tile)
+  return out.filter(g => g.tiles.length > 0)
+}
+
+// The entry of the install from a file whose dialog was closed, as an
+// operation the row can show: it runs (no queue, no stop) or it failed, with
+// the words of the failure. The server runs a file install inline, so it has
+// no job to cancel.
+export function fileOperation(file, id) {
+  return {
+    jobID: `file:${id}`, addonId: id, isAddon: true, taskType: 'upgrade', state: file.state, phase: 'working', progress: 0, cancellable: false,
+    fileFailure: file.state === 'failed' ? { outcome: file.outcome, error: file.error } : null,
+  }
 }

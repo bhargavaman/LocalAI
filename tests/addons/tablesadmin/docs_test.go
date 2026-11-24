@@ -1,3 +1,5 @@
+//go:build !windows
+
 // SPDX-License-Identifier: MIT
 package tablesadmin_test
 
@@ -5,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mudler/LocalAI/core/http/auth"
@@ -112,10 +115,8 @@ var _ = Describe("the advertised surface of the resource management routes", fun
 				registered[entry.Method+" "+entry.Pattern] = true
 			}
 		}
-		docs, err := os.ReadFile("../../../docs/content/features/addons.md")
-		Expect(err).NotTo(HaveOccurred())
-		tables, err := os.ReadFile("../../../docs/content/features/tables.md")
-		Expect(err).NotTo(HaveOccurred())
+		docs := readPages("../../../docs/content/addons/contract-reference/*.md")
+		tables := readPages("../../../docs/content/addons/catalogue/work/tables.md", "../../../docs/content/addons/tables-reference.md")
 		for _, key := range []string{
 			"GET /api/addons/resources", "POST /api/addons/resources",
 			"GET /api/addons/resources/:resourceId/grants", "PUT /api/addons/resources/:resourceId/grants/:userId",
@@ -135,10 +136,27 @@ var _ = Describe("the advertised surface of the resource management routes", fun
 		Expect(string(tables)).To(ContainSubstring("databases-delete"))
 		Expect(strings.Count(string(tables), "not tools")).To(BeNumerically(">=", 1))
 		// The admin assistant catalog names none of it.
-		for _, file := range []string{"../../../pkg/mcp/localaitools/tools.go"} {
+		for _, file := range []string{"../../../core/services/localaitools/tools.go"} {
 			b, err := os.ReadFile(file)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(strings.ToLower(string(b))).NotTo(ContainSubstring("/api/addons"))
 		}
 	})
 })
+
+// readPages joins the pages of the documentation that match the patterns:
+// a topic may be split over several pages.
+func readPages(paths ...string) []byte {
+	var all []byte
+	for _, pattern := range paths {
+		names, err := filepath.Glob(pattern)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(names).NotTo(BeEmpty(), pattern)
+		for _, name := range names {
+			part, err := os.ReadFile(name)
+			Expect(err).NotTo(HaveOccurred())
+			all = append(all, part...)
+		}
+	}
+	return all
+}

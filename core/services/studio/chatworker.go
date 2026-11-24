@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mudler/LocalAI/core/services/messaging"
 	"github.com/mudler/LocalAI/core/services/nodes"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/workerctl"
 )
 
 // ChatWorkers hands the start of an unattended run to a chat worker, a process
-// that runs turns and serves no one at the keyboard. A start that no worker can
-// take returns an error that wraps nodes.ErrNoRoute. Any other error leaves it
-// unknown whether the turn started. A worker's refusal comes back in the
-// reply's Error with a nil error.
+// that runs turns and serves no one at the keyboard. A start that no worker
+// listens for returns an error that wraps nodes.ErrNoRoute, and a start that
+// reached no worker returns one that wraps messaging.ErrNotDelivered (see
+// notStarted). Any other error leaves it unknown whether the turn started. A
+// worker's refusal comes back in the reply's Error with a nil error.
 type ChatWorkers interface {
 	StartChat(ctx context.Context, req workerctl.ChatStartRequest) (*workerctl.ChatStartReply, error)
 }
@@ -44,9 +46,12 @@ func (s *Service) SendBackground(ctx context.Context, user, conv, text string, u
 	if g, ok := turnGrantFrom(ctx); ok {
 		req.Grant = g.wire()
 	}
+	if w, ok := turnWhoFrom(ctx); ok {
+		req.Sender = senderWire(w.Sender)
+	}
 	reply, err := s.d.Workers.StartChat(ctx, req)
 	switch {
-	case errors.Is(err, nodes.ErrNoRoute):
+	case notStarted(err):
 		s.log.Info("studio: no chat worker took the start, running it here", "chat", conv)
 		return s.SendWithFiles(ctx, user, conv, text, nil)
 	case err != nil:
@@ -57,6 +62,14 @@ func (s *Service) SendBackground(ctx context.Context, user, conv, text string, u
 		return SendResult{}, fmt.Errorf("%w: %s", ErrWorkerRefused, reply.Error)
 	}
 	return SendResult{Started: reply.Started, PendingID: reply.PendingID}, nil
+}
+
+// notStarted reports whether a start failed in a way that proves no worker
+// started the turn, so that this process may run it: no worker listens, or the
+// start reached none (no worker could be reached, or the carrier carries no
+// starts).
+func notStarted(err error) bool {
+	return errors.Is(err, nodes.ErrNoRoute) || errors.Is(err, messaging.ErrNotDelivered)
 }
 
 // ServeStart runs a start that a frontend sent to this chat worker. The turn
@@ -70,14 +83,23 @@ func (s *Service) ServeStart(ctx context.Context, req workerctl.ChatStartRequest
 		s.admit.Lock()
 		defer s.admit.Unlock()
 		if err := s.checkWorkerRoom(ctx, req.Principal, req.ChatID); err != nil {
-			return workerctl.ChatStartReply{Error: err.Error()}
+			return workerctl.ChatStartReply{Error: err.Error(), Full: errors.Is(err, ErrWorkerFull)}
 		}
 	}
 	if req.Grant != nil {
 		// The frontend already narrowed the grant to the senders of the turn.
 		s.access.set(req.ChatID, grantOf(req.Grant))
 	}
-	res, err := s.SendWithFiles(ctx, req.Principal, req.ChatID, req.Text, nil)
+	if req.Sender != nil {
+		ctx = withTurnWho(ctx, turnWho{Sender: senderOf(req.Sender)})
+	}
+	var res SendResult
+	var err error
+	if req.Resume {
+		res, err = s.ResumeInterrupted(ctx, req.Principal, req.ChatID)
+	} else {
+		res, err = s.SendWithFiles(ctx, req.Principal, req.ChatID, req.Text, nil)
+	}
 	if err != nil {
 		return workerctl.ChatStartReply{Error: err.Error()}
 	}
@@ -119,7 +141,7 @@ func (s *Service) limitWorkerRun(ctx context.Context, p, conv string) {
 	if s.d.RunLimit == nil {
 		return
 	}
-	rec, err := s.d.Store.GetChat(ctx, p, conv)
+	rec, err := s.getChatEffective(ctx, p, conv)
 	if err != nil {
 		return
 	}

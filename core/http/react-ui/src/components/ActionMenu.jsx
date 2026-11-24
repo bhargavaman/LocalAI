@@ -21,12 +21,14 @@ import Icon from './Icon'
 //   Escape               — close, return focus to trigger
 //
 // icon and triggerClassName restyle the kebab, for example as the chevron of
-// a split button.
+// a split button. triggerTabIndex takes the kebab out of the tab order (-1) for
+// a list whose rows already carry the same actions in their detail.
 //
 // A context menu: pass `at` ({ x, y, returnFocus }) instead of using the
 // kebab. The menu opens at that point with no trigger while `at` is set, and
-// onClose clears it; focus goes back to returnFocus.
-export default function ActionMenu({ items, ariaLabel = 'Actions', triggerLabel, compact = false, at, onClose, icon = 'more-vertical', triggerClassName = '' }) {
+// onClose clears it; focus goes back to returnFocus. menuId sets the id of the
+// menu, so the button that opens it can name it in aria-controls.
+export default function ActionMenu({ items, ariaLabel = 'Actions', triggerLabel, compact = false, at, onClose, icon = 'more-vertical', triggerClassName = '', triggerTabIndex, menuId: menuIdProp }) {
   const triggerRef = useRef(null)
   const pointRef = useRef(null)
   const menuId = useId()
@@ -110,6 +112,7 @@ export default function ActionMenu({ items, ariaLabel = 'Actions', triggerLabel,
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={triggerLabel || ariaLabel}
+        tabIndex={triggerTabIndex}
         onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
         onKeyDown={handleTriggerKeyDown}
       >
@@ -117,6 +120,7 @@ export default function ActionMenu({ items, ariaLabel = 'Actions', triggerLabel,
       </button>}
       <Popover anchor={controlled ? pointRef : triggerRef} open={open} onClose={close} ariaLabel={ariaLabel}>
         <div
+          id={menuIdProp}
           role="menu"
           aria-label={ariaLabel}
           aria-activedescendant={activeIdx >= 0 ? `${menuId}-item-${activeIdx}` : undefined}

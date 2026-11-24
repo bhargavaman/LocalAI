@@ -1,6 +1,8 @@
 package functions_test
 
 import (
+	"encoding/json"
+
 	. "github.com/mudler/LocalAI/pkg/functions"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -108,5 +110,29 @@ var _ = Describe("LocalAI grammar functions", func() {
 			Expect(len(functions)).To(Equal(1))
 			Expect(functions[0].Name).To(Equal("create_event"))
 		})
+	})
+})
+
+var _ = Describe("Tool JSON", func() {
+	It("omits strict when it is false so upstream providers do not see a disabled strict mode", func() {
+		tool := Tool{Type: "function", Function: Function{Name: "lookup", Parameters: map[string]any{"type": "object"}}}
+		data, err := json.Marshal(tool)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(data)).ToNot(ContainSubstring("strict"))
+	})
+
+	It("keeps strict when it is true", func() {
+		tool := Tool{Type: "function", Function: Function{Name: "lookup", Parameters: map[string]any{"type": "object"}, Strict: true}}
+		data, err := json.Marshal(tool)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring(`"strict":true`))
+	})
+})
+
+var _ = Describe("JSONBNF", func() {
+	It("excludes unescaped control characters in the string rule", func() {
+		Expect(JSONBNF).To(ContainSubstring(`[^"\\\x7F\x00-\x1F]`))
+		Expect(JSONBNF).ToNot(ContainSubstring(`[^"\\]`))
+		Expect(JSONBNF).To(ContainSubstring(`"\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])`))
 	})
 })

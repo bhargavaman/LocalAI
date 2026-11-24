@@ -1,10 +1,13 @@
 package routes
 
 import (
+	"context"
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 	"github.com/mudler/LocalAI/core/application"
 	"github.com/mudler/LocalAI/core/config"
+	"github.com/mudler/LocalAI/core/gallery/remotemodel"
+	addonendpoints "github.com/mudler/LocalAI/core/http/endpoints/addons"
 	"github.com/mudler/LocalAI/core/http/endpoints/localai"
 	mcpTools "github.com/mudler/LocalAI/core/http/endpoints/mcp"
 	"github.com/mudler/LocalAI/core/http/middleware"
@@ -80,20 +83,23 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 	router.GET("/api/motion/sessions/:id/poses", motion.Poses)
 	router.POST("/api/motion/sessions/:id/tickets", motion.Ticket)
 
+	// Remotes: a saved address and key of another LocalAI or an
+	// OpenAI-compatible or Anthropic endpoint, whose models become entries
+	// here. Admin only. They are not part of the model gallery: a server that
+	// turns the gallery off can still connect a remote, so these routes stay
+	// outside the gallery block. The service writes model configs through the
+	// config loader and needs no gallery service. The provider is read for
+	// every request: the service is built after the routes exist and is nil
+	// when its store could not be opened.
+	registerRemoteRoutes(router, app.Remotes, adminMiddleware)
+	registerFederationRoutes(router, app.Federation, adminMiddleware)
+
 	// LocalAI API endpoints
 	if !appConfig.DisableGalleryEndpoint {
-		// Import model page
-		router.GET("/import-model", func(c echo.Context) error {
-			return c.Render(200, "views/model-editor", map[string]any{
-				"Title":                  "LocalAI - Import Model",
-				"BaseURL":                middleware.BaseURL(c),
-				"Version":                internal.PrintableVersion(),
-				"DisableRuntimeSettings": appConfig.DisableRuntimeSettings,
-			})
-		}, adminMiddleware)
-
-		// Edit model page
-		router.GET("/models/edit/:name", localai.GetEditModelPage(cl, appConfig), adminMiddleware)
+		// The old server-rendered import and edit pages are gone. Both URLs
+		// redirect to the React routes so bookmarks still work.
+		router.GET("/import-model", ImportModelRedirect, adminMiddleware)
+		router.GET("/models/edit/:name", EditModelRedirect, adminMiddleware)
 		modelGalleryEndpointService := localai.CreateModelGalleryEndpointService(appConfig, galleryService, cl)
 		router.POST("/models/apply", modelGalleryEndpointService.ApplyModelGalleryEndpoint(), adminMiddleware)
 		router.POST("/models/delete/:name", modelGalleryEndpointService.DeleteModelGalleryEndpoint(), adminMiddleware)
@@ -126,26 +132,72 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		router.POST("/backends/delete/:name", backendGalleryEndpointService.DeleteBackendEndpoint(), adminMiddleware)
 		router.GET("/backends", backendGalleryEndpointService.ListBackendsEndpoint(), adminMiddleware)
 		router.GET("/backends/available", backendGalleryEndpointService.ListAvailableBackendsEndpoint(appConfig.SystemState, ClusterCapabilityProviderFor(app), ClusterInstalledProviderFor(app)), adminMiddleware)
-		router.GET("/backends/known", backendGalleryEndpointService.ListKnownBackendsEndpoint(appConfig.SystemState), adminMiddleware)
+		router.GET("/backends/known", backendGalleryEndpointService.ListKnownBackendsEndpoint(appConfig.SystemState, ClusterInstalledProviderFor(app)), adminMiddleware)
 		router.GET("/backends/galleries", backendGalleryEndpointService.ListBackendGalleriesEndpoint(), adminMiddleware)
 		router.GET("/backends/jobs/:uuid", backendGalleryEndpointService.GetOpStatusEndpoint(), adminMiddleware)
 		router.GET("/backends/upgrades", backendGalleryEndpointService.GetUpgradesEndpoint(), adminMiddleware)
 		router.POST("/backends/upgrades/check", backendGalleryEndpointService.CheckUpgradesEndpoint(), adminMiddleware)
-		router.POST("/backends/upgrade/:name", backendGalleryEndpointService.UpgradeBackendEndpoint(), adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
+		// Read model and a check that waits. The checker is nil-safe, so a
+		// server without one answers with disabled sources.
+		router.GET("/backends/updates", localai.BackendUpdatesEndpoint(app.UpgradeChecker()), adminMiddleware)
+		router.POST("/backends/updates/check", localai.CheckBackendUpdatesEndpoint(app.UpgradeChecker()), adminMiddleware)
+		runDeps := UpgradeRunDepsFor(app)
+		// The single upgrade routes start an upgrade run of one item, and
+		// keep their answer for existing clients (see BackendUpgradeViaRun).
+		router.POST("/backends/upgrade/:name", localai.BackendUpgradeViaRun(runDeps, backendGalleryEndpointService.UpgradeGuard(), backendGalleryEndpointService.UpgradeBackendEndpoint(), localai.APIBackendUpgradeAnswer), adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
+		// Model updates: the read model and a check that waits. Models never
+		// update automatically; the check installs nothing.
+		modelUpdates := func() localai.ModelUpdatesProvider {
+			if svc := app.ModelUpdates(); svc != nil {
+				return svc
+			}
+			return nil
+		}
+		router.GET("/api/models/updates", localai.ModelUpdatesEndpoint(modelUpdates), adminMiddleware)
+		router.POST("/api/models/updates/check", localai.CheckModelUpdatesEndpoint(modelUpdates), adminMiddleware)
+		upgradeDeps := localai.ModelUpgradeDeps{Gallery: galleryService, Upgrader: app.ModelUpgrader, Updates: app.ModelUpdates, Runs: runDeps}
+		router.POST("/api/models/upgrade/:name", localai.UpgradeModelEndpoint(upgradeDeps), adminMiddleware)
+		router.POST("/api/models/:name/upgrade/retry", localai.RetryModelUpgradeEndpoint(upgradeDeps), adminMiddleware)
+		router.POST("/api/models/:name/remove-old", localai.RemoveOldModelVersionEndpoint(upgradeDeps), adminMiddleware)
+		router.PUT("/api/models/:name/hold", localai.SetModelHoldEndpoint(upgradeDeps), adminMiddleware)
+		// Upgrade runs: the server-owned update of several backends, models
+		// and add-ons as one run. Administrators only.
+		router.POST("/api/updates/runs/preview", localai.PreviewUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.POST("/api/updates/runs", localai.StartUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.GET("/api/updates/runs", localai.ListUpgradeRunsEndpoint(runDeps), adminMiddleware)
+		router.GET("/api/updates/runs/:id", localai.GetUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.POST("/api/updates/runs/:id/cancel", localai.CancelUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.POST("/api/updates/runs/:id/items/:key/cancel", localai.CancelUpgradeRunItemEndpoint(runDeps), adminMiddleware)
+		router.POST("/api/updates/runs/:id/retry", localai.RetryUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.DELETE("/api/updates/runs/:id", localai.DismissUpgradeRunEndpoint(runDeps), adminMiddleware)
+		router.POST("/api/models/:name/adopt", localai.AdoptModelEndpoint(upgradeDeps), adminMiddleware)
 		// Custom model import endpoint
 		router.POST("/models/import", localai.ImportModelEndpoint(cl, galleryService, appConfig, opcache), adminMiddleware)
 
 		// URI model import endpoint
 		router.POST("/models/import-uri", localai.ImportModelURIEndpoint(cl, appConfig, galleryService, opcache), adminMiddleware)
 
+		// Search of remote providers for models to import. Admin only, like
+		// the import it feeds: the server makes the outbound requests.
+		router.GET("/api/models/search", localai.ModelSearchEndpoint(app.ModelSearch(), cl), adminMiddleware)
+		// The sources that can be searched and which of them a person has on.
+		// An add-on can provide a source; the choice is per person.
+		router.GET("/api/models/search/sources", localai.ModelSearchSourcesEndpoint(app.ModelSearch()), adminMiddleware)
+		router.PUT("/api/models/search/sources", localai.ModelSearchSetSourcesEndpoint(app.ModelSearch()), adminMiddleware)
+		// What one search result offers, and what it would need in memory.
+		// The two make the upstream calls of a repository listing and a
+		// GGUF header read; both are cached and rate limited per process.
+		router.GET("/api/models/remote/files", localai.RemoteModelFilesEndpoint(remotemodel.Shared(), cl), adminMiddleware)
+		router.GET("/api/models/remote/estimate", localai.RemoteModelEstimateEndpoint(remotemodel.Shared()), adminMiddleware)
+
 		// Custom model edit endpoint
-		router.POST("/models/edit/:name", localai.EditModelEndpoint(cl, galleryService, appConfig, modelRevisionLifecycleFor(app)), adminMiddleware)
+		router.POST("/models/edit/:name", localai.EditModelEndpoint(cl, galleryService, appConfig, app.ModelRevisionLifecycle()), adminMiddleware)
 
 		// List model aliases endpoint
 		router.GET("/api/aliases", localai.ListAliasesEndpoint(cl), adminMiddleware)
 
 		// Toggle model enable/disable endpoint
-		router.PUT("/models/toggle-state/:name/:action", localai.ToggleStateModelEndpoint(cl, galleryService, appConfig, modelRevisionLifecycleFor(app)), adminMiddleware)
+		router.PUT("/models/toggle-state/:name/:action", localai.ToggleStateModelEndpoint(cl, galleryService, appConfig, app.ModelRevisionLifecycle()), adminMiddleware)
 
 		// Toggle model pinned status endpoint
 		router.PUT("/models/toggle-pinned/:name/:action", localai.TogglePinnedModelEndpoint(cl, appConfig, func() {
@@ -254,10 +306,13 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 	router.DELETE("/api/failover/:chain/pin", localai.UnpinFailoverTargetEndpoint(fm), adminMiddleware)
 
 	voiceProfiles := app.VoiceProfileStore()
+	// Every user with the audio speech feature creates and deletes their own
+	// profiles; the handlers apply the ownership rules (voiceprofile.Viewer),
+	// and the feature itself is checked by the RouteFeatureRegistry.
 	router.GET("/api/voice-profiles", localai.ListVoiceProfilesEndpoint(voiceProfiles))
 	router.GET("/api/voice-profiles/:id/audio", localai.ServeVoiceProfileAudioEndpoint(voiceProfiles))
-	router.POST("/api/voice-profiles", localai.CreateVoiceProfileEndpoint(voiceProfiles), adminMiddleware)
-	router.DELETE("/api/voice-profiles/:id", localai.DeleteVoiceProfileEndpoint(voiceProfiles), adminMiddleware)
+	router.POST("/api/voice-profiles", localai.CreateVoiceProfileEndpoint(voiceProfiles))
+	router.DELETE("/api/voice-profiles/:id", localai.DeleteVoiceProfileEndpoint(voiceProfiles))
 
 	ttsHandler := localai.TTSEndpoint(cl, ml, appConfig, voiceProfiles)
 	router.POST("/tts",
@@ -358,10 +413,6 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		router.POST("/api/backend-logs/:modelId/clear", localai.ClearBackendLogsEndpoint(ml), adminMiddleware)
 		router.GET("/ws/backend-logs/:modelId", localai.BackendLogsWebSocketEndpoint(ml), adminMiddleware)
 	}
-
-	// p2p
-	router.GET("/api/p2p", localai.ShowP2PNodes(appConfig), adminMiddleware)
-	router.GET("/api/p2p/token", localai.ShowP2PToken(appConfig), adminMiddleware)
 
 	// Score (logprob over candidate continuations) — admin-only smoke-test
 	// surface for the gRPC Score primitive. Production consumers should
@@ -480,10 +531,12 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 					"prompts":          "/v1/mcp/prompts/:model",
 					"resources":        "/v1/mcp/resources/:model",
 				},
-				// #nosec G101 -- route paths, not credentials.
 				"p2p": map[string]string{
-					"nodes": "/api/p2p",
-					"token": "/api/p2p/token",
+					"status":        "/api/p2p/status",
+					"invites":       "/api/p2p/invites",
+					"devices":       "/api/p2p/devices",
+					"relays":        "/api/p2p/relays",
+					"split_workers": "/api/p2p/split-workers",
 				},
 				"settings": map[string]string{
 					"get":    "/api/settings",
@@ -521,7 +574,7 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 				"model_storage":   true,
 				"backend_install": !appConfig.DisableBackendInstall,
 				"mcp":             !appConfig.DisableMCP,
-				"p2p":             appConfig.P2PToken != "",
+				"p2p":             app != nil && app.P2PEnabled(),
 				"tracing":         true,
 				"chats":           app != nil && app.StudioService() != nil,
 				"agent_jobs":      app != nil && app.StudioJobs() != nil,
@@ -538,7 +591,13 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 
 	RegisterFeatureRoutes(router, appConfig, app)
 
-	router.GET("/system", localai.SystemInformations(cl, ml, appConfig, monitoring.NewLocalProcessSampler()), adminMiddleware)
+	router.GET("/system", localai.SystemInformations(cl, ml, appConfig, monitoring.NewLocalProcessSampler(), func(ctx context.Context) ([]nodes.NodeModel, error) {
+		// Resolved per request: distributed services are wired during startup.
+		if d := app.Distributed(); d != nil && d.Registry != nil {
+			return d.Registry.ListAllLoadedModels(ctx)
+		}
+		return nil, nil
+	}), adminMiddleware)
 
 	// misc
 	tokenizeHandler := localai.TokenizeEndpoint(cl, ml, appConfig)
@@ -610,5 +669,44 @@ func RegisterLocalAIRoutes(router *echo.Echo,
 		router.GET("/api/cors-proxy", localai.CORSProxyEndpoint(appConfig), mcpMw)
 		router.POST("/api/cors-proxy", localai.CORSProxyEndpoint(appConfig), mcpMw)
 		router.OPTIONS("/api/cors-proxy", localai.CORSProxyOptionsEndpoint())
+	}
+}
+
+// registerRemoteRoutes mounts the eight remote routes, each behind
+// adminMiddleware.
+func registerRemoteRoutes(router *echo.Echo, get localai.RemotesProvider, adminMiddleware echo.MiddlewareFunc) {
+	router.POST("/api/remotes/test", localai.CheckRemoteEndpoint(get), adminMiddleware)
+	router.POST("/api/remotes", localai.CreateRemoteEndpoint(get), adminMiddleware)
+	router.GET("/api/remotes", localai.ListRemotesEndpoint(get), adminMiddleware)
+	router.GET("/api/remotes/:id", localai.GetRemoteEndpoint(get), adminMiddleware)
+	router.PATCH("/api/remotes/:id", localai.UpdateRemoteEndpoint(get), adminMiddleware)
+	router.DELETE("/api/remotes/:id", localai.DeleteRemoteEndpoint(get), adminMiddleware)
+	router.POST("/api/remotes/:id/refresh", localai.RefreshRemoteEndpoint(get), adminMiddleware)
+	router.POST("/api/remotes/:id/adopt", localai.AdoptRemoteModelsEndpoint(get), adminMiddleware)
+}
+
+// registerFederationRoutes mounts the six federation routes, each behind
+// adminMiddleware.
+func registerFederationRoutes(router *echo.Echo, get localai.FederationProvider, adminMiddleware echo.MiddlewareFunc) {
+	router.GET("/api/federation", localai.GetFederationEndpoint(get), adminMiddleware)
+	router.POST("/api/federation/groups", localai.CreateFederationGroupEndpoint(get), adminMiddleware)
+	router.GET("/api/federation/groups/:name", localai.GetFederationGroupEndpoint(get), adminMiddleware)
+	router.PATCH("/api/federation/groups/:name", localai.UpdateFederationGroupEndpoint(get), adminMiddleware)
+	router.DELETE("/api/federation/groups/:name", localai.DeleteFederationGroupEndpoint(get), adminMiddleware)
+	router.POST("/api/federation/groups/:name/drain", localai.DrainFederationMemberEndpoint(get), adminMiddleware)
+}
+
+// UpgradeRunDepsFor wires the upgrade run routes to the service of app. The
+// service is read at each request; a nil app or service answers unavailable
+// (and the single upgrade routes keep their direct path).
+func UpgradeRunDepsFor(app *application.Application) localai.UpgradeRunDeps {
+	if app == nil {
+		return localai.UpgradeRunDeps{}
+	}
+	return localai.UpgradeRunDeps{
+		Runs: app.UpgradeRuns,
+		Principal: func(c echo.Context) string {
+			return addonendpoints.RunPrincipal(c, app.AuthDB(), app.AddonOwnershipMode())
+		},
 	}
 }

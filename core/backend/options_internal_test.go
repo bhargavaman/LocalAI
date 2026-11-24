@@ -1,13 +1,19 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/mudler/LocalAI/core/config"
+	pb "github.com/mudler/LocalAI/pkg/grpc/proto"
+	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/reasoning"
+	"github.com/mudler/LocalAI/pkg/system"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"gopkg.in/yaml.v3"
 )
 
 var _ = Describe("grpcModelOpts EngineArgs", func() {
@@ -211,6 +217,30 @@ var _ = Describe("grpcModelOpts NBatch", func() {
 		cfg.Batch = 1024
 		opts := grpcModelOpts(cfg, "/tmp/models")
 		Expect(opts.NBatch).To(BeEquivalentTo(1024))
+	})
+
+	It("carries parameters.batch from YAML to NBatch as an explicit value", func() {
+		var cfg config.ModelConfig
+		Expect(yaml.Unmarshal([]byte("name: m\nbackend: llama-cpp\nparameters:\n  batch: 2048\n"), &cfg)).To(Succeed())
+		cfg.Threads = &threads
+		cfg.ContextSize = &ctx
+		opts := grpcModelOpts(cfg, "/tmp/models")
+		Expect(opts.NBatch).To(BeEquivalentTo(2048))
+		Expect(opts.BatchManaged).To(BeFalse())
+	})
+
+	It("flags the stock batch as managed", func() {
+		cfg := config.ModelConfig{Threads: &threads, LLMConfig: config.LLMConfig{ContextSize: &ctx}}
+		opts := grpcModelOpts(cfg, "/tmp/models")
+		Expect(opts.BatchManaged).To(BeTrue())
+	})
+
+	It("flags a hardware-chosen batch as managed", func() {
+		cfg := config.ModelConfig{Threads: &threads, LLMConfig: config.LLMConfig{ContextSize: &ctx}}
+		config.ApplyHardwareDefaults(&cfg, config.GPU{ComputeCapability: "12.1", VRAM: 119 * gib})
+		opts := grpcModelOpts(cfg, "/tmp/models")
+		Expect(opts.NBatch).To(BeEquivalentTo(config.BlackwellPhysicalBatch))
+		Expect(opts.BatchManaged).To(BeTrue())
 	})
 
 	It("sizes the batch to the context window for embedding models", func() {
@@ -477,5 +507,122 @@ var _ = Describe("Proxy credential options", func() {
 		opts := grpcModelOpts(cfg, "")
 		Expect(opts.Proxy.GetApiKey()).To(Equal("direct-canary"))
 		Expect(int(opts.Proxy.ProtoReflect().Descriptor().Fields().ByName("api_key").Number())).To(Equal(9))
+	})
+})
+
+type fakeKeyResolver map[string]config.ProxyRemoteKey
+
+func (f fakeKeyResolver) ResolveKey(_ context.Context, id string) (config.ProxyRemoteKey, error) {
+	k, ok := f[id]
+	if !ok {
+		return config.ProxyRemoteKey{}, errors.New("not found")
+	}
+	return k, nil
+}
+
+func boundKey(key string) config.ProxyRemoteKey {
+	return config.ProxyRemoteKey{Key: key, Kind: "localai", Base: "https://remote.example.com"}
+}
+
+type configMap map[string]config.ModelConfig
+
+func (m configMap) GetModelConfig(name string) (config.ModelConfig, bool) {
+	c, ok := m[name]
+	return c, ok
+}
+
+var _ = Describe("proxy remote key", func() {
+	AfterEach(func() { config.SetProxyKeyResolver(nil) })
+
+	remoteConfig := func(remote string) config.ModelConfig {
+		threads := 1
+		return config.ModelConfig{
+			Name: "remote-model", Backend: model.LocalAIProxyBackend, Threads: &threads,
+			Proxy: config.ProxyConfig{UpstreamURL: "https://remote.example.com", Remote: remote},
+		}
+	}
+	finalize := func(cfg config.ModelConfig) (*pb.ModelOptions, error) {
+		opts := grpcModelOpts(cfg, "/models")
+		return opts, applyProxyRemoteKey(context.Background(), cfg.Proxy.Remote, opts)
+	}
+
+	It("sets the key from the resolver and leaves key file and env empty", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+		opts, err := finalize(remoteConfig("c1"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(opts.Proxy.ApiKey).To(Equal("fake-key"))
+		Expect(opts.Proxy.ApiKeyFile).To(BeEmpty())
+		Expect(opts.Proxy.ApiKeyEnv).To(BeEmpty())
+	})
+	It("does not put the key in the options built before the load", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+		Expect(grpcModelOpts(remoteConfig("c1"), "/models").Proxy.ApiKey).To(BeEmpty())
+	})
+	It("refuses to send the key of a remote to another server", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+		cfg := remoteConfig("c1")
+		cfg.Proxy.UpstreamURL = "https://attacker.example.net"
+		opts, err := finalize(cfg)
+		Expect(err).To(MatchError(ContainSubstring("not an address of this localai remote")))
+		Expect(err.Error()).NotTo(ContainSubstring("fake-key"))
+		Expect(opts.Proxy.ApiKey).To(BeEmpty())
+	})
+	It("accepts a trailing slash and the default port", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+		cfg := remoteConfig("c1")
+		cfg.Proxy.UpstreamURL = "https://remote.example.com:443/"
+		opts, err := finalize(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(opts.Proxy.ApiKey).To(Equal("fake-key"))
+	})
+	It("fails with a clear error when no resolver is set", func() {
+		_, err := finalize(remoteConfig("c1"))
+		Expect(err).To(MatchError(ContainSubstring(`proxy remote "c1": key unavailable`)))
+	})
+	It("fails when the remote is missing", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{})
+		_, err := finalize(remoteConfig("gone"))
+		Expect(err).To(MatchError(ContainSubstring(`proxy remote "gone": key unavailable`)))
+	})
+	It("keeps a plain key and ignores the resolver for models without a remote", func() {
+		config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("other")})
+		cfg := remoteConfig("")
+		cfg.Proxy.APIKey = "plain"
+		opts := grpcModelOpts(cfg, "/models")
+		Expect(opts.Proxy.ApiKey).To(Equal("plain"))
+		so := &config.ApplicationConfig{SystemState: &system.SystemState{}}
+		Expect(ModelOptions(cfg, so)).NotTo(BeEmpty())
+	})
+
+	Describe("LoadOptionsFinalizer", func() {
+		It("resolves the key of a remote model from its current config", func() {
+			config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+			cfg := remoteConfig("c1")
+			fin := LoadOptionsFinalizer(configMap{"remote-model": cfg})
+			opts := grpcModelOpts(cfg, "/models")
+			Expect(fin(context.Background(), "remote-model", opts)).To(Succeed())
+			Expect(opts.Proxy.ApiKey).To(Equal("fake-key"))
+		})
+		It("refuses stored options that point at another server", func() {
+			config.SetProxyKeyResolver(fakeKeyResolver{"c1": boundKey("fake-key")})
+			cfg := remoteConfig("c1")
+			opts := grpcModelOpts(cfg, "/models")
+			opts.Proxy.UpstreamUrl = "https://attacker.example.net"
+			err := LoadOptionsFinalizer(configMap{"remote-model": cfg})(context.Background(), "remote-model", opts)
+			Expect(err).To(HaveOccurred())
+			Expect(opts.Proxy.ApiKey).To(BeEmpty())
+		})
+		It("puts an inline key back and leaves other models alone", func() {
+			plain := remoteConfig("")
+			plain.Proxy.APIKey = "inline"
+			fin := LoadOptionsFinalizer(configMap{"remote-model": plain})
+			opts := grpcModelOpts(plain, "/models")
+			opts.Proxy.ApiKey = ""
+			Expect(fin(context.Background(), "remote-model", opts)).To(Succeed())
+			Expect(opts.Proxy.ApiKey).To(Equal("inline"))
+			other := &pb.ModelOptions{Model: "x"}
+			Expect(fin(context.Background(), "unknown", other)).To(Succeed())
+			Expect(fin(context.Background(), "unknown", nil)).To(Succeed())
+		})
 	})
 })

@@ -197,7 +197,7 @@
   overflow-wrap: anywhere;
 }
 .aj-out[data-tone="error"] .aj-out__text { background: var(--dk-error-wash); border-color: color-mix(in srgb, var(--dk-error) 25%, var(--dk-edge)); }
-.aj-out[data-tone="error"] .ag-eyebrow { color: var(--dk-error-text); }
+.aj-out[data-tone="error"] .ag-label { color: var(--dk-error-text); }
 .aj-params { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: 0; }
 .aj-param { display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 2px var(--sp-2); border-radius: var(--r-sm); background: var(--dk-inset); font-size: var(--fs-small); }
 .aj-param dt { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--dk-muted); }
@@ -240,11 +240,6 @@ div.aj-group > .aj-group__title { margin-bottom: 0; }
 .aj-pane-meta { display: inline-flex; align-items: center; gap: var(--sp-2); }
 .aj-pane-foot { display: flex; justify-content: flex-end; gap: var(--sp-2); width: 100%; }
 .aj-pane-tabs { margin: 0 0 var(--sp-4); }
-.aj-pane-tabs .ag-view { gap: 6px; border: 0; background: none; padding: 0; cursor: pointer; }
-.aj-pane-tabs .ag-view[aria-selected="true"] { color: var(--dk-text); }
-.aj-pane-tabs .ag-view[aria-selected="true"]::after { transform: scaleX(1); }
-.aj-pane-tabs .ag-view:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--r-xs); }
-.aj-tab-count { font-size: var(--fs-meta); font-variant-numeric: tabular-nums; color: var(--dk-muted); }
 .aj-pane-panel { display: flex; flex-direction: column; gap: var(--sp-5); }
 .aj-pane-lede { margin: 0; font-size: var(--fs-small); line-height: var(--lh-small); color: var(--color-text-secondary); }
 .aj-pane-facts dt { padding-right: var(--sp-4); }
@@ -286,3 +281,13 @@ div.aj-group > .aj-group__title { margin-bottom: 0; }
 .aj-sec__head--stack .aj-sum { font-size: var(--fs-small); line-height: var(--lh-small); }
 .aj-task__when { color: var(--dk-text); }
 .aj-preview--doc { padding: var(--sp-4); font-size: var(--fs-body); line-height: var(--lh-body); }
+
+/* The folder of a file trigger of an agent inside a fence: one of its folders, then a subfolder. */
+.aj-fence__row { display: flex; gap: var(--sp-2); align-items: stretch; min-width: 0; }
+.aj-fence__base { flex: 1 1 55%; min-width: 0; }
+.aj-fence__sub { flex: 1 1 45%; min-width: 0; }
+.aj-agent-project { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.aj-toolbar--projects { margin-bottom: var(--sp-2); }
+@media (max-width: 639px) {
+  .aj-fence__row { flex-direction: column; }
+}

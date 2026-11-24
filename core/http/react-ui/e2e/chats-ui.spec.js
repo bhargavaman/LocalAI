@@ -1,5 +1,6 @@
 import { test, expect } from './coverage-fixtures.js'
 import { mockChat } from './chat-fixtures.js'
+import { galleryItem, snapshotOf } from './updates-fixtures.js'
 
 // The chats page with the API stubbed, so the moments that are too quick to
 // catch on a real server can be held still: messages waiting while a turn runs,
@@ -287,6 +288,33 @@ test.describe('Chats page with a stubbed API', () => {
       await expect(page.getByTestId('attachment')).toContainText('notes.txt')
     })
 
+    // Files dragged over the chat page are staged like the picker's, also
+    // while a turn runs. Text drags are ignored.
+    test('files dropped on the chat are staged, images and audio too', async ({ page }) => {
+      const api = newChatsApi(page, { running: true })
+      await api.install()
+      await page.goto('/app/chats/c1')
+      await expect(page.getByRole('button', { name: 'Attach file' })).toBeEnabled()
+      const drag = async (type, files, text) => {
+        const dt = await page.evaluateHandle(({ files, text }) => {
+          const d = new DataTransfer()
+          for (const f of files) d.items.add(new File([f.body], f.name, { type: f.mime }))
+          if (text) d.setData('text/plain', text)
+          return d
+        }, { files, text })
+        await page.dispatchEvent('body', type, { dataTransfer: dt })
+      }
+      const files = [{ name: 'photo.png', mime: 'image/png', body: 'png' }, { name: 'voice.mp3', mime: 'audio/mpeg', body: 'mp3' }]
+      await drag('dragenter', [], 'just text')
+      await expect(page.getByTestId('composer-drop')).toHaveCount(0)
+      await drag('dragenter', files)
+      await expect(page.getByTestId('composer-drop')).toBeVisible()
+      await drag('drop', files)
+      await expect(page.getByTestId('composer-drop')).toHaveCount(0)
+      await expect(page.getByTestId('chat-composer').getByTestId('attachment')).toHaveCount(2)
+      await expect(page.getByTestId('chat-composer').getByText('voice.mp3')).toBeVisible()
+    })
+
     test('with files off there is no attach control, and the reason is shown', async ({ page }) => {
       const api = newChatsApi(page, { running: false, pending: [], files: false, filesReason: 'There is no data path, so files are off.' })
       await api.install()
@@ -304,7 +332,8 @@ test.describe('Chats page with a stubbed API', () => {
       await composer(page).press('Enter')
       await expect(page.getByRole('alert')).toBeVisible()
       await expect(composer(page)).toHaveValue('keep me')
-      await expect(page.getByTestId('attachment')).toContainText('notes.txt')
+      // The unsent message fades out of the thread; the file is in the box.
+      await expect(page.getByTestId('chat-composer').getByTestId('attachment')).toContainText('notes.txt')
     })
   })
 
@@ -342,6 +371,45 @@ test.describe('Chats page with a stubbed API', () => {
     await expect(page.getByTestId('chat-foot').getByRole('status')).toHaveText('Failed')
     await expect(page.getByRole('alert')).toHaveCount(1)
     await page.screenshot({ path: process.env.ERRCAUSE_SHOTS ? `${process.env.ERRCAUSE_SHOTS}/backend-missing.png` : 'test-results/backend-missing.png' })
+  })
+
+  test('a backend that is too old offers its update, then the retry', async ({ page }) => {
+    const api = newChatsApi(page, failed())
+    await api.install()
+    await failedTurn(page, {
+      text: 'The model "qwen" could not be started: the backend may be too old for it. Update the backend, then retry.',
+      code: 'model_backend_outdated', model: 'qwen', backend: 'llama-cpp', retry: 8, fatal: true,
+      detail: 'the model could not be loaded: model "qwen" load is in cooldown after a recent failure; retry after 8s',
+    })
+    await page.route('**/api/backends/updates', route => route.fulfill({
+      json: snapshotOf([galleryItem('metal-llama-cpp', 'v1', 'v2')]),
+    }))
+    const upgrades = []
+    await page.route('**/api/backends/upgrade/*', route => {
+      upgrades.push(route.request().url().split('/').pop())
+      return route.fulfill({ json: { jobID: 'job-1', message: 'upgrade queued' } })
+    })
+    await page.goto('/app/chats/c1')
+
+    await expect(page.getByTestId('chat-error-reason')).toHaveText('The model "qwen" could not be started: the backend may be too old for it.')
+    await expect(page.getByTestId('chat-error-hint')).toContainText('Updates page')
+    const update = page.getByTestId('chat-error-update-backend')
+    await expect(update).toHaveText('Update metal-llama-cpp')
+    await update.click()
+    await expect(page.getByTestId('chat-error-update-started')).toBeVisible()
+    expect(upgrades).toEqual(['metal-llama-cpp'])
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+    await page.screenshot({ path: process.env.ERRCAUSE_SHOTS ? `${process.env.ERRCAUSE_SHOTS}/backend-outdated.png` : 'test-results/backend-outdated.png' })
+  })
+
+  test('a backend that is too old with no known update offers no button', async ({ page }) => {
+    const api = newChatsApi(page, failed())
+    await api.install()
+    await failedTurn(page, { text: 'x', code: 'model_backend_outdated', model: 'qwen', backend: 'llama-cpp', fatal: true })
+    await page.route('**/api/backends/updates', route => route.fulfill({ json: snapshotOf([]) }))
+    await page.goto('/app/chats/c1')
+    await expect(page.getByTestId('chat-error-reason')).toContainText('may be too old')
+    await expect(page.getByTestId('chat-error-update-backend')).toHaveCount(0)
   })
 
   test('an upstream that rejects the address names the endpoint and does not blame the backend', async ({ page }) => {
@@ -539,7 +607,14 @@ test.describe('Chat tools menu: add-ons', () => {
       execution_status: { readiness: 'unavailable', isolation: 'unknown', explanation: 'Provider is starting' },
     } }))
     const reads = []
-    await page.route('**/api/addons/dispatch', route => { reads.push(route.request().url()); return route.abort() })
+    // The shell's update provider reads the installed add-ons and the owner's
+    // settings on every page; the chat itself must not discover anything.
+    await page.route('**/api/addons/dispatch', route => {
+      const action = (route.request().postDataJSON() || {}).action
+      if (action === 'addons-installed' || action === 'host-settings-read') return route.abort()
+      reads.push(route.request().url())
+      return route.abort()
+    })
     await page.goto('/app/chats/c1')
     await page.getByTestId('chat-tools-button').click()
     await expect(page.getByTestId('chat-commands-notice')).toContainText('Provider is starting')
@@ -694,6 +769,31 @@ test.describe('Chat tools menu: built-in groups', () => {
     await expect.poll(() => calls.at(-1)).toEqual({ off: [], on: [] })
   })
 
+  test('lists the LocalAI client group on and the LocalAI admin group opt-in, and switches them like the others', async ({ page }) => {
+    const api = newChatsApi(page, { running: false, pending: [] })
+    await api.install()
+    const calls = []
+    const groups = (body) => [
+      { group: 'localai_client', tools: ['generate_image', 'speak'], off: (body?.off || []).includes('localai_client'), usable: true, provider: 'builtin', providers: {} },
+      { group: 'localai_admin', tools: ['install_model'], off: !(body?.on || []).includes('localai_admin'), opt_in: true, usable: true, provider: 'builtin', providers: {} },
+    ]
+    await page.route('**/api/chats/c1/addons', route => route.fulfill({ json: { addons: [] } }))
+    await page.route('**/api/chats/c1/tools', route => route.fulfill({ json: { addons: [], servers: [], connectors: [], off: [], builtins: groups() } }))
+    await page.route('**/api/chats/c1/builtins', route => {
+      const body = route.request().postDataJSON()
+      calls.push(body)
+      return route.fulfill({ json: { addons: [], servers: [], connectors: [], off: [], builtins: groups(body) } })
+    })
+    await page.goto('/app/chats/c1')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByRole('switch', { name: 'LocalAI client' })).toBeChecked()
+    await expect(page.getByRole('switch', { name: 'LocalAI admin' })).not.toBeChecked()
+    await page.getByRole('switch', { name: 'LocalAI admin' }).check()
+    await expect.poll(() => calls.at(-1)).toEqual({ off: [], on: ['localai_admin'] })
+    await page.getByRole('switch', { name: 'LocalAI client' }).uncheck()
+    await expect.poll(() => calls.at(-1)).toEqual({ off: ['localai_client'], on: ['localai_admin'] })
+  })
+
   test('shows why the saved agents cannot be used', async ({ page }) => {
     const api = newChatsApi(page, { running: false, pending: [] })
     await api.install()
@@ -765,25 +865,25 @@ test.describe('Chat tools menu: every group of built-in tools', () => {
     await stubGroups(page)
     await open(page)
     const names = await page.getByTestId('chat-tools-group-builtins').locator('.swl-row__name').allTextContents()
-    expect(names).toEqual(['Run commands', 'Your files', 'Look things up online', 'Images and audio', 'Collections', 'Sub-agents', 'Triggers'])
+    expect(names).toEqual(['Run commands', 'Your files', 'Look things up online', 'Images and audio', 'Knowledge', 'Sub-agents', 'Create and manage triggers'])
     await expect(row(page, 'Run commands').getByTestId('chat-tools-note')).toHaveText(['Served by add-on sandbox', 'Commands run isolated'])
     await expect(row(page, 'Your files')).toHaveAttribute('title', 'list_files, read_file, write_file · built-in')
-    await expect(sw(page, 'Collections')).toBeDisabled()
-    await expect(sw(page, 'Collections')).toHaveAccessibleDescription('collections are not enabled for this account')
+    await expect(sw(page, 'Knowledge')).toBeDisabled()
+    await expect(sw(page, 'Knowledge')).toHaveAccessibleDescription('collections are not enabled for this account')
     await shot(page, 'groups-all')
   })
 
   test('every group has a title and a description, also one the interface has no words for, and an add-on shows its declared title', async ({ page }) => {
     const state = await stubGroups(page)
     state.builtins.push({ group: 'changes', tools: ['propose_change'], off: false, usable: true, provider: 'builtin', providers: {},
-      title: 'Memory and profile changes', description: 'The model can propose an edit; nothing changes until you confirm.', when_off: 'The model cannot propose edits.' })
+      title: 'Suggested changes', description: 'The model can propose an edit; nothing changes until you confirm.', when_off: 'The model cannot propose edits.' })
     state.builtins.push({ group: 'newgroup', tools: ['x_tool'], off: false, usable: true, provider: 'builtin', providers: {},
       title: 'A new group', description: 'The model can use a tool the interface has no words for yet.' })
     await page.route('**/api/chats/c1/addons', route => route.fulfill({ json: {
       addons: [{ id: 'sandbox', tools: 2, off: false, title: 'Isolated runner', description: 'Runs code in a box.' }], commands: 'available', commands_provider: 'sandbox' } }))
     await open(page)
     // The ninth built-in group reads as a title, not as its id.
-    await expect(sw(page, 'Memory and profile changes')).toBeVisible()
+    await expect(sw(page, 'Suggested changes')).toBeVisible()
     await expect(sw(page, 'A new group')).toBeVisible()
     await expect(sw(page, 'Isolated runner')).toBeVisible()
     await expect(page.getByTestId('chat-tools-menu')).toContainText('Runs code in a box.')
@@ -820,7 +920,7 @@ test.describe('Chat tools menu: every group of built-in tools', () => {
     await page.getByTestId('chat-tools-all').click()
     await expect.poll(() => state.puts.at(-1)).toEqual({ off: [] })
     await expect(sw(page, 'Run commands')).toHaveAttribute('aria-checked', 'true')
-    await expect(sw(page, 'Collections')).toHaveAttribute('aria-checked', 'false')
+    await expect(sw(page, 'Knowledge')).toHaveAttribute('aria-checked', 'false')
   })
 
   test('the shell row says commands run on this machine, with the warning', async ({ page }) => {
@@ -833,10 +933,10 @@ test.describe('Chat tools menu: every group of built-in tools', () => {
   })
 
   test('the shell row is disabled with the reason when nothing can run commands', async ({ page }) => {
-    await stubGroups(page, { shell: null, commands: { commands: 'none' } })
+    await stubGroups(page, { shell: null, commands: { commands: 'none', commands_host_exec: 'off' } })
     await open(page)
     await expect(sw(page, 'Run commands')).toBeDisabled()
-    await expect(sw(page, 'Run commands')).toHaveAccessibleDescription('No add-on that runs code is installed, so the assistant can write files but cannot run scripts or commands.')
+    await expect(sw(page, 'Run commands')).toHaveAccessibleDescription("The server's built-in bash is off, so the assistant can write files but cannot run scripts or commands.")
   })
 })
 

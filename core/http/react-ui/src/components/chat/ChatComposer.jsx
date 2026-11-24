@@ -1,28 +1,38 @@
 /* eslint-disable no-unused-vars -- components used only inside JSX look unused to this config, which has no eslint-plugin-react */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAuth } from '../../context/AuthContext'
 import { CAP_CHAT } from '../../utils/capabilities'
 import { seesImages } from '../../utils/chatVision'
 import { networkMode } from '../../utils/chatEgress'
+import { profileMode } from '../../utils/chatSandboxProfile'
+import SandboxProfileRow from './SandboxProfileRow'
 import { gbLabel, gbNumber } from '../../utils/modelLedger'
 import { useModelFit } from '../../hooks/useModelFit'
 import { useCommandsNotice } from '../../hooks/useCommandsNotice'
 import { SAVED_AGENTS, SUBAGENTS, useToolGroups } from '../../hooks/useToolGroups'
+import Icon from '../Icon'
 import { useChatGrants } from '../../hooks/useBuiltinGrants'
 import { fillStyle, hostMemory, memoryFigure } from '../home/memory'
 import HomeComposer from '../home/HomeComposer'
 import ModelPicker from '../ModelPicker'
 import AddonSlot from '../../addons/AddonSlot'
 import AgentPicker from './AgentPicker'
+import ProjectPicker from '../projects/ProjectPicker'
+import '../projects/projectchat.css'
+import { useProjectList } from '../../hooks/useProjectList'
 import SkillsMenu from './SkillsMenu'
 import SwitchMenu from './SwitchMenu'
 import VisionNotice from './VisionNotice'
+import { MemoryChip, MemoryLine } from './MemoryNotice'
+import { memoryOff, MEMORY_GROUP } from '../../utils/memoryState'
 import { ChatToolsControls } from '../../addons/hostControlComponents'
 import AgentFolderChip from './AgentFolderChip'
-import { agentFolderLine } from '../../utils/chatAgents'
+import { agentFolderLine, folderState } from '../../utils/chatAgents'
 import { CommandsChip, CommandsNotice } from './CommandsNotice'
+import { useUserCommands } from '../../hooks/useUserCommands'
 import { ToolFallbacks } from './ToolFallbacks'
+import { ToolCapNotice } from './ToolCapNotice'
 import Button from '../ui/Button'
 import { availableCommands, commandGroups, COMMAND_GROUPS, filterArgs, usableSkills, reservedNames } from '../../utils/slashCommands'
 import { CHAT_SLASH_ACTIONS } from './chatActions'
@@ -54,6 +64,7 @@ import '../../pages/chat.css'
 //   pickerRef      reaches the model list (the /model command opens it)
 //   pickerDisabled, pickerPlaceholder   Home without a model installed
 //   egress         the chat's network (useChatEgress), for the Tools menu
+//   sandboxProfile the chat's sandbox profile (useChatSandboxProfile), for the Tools menu
 //   toolsExtra     more chips after Skills (the sub-agents of a chat)
 //   chips          more chips after the agent (the Files chip)
 //   imageModel     the model that describes images to a model that cannot see
@@ -64,17 +75,28 @@ import '../../pages/chat.css'
 //                  and the staged files
 //   onRunAction    (id, item) for the commands the page runs; the composer
 //                  runs /model with a name, /models, and "turn on saved agents"
+//   toolbarSlot    the composerToolbar slot of ui.json, drawn before the
+//                  add-on slot
 // The other props go to HomeComposer as they are.
 export default function ChatComposer({
   composer, chatId = null, activeChat = null, filesOn = true, loadedIds, imageModel = '',
-  onPickModel, pickerRef, pickerDisabled = false, pickerPlaceholder, egress = null, toolsExtra, chips,
-  slotContext, placeholder, onDictateError, slashSurface = 'chat', slashContext, onRunAction, ...rest
+  onPickModel, pickerRef, pickerDisabled = false, pickerPlaceholder, egress = null, sandboxProfile = null, toolsExtra, chips,
+  slotContext, placeholder, onDictateError, slashSurface = 'chat', slashContext, onRunAction, toolbarSlot = null, ...rest
 }) {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('chats')
+  const { t: tp } = useTranslation('projects')
   const { isAdmin, user } = useAuth()
-  const { drafts, draftId, switches, models, modelsLoading, pickedAgent, effectiveModel, agents, agentId, setAgentId, setDraftModel, attach, paste } = composer
+  const { drafts, draftId, switches, models, modelsLoading, pickedAgent, effectiveModel, agents, agentId, setAgentId, projectId, setProjectId, pulledDraft, setPulledDraft, setDraftModel, attach, paste } = composer
   const { text, files, setText, setFiles } = drafts
+  // The project chip belongs to a chat that does not exist yet.
+  const projectList = useProjectList(!chatId && !!setProjectId)
+  // A chat of an agent that has a folder works only in that folder: it has no
+  // project, so the chip is replaced by a disabled one that says why.
+  const fencedAgent = folderState(pickedAgent) !== 'none'
+  useEffect(() => { if (fencedAgent && projectId && setProjectId) setProjectId('') }, [fencedAgent, projectId, setProjectId])
+  useEffect(() => { if (fencedAgent && pulledDraft?.length && setPulledDraft) setPulledDraft([]) }, [fencedAgent, pulledDraft, setPulledDraft])
+  const startProject = !chatId && projectId && !fencedAgent ? (projectList.projects || []).find(p => p.id === projectId) : null
 
   const [fitOpenCount, setFitOpenCount] = useState(0)
   const modelNames = useMemo(() => models.map(m => m.id), [models])
@@ -115,6 +137,7 @@ export default function ChatComposer({
       onOpen={onPickerOpen}
       disabled={pickerDisabled || (!chatId && !!pickedAgent?.model)}
       autoSelect={!chatId && !pickedAgent?.model}
+      startsChat={!chatId}
       rememberSelection={!chatId}
       placeholder={pickerPlaceholder}
       footer={memoryNumbers && (
@@ -132,6 +155,8 @@ export default function ChatComposer({
   const grants = useChatGrants(pickedAgent)
   const toolGroups = useToolGroups({ ...switches, grants }, { commandsInfo: commands.info })
   const network = egress && networkMode(egress) !== 'hidden'
+  const profiles = sandboxProfile && profileMode(sandboxProfile) !== 'hidden'
+  const memoryIsOff = !!memoryOff(switches.memory, switches.builtins.find((b) => b.group === MEMORY_GROUP))
   // A chat whose agent has a folder reaches only that folder with its file tools.
   const scopeLine = agentFolderLine(pickedAgent, t)
   const tools = (
@@ -140,14 +165,15 @@ export default function ChatComposer({
         icon="plug" label={t('tools.label')} title={t('tools.title')} heading={t('tools.heading')}
         note={chatId ? t('tools.note') : t('tools.draftNote')}
         groups={toolGroups} error={switches.error} testId="chat-tools"
-        notice={scopeLine || commands.info || network || switches.fallbacks.length > 0
-          ? <>{scopeLine ? <p className="cmd-notice__line" data-testid="chat-tools-scope">{scopeLine}</p> : null}{commands.info ? <CommandsNotice notice={commands} /> : null}<ToolFallbacks fallbacks={switches.fallbacks} />{network ? <ChatToolsControls egress={egress} /> : null}</>
+        notice={scopeLine || commands.info || network || profiles || switches.fallbacks.length > 0 || switches.toolCap?.cut > 0 || memoryIsOff || (switches.attachedCollections || []).length > 0
+          ? <><MemoryLine memory={switches.memory} builtins={switches.builtins} />{(switches.attachedCollections || []).length > 0 ? <p className="cmd-notice__line" data-testid="chat-tools-project-collections">{t('tools.projectCollections', { names: (switches.attachedCollections || []).join(', ') })}</p> : null}{scopeLine ? <p className="cmd-notice__line" data-testid="chat-tools-scope">{scopeLine}</p> : null}{commands.info ? <CommandsNotice notice={commands} /> : null}<ToolFallbacks fallbacks={switches.fallbacks} /><ToolCapNotice cap={switches.toolCap} isAdmin={isAdmin} />{network ? <ChatToolsControls egress={egress} /> : null}{profiles ? <SandboxProfileRow view={sandboxProfile} /> : null}</>
           : null}
         footer={switches.connectors.length > 0 || switches.servers.length > 0
           ? <Button size="sm" variant="ghost" iconEnd="arrow-right" to="/app/mcp-connectors" data-testid="chat-tools-manage">{tc('tools.manage')}</Button>
           : null}
       />
       <CommandsChip notice={commands} />
+      <MemoryChip memory={switches.memory} builtins={switches.builtins} />
       <SkillsMenu skills={switches.skills} replaced={switches.replacedSkills} onSet={switches.setSkillsOn} error={switches.skillsError} />
       {toolsExtra}
     </>
@@ -159,11 +185,16 @@ export default function ChatComposer({
   const savedGroup = switches.builtins.find((b) => b.group === SAVED_AGENTS)
   const subGroup = switches.builtins.find((b) => b.group === SUBAGENTS)
   const savedAgentsOn = !!savedGroup && !savedGroup.off && savedGroup.usable !== false && !subGroup?.off
+  const userCommands = useUserCommands()
+  // The tools the chat has (the names of its built-in groups that are on), so a
+  // command whose tool is not there says so.
+  const toolNames = useMemo(() => new Set(switches.builtins.filter((b) => !b.off && b.usable !== false).flatMap((b) => b.tools || [])), [switches.builtins])
+  const toolText = useCallback((tool) => t('slash.userTool', { tool }), [t])
   const slashCtx = useMemo(() => ({
     ...(slashContext || {}),
     skills: switches.skills, agents, canAgents: agents.length > 0 && !!savedGroup, savedAgentsOn,
-    models: modelNames, canAttach: filesOn, staged: files.length,
-  }), [slashContext, switches.skills, agents, savedGroup, savedAgentsOn, modelNames, filesOn, files.length])
+    models: modelNames, canAttach: filesOn, staged: files.length, userCommands, toolNames, toolText,
+  }), [slashContext, switches.skills, agents, savedGroup, savedAgentsOn, modelNames, filesOn, files.length, userCommands, toolNames, toolText])
   const slash = useMemo(() => {
     const own = slashSurface === 'home' ? th : t
     const ownIds = new Set((slashSurface === 'home' ? SLASH_ACTIONS : CHAT_SLASH_ACTIONS).map((a) => a.id))
@@ -173,7 +204,7 @@ export default function ChatComposer({
       groups: commandGroups(slashSurface),
       ctx: slashCtx,
       label: (a) => a.label || words(a)(`slash.${a.id}.label`),
-      desc: (a) => a.addonId ? a.label : words(a)(`slash.${a.id}.desc`),
+      desc: (a) => (a.addonId ? a.label : a.userCommand ? a.desc : words(a)(`slash.${a.id}.desc`)),
       groupLabel: (g) => (COMMAND_GROUPS.includes(g) ? t(`slash.group.${g}`) : own(`slash.group.${g}`)),
       argsLabel: (c) => t(`slash.args.${c.id === 'models' ? 'model' : c.id}`, { defaultValue: c.cmd }),
       argLabel: (c, it) => (it.action === 'enableAgents' ? t('slash.agent.enable') : it.action === 'loopStopAll' ? t('slash.loop.stopAll') : ''),
@@ -183,7 +214,7 @@ export default function ChatComposer({
         loopList: t('slash.loop.listDesc'), loopStopAll: t('slash.loop.stopAllDesc'),
       })[it.action] || (it.key === 'loop-stop' ? t('slash.loop.stopDesc') : ''),
       badgeLabel: (b) => t(`slash.badge.${b}`),
-      noteLabel: (n) => (n === 'collides' ? t('slash.collides') : n),
+      noteLabel: (n) => (n === 'collides' ? t('slash.collides') : n === 'unavailable' ? t('slash.unavailable') : n),
     }
   }, [slashSurface, slashCtx, t, th])
   const runSlash = useCallback((id, item) => {
@@ -196,8 +227,8 @@ export default function ChatComposer({
     if (id === 'agent' && item?.action === 'enableAgents') { switches.toggleBuiltin(SAVED_AGENTS, true); setText('/agent '); return }
     if (id === 'help') {
       // The commands of the menu, and the skills apart: they are many.
-      const entries = slash.actions.filter((a) => !a.label).map((a) => ({ cmd: a.cmd, desc: slash.desc(a), icon: a.icon }))
-      const skills = slash.actions.filter((a) => a.label).map((a) => a.cmd)
+      const entries = slash.actions.filter((a) => !a.label || a.userCommand).map((a) => ({ cmd: a.cmd, desc: slash.desc(a), icon: a.icon }))
+      const skills = slash.actions.filter((a) => a.label && !a.userCommand).map((a) => a.cmd)
       onRunAction?.(id, { entries, skills })
       return
     }
@@ -233,22 +264,33 @@ export default function ChatComposer({
           <>
             <AgentPicker agents={agents} value={activeChat ? activeChat.agent_id : agentId} onChange={setAgentId} readOnly={!!chatId} />
             <AgentFolderChip agent={pickedAgent} />
+            {!chatId && setProjectId && !fencedAgent && <ProjectPicker list={projectList} value={projectId || ''} onChange={setProjectId} pulled={pulledDraft} onPulled={setPulledDraft} />}
+            {!chatId && setProjectId && fencedAgent && projectList.status === 'ready' && (
+              <span className="home-chip" aria-disabled="true" title={tp('composer.fencedHint')} data-testid="project-picker-fenced">
+                <Icon name="layers" /> <span className="home-chip__text">{tp('composer.fencedLabel')}</span>
+              </span>
+            )}
             {chips}
           </>
         )}
-        extras={<AddonSlot slot="chat.composer.actions" context={slotContext} />}
+        extras={<>{toolbarSlot}<AddonSlot slot="chat.composer.actions" context={slotContext} /></>}
         files={files}
         onRemoveFile={(f) => setFiles(prev => prev.filter(x => x !== f))}
         onAttach={filesOn ? attach : undefined}
         fileTestId="chat-file-input"
         placeholder={effectivePlaceholder}
         onPaste={paste}
-        anyFile
         slash={slash}
         onRunAction={runSlash}
         onClearFiles={() => setFiles([])}
         {...rest}
       />
+      {startProject && (
+        <p className="pjc-start" data-testid="project-start-note">
+          <Icon name="layers" />
+          <span>{tp('composer.startNote', { name: startProject.name })}</span>
+        </p>
+      )}
     </>
   )
 }

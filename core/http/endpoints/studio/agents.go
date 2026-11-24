@@ -77,7 +77,7 @@ func agentOut(a agents.Agent) schema.ChatsAgent {
 	}
 	return schema.ChatsAgent{ID: a.ID, Name: a.Name, Description: a.Description, Instructions: a.Instructions, Model: a.Model,
 		MCPServers: nz(a.MCPServers), Addons: nz(a.Addons), Collections: nz(a.Collections), Skills: nz(a.Skills),
-		Network: networkOf(a.Network), BuiltinsOff: nz(a.BuiltinsOff), BuiltinsOn: nz(a.BuiltinsOn), Builtins: nz(a.Builtins), Connections: a.Connections, Created: a.Created, Updated: a.Updated}
+		Network: networkOf(a.Network), SandboxProfile: a.SandboxProfile, Memory: a.Memory, MemorySave: a.MemorySave, ProjectID: a.ProjectID, BuiltinsOff: nz(a.BuiltinsOff), BuiltinsOn: nz(a.BuiltinsOn), Builtins: nz(a.Builtins), Connections: a.Connections, Resources: a.Resources, Created: a.Created, Updated: a.Updated}
 }
 
 // agentIn reads the body. A model the user may not use is refused here, so a
@@ -100,8 +100,8 @@ func (h *Handlers) agentIn(c echo.Context) (a agents.Agent, folders *[]studiosvc
 		}
 	}
 	return agents.Agent{Name: req.Name, Description: req.Description, Instructions: req.Instructions, Model: req.Model,
-			MCPServers: req.MCPServers, Addons: req.Addons, Collections: req.Collections, Skills: req.Skills, Network: req.Network,
-			BuiltinsOff: req.BuiltinsOff, BuiltinsOn: req.BuiltinsOn, Builtins: req.Builtins, Connections: req.Connections},
+			MCPServers: req.MCPServers, Addons: req.Addons, Collections: req.Collections, Skills: req.Skills, Network: req.Network, SandboxProfile: req.SandboxProfile, Memory: req.Memory, MemorySave: req.MemorySave, ProjectID: req.ProjectID,
+			BuiltinsOff: req.BuiltinsOff, BuiltinsOn: req.BuiltinsOn, Builtins: req.Builtins, Connections: req.Connections, Resources: req.Resources},
 		foldersIn(req), true, nil
 }
 
@@ -114,22 +114,124 @@ func networkOf(n string) string {
 	return n
 }
 
+// accessOut is the caller's access to an agent as the API shows it.
+// A project agent cannot be shared, so Sharing is false for it whatever the
+// server can do.
+func (h *Handlers) accessOut(acc studiosvc.AgentAccess, a agents.Agent) *schema.ChatsAgentAccess {
+	out := &schema.ChatsAgentAccess{Role: acc.Role, Owner: acc.OwnerName, Everyone: acc.Everyone}
+	if acc.Owner() {
+		n := acc.SharedWith
+		out.SharedWith, out.ShareID, out.Sharing = &n, acc.ShareRef, h.svc.AgentSharingAvailable() && a.ProjectID == ""
+	}
+	return out
+}
+
+// sharedOut is an agent shared with the caller. It carries the owner's
+// definition only as far as the role allows, and never the owner's
+// connections, resources, folders or sharing record: those name things of
+// the owner, and the caller runs the agent with their own.
+func (h *Handlers) sharedOut(a agents.Agent, acc studiosvc.AgentAccess) schema.ChatsAgent {
+	a.Connections, a.Resources, a.Folders, a.FolderID, a.FolderMode, a.ShareRef, a.ProjectID = nil, nil, nil, 0, "", "", ""
+	if acc.Role != studiosvc.AgentRoleView {
+		a = agents.Agent{ID: a.ID, Name: a.Name, Description: a.Description, Model: a.Model, Created: a.Created, Updated: a.Updated}
+	}
+	out := agentOut(a)
+	out.Access = h.accessOut(acc, a)
+	return out
+}
+
 // ListAgents lists the saved agents.
-// @Summary List your saved agents.
+// @Summary List your saved agents and the agents shared with you.
+// @Description Your own agents come first, then the agents other people shared with you. access says which is which: role owner for yours (with sharedWith, the number of grants), use or viewer for a shared one (with owner, the name of the person who shared it). A shared agent carries its full definition only for viewer, and never the owner's connections, resources or folders: you run it with your own.
 // @Tags chats
-// @Success 200 {object} schema.ChatsAgentList "Your agents, sorted by name"
+// @Success 200 {object} schema.ChatsAgentList "Your agents, sorted by name, then the shared ones"
 // @Router /api/chats/agents [get]
 func (h *Handlers) ListAgents(c echo.Context) error {
-	list, err := h.svc.Agents(c.Request().Context(), userID(c))
+	list, err := h.svc.AgentsWithShared(c.Request().Context(), userID(c))
 	if err != nil {
 		return failFor(c, err)
 	}
 	out := schema.ChatsAgentList{Agents: make([]schema.ChatsAgent, 0, len(list))}
-	rows := h.svc.AgentFolderRows(c.Request().Context(), userID(c), list)
-	for _, a := range list {
-		o := agentOut(a)
-		h.addFolders(c, &o, a, rows[a.ID])
+	var own []agents.Agent
+	for _, e := range list {
+		if e.Access.Owner() {
+			own = append(own, e.Agent)
+		}
+	}
+	rows := h.svc.AgentFolderRows(c.Request().Context(), userID(c), own)
+	for _, e := range list {
+		if !e.Access.Owner() {
+			out.Agents = append(out.Agents, h.sharedOut(e.Agent, e.Access))
+			continue
+		}
+		o := agentOut(e.Agent)
+		h.addFolders(c, &o, e.Agent, rows[e.Agent.ID])
+		o.Access = h.accessOut(e.Access, e.Agent)
 		out.Agents = append(out.Agents, o)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// ShareAgent returns the ID of an agent in the sharing API.
+// @Summary Get the sharing ID of your agent.
+// @Description Makes the agent's record in the sharing API on the first call and returns it on every call. Share the agent with /api/shares/agent/{id}/grants/{principal}, roles use and viewer, or @everyone. Sharing the agent does not share what it uses: share each collection or connection by itself. Only the owner may call it.
+// @Tags chats
+// @Param id path string true "the agent's id"
+// @Success 200 {object} schema.ChatsAgentShareRef "The sharing ID"
+// @Failure 400 {object} schema.ErrorResponse "The agent belongs to a project; project agents cannot be shared"
+// @Failure 403 {object} schema.ErrorResponse "The agent is shared with you, not yours"
+// @Failure 404 {object} schema.ErrorResponse "No such agent"
+// @Failure 409 {object} schema.ErrorResponse "Agents cannot be shared on this server"
+// @Router /api/chats/agents/{id}/share [post]
+func (h *Handlers) ShareAgent(c echo.Context) error {
+	ref, err := h.svc.AgentShareRef(c.Request().Context(), userID(c), c.Param("id"))
+	if err != nil {
+		return failFor(c, err)
+	}
+	return c.JSON(http.StatusOK, schema.ChatsAgentShareRef{Kind: studiosvc.AgentShareKind, ID: ref})
+}
+
+// AgentReferences lists what an agent uses.
+// @Summary List what your agent uses.
+// @Description The add-ons, collections, skills, folders, connections, add-on resources, MCP servers and built-in grants the agent names, with a label each. share says how a reference can be shared with a person you share the agent with; without it the person needs access of their own. Only the owner may call it.
+// @Tags chats
+// @Param id path string true "the agent's id"
+// @Success 200 {object} schema.ChatsAgentReferenceList "The references"
+// @Failure 403 {object} schema.ErrorResponse "The agent is shared with you, not yours"
+// @Failure 404 {object} schema.ErrorResponse "No such agent"
+// @Router /api/chats/agents/{id}/references [get]
+func (h *Handlers) AgentReferences(c echo.Context) error {
+	refs, err := h.svc.AgentReferences(c.Request().Context(), userID(c), c.Param("id"))
+	if err != nil {
+		return failFor(c, err)
+	}
+	out := schema.ChatsAgentReferenceList{References: make([]schema.ChatsAgentReference, 0, len(refs))}
+	for _, r := range refs {
+		o := schema.ChatsAgentReference{Kind: r.Kind, ID: r.ID, Label: r.Label, AddonID: r.AddonID, Mode: r.Mode}
+		if r.Share != nil {
+			o.Share = &schema.ChatsAgentReferenceShare{Kind: r.Share.Kind, ResourceID: r.Share.ResourceID, Options: r.Share.Options, Roles: r.Share.Roles}
+		}
+		out.References = append(out.References, o)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// AgentNeeds lists what an agent needs and whether you have it.
+// @Summary List what an agent needs and whether you have it.
+// @Description For your agent or an agent shared with you: each thing the agent uses, by label, with its state for you. ok: you have it. missing: it is not shared with you (ask the owner, or use your own). unavailable: this server or your account does not offer it. ask: the agent asks for a network (kind network) or a group of built-in tools (kind tool-group) that your chat starts without; you may turn it on in the chat. Nothing else about a thing you cannot see is returned.
+// @Tags chats
+// @Param id path string true "the agent's id"
+// @Success 200 {object} schema.ChatsAgentNeedList "What the agent needs"
+// @Failure 404 {object} schema.ErrorResponse "No such agent, or it is not shared with you"
+// @Router /api/chats/agents/{id}/needs [get]
+func (h *Handlers) AgentNeeds(c echo.Context) error {
+	needs, err := h.svc.AgentNeeds(c.Request().Context(), userID(c), c.Param("id"))
+	if err != nil {
+		return failFor(c, err)
+	}
+	out := schema.ChatsAgentNeedList{Needs: make([]schema.ChatsAgentNeed, 0, len(needs))}
+	for _, n := range needs {
+		out.Needs = append(out.Needs, schema.ChatsAgentNeed{Kind: n.Kind, Label: n.Label, State: n.State})
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -155,18 +257,24 @@ func (h *Handlers) CreateAgent(c echo.Context) error {
 }
 
 // GetAgent reads a saved agent.
-// @Summary Read a saved agent.
+// @Summary Read a saved agent of yours or one shared with you.
+// @Description An agent shared with you carries its full definition only for the role viewer, and never the owner's connections, resources or folders.
 // @Tags chats
 // @Param id path string true "the agent's id"
 // @Success 200 {object} schema.ChatsAgent "The agent"
-// @Failure 404 {object} schema.ErrorResponse "No such conversation, or it is another user's"
+// @Failure 404 {object} schema.ErrorResponse "No such agent, or it is another user's and not shared with you"
 // @Router /api/chats/agents/{id} [get]
 func (h *Handlers) GetAgent(c echo.Context) error {
-	a, err := h.svc.Agent(c.Request().Context(), userID(c), c.Param("id"))
+	a, acc, err := h.svc.SharedAgent(c.Request().Context(), userID(c), c.Param("id"))
 	if err != nil {
 		return failFor(c, err)
 	}
-	return c.JSON(http.StatusOK, h.agentFull(c, a))
+	if !acc.Owner() {
+		return c.JSON(http.StatusOK, h.sharedOut(a, acc))
+	}
+	out := h.agentFull(c, a)
+	out.Access = h.accessOut(acc, a)
+	return c.JSON(http.StatusOK, out)
 }
 
 // UpdateAgent replaces a saved agent.
@@ -194,15 +302,23 @@ func (h *Handlers) UpdateAgent(c echo.Context) error {
 
 // DeleteAgent deletes a saved agent.
 // @Summary Delete a saved agent.
-// @Description Chats that ran with it keep their history; their next turn runs without the agent's tools.
+// @Description Chats that ran with it keep their history; their next turn runs without the agent's tools. The agent's own memory notes (Memory/agents/{id}) are not part of it: memory says what to do with them. keep (the default) leaves them, listed under Deleted agents on the Memory page until you delete them. delete moves them to the Trash. export answers 200 with a zip file of the notes and then moves them to the Trash (204 when the agent has none). A value that is not one of these is a 400 and nothing is deleted.
 // @Tags chats
 // @Param id path string true "the agent's id"
+// @Param memory query string false "what to do with the agent's own notes" Enums(keep, export, delete) default(keep)
 // @Success 204 "Deleted"
+// @Success 200 {file} file "Deleted; a zip file of the agent's notes (memory=export)"
+// @Failure 400 {object} schema.ErrorResponse "memory is not keep, export or delete"
 // @Failure 404 {object} schema.ErrorResponse "No such conversation, or it is another user's"
 // @Router /api/chats/agents/{id} [delete]
 func (h *Handlers) DeleteAgent(c echo.Context) error {
-	if err := h.svc.DeleteAgent(c.Request().Context(), userID(c), c.Param("id")); err != nil {
+	zipped, err := h.svc.DeleteAgentWithNotes(c.Request().Context(), userID(c), c.Param("id"), c.QueryParam("memory"))
+	if err != nil {
 		return failFor(c, err)
+	}
+	if zipped != nil {
+		c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="agent-memory-notes.zip"`)
+		return c.Blob(http.StatusOK, "application/zip", zipped)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

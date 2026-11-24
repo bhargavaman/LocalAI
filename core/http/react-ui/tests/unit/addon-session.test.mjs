@@ -5,6 +5,9 @@ import { hookHarness } from './chatcommands-lifecycle.mjs'
 import { createActionBook, effectOutcome } from '../../src/components/addons/actionBook.js'
 import { runLifecycle, settleOperation } from '../../src/components/addons/lifecycleFlow.js'
 import { newOperationId } from '../../src/components/catalog/catalogState.js'
+import { overlayLive } from '../../src/utils/addonUpgradeRows.js'
+// What the upgrade hook reads besides the store: the shared operations list.
+const operations = { useOperations: () => ({ operations: [] }), overlayLive, operationsApi: { cancel: async () => ({}) } }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 
 for (const verb of ['start', 'stop']) test(`pending ${verb} cannot verify or publish after actual auth epoch changes before cleanup`, async () => {
@@ -35,7 +38,7 @@ test('pending update check and upgrade cannot publish to the next actor before c
   let checked = 0, changed = 0, started = 0
   const api = { updates: { check: () => { checked++; return pending.promise } } }
   const h = hookHarness('../../src/components/addons/useAddonUpgrade.js', 'useAddonUpgrade', {
-    useAuth: () => auth, newOperationId, useAddonUpgrades: () => ({ live: [], records: [] }),
+    useAuth: () => auth, newOperationId, ...operations, useAddonUpgrades: () => ({ live: [], records: [] }),
     addonUpgrades: { start: () => { started++; return updating.promise } },
   })
   const render = () => h.render(api, { onChanged: () => changed++ })
@@ -72,7 +75,7 @@ for (const switchUser of [false, true]) test(`installed records reject late admi
   let auth = { user: { id: 'admin' }, isAdmin: true, sessionEpoch: 1, hasFeature: () => true }
   const pending = deferred()
   let reads = 0
-  const api = { apps: { list: async () => [{ id: 'notes', generation: 1 }] }, installed: () => { reads++; return pending.promise } }
+  const api = { apps: { read: async () => ({ apps: [{ id: 'notes', generation: 1 }] }) }, installed: () => { reads++; return pending.promise } }
   const text = readFileSync(new URL('../../src/components/addons/AppsView.jsx', import.meta.url), 'utf8')
   // Full Apps body/effects; JSX is compiled, leaf hooks are external boundaries.
   const names = [...text.matchAll(/^import \{ ([^}]+) \} from/gm)].flatMap(m => m[1].split(',').map(n => n.trim()))
@@ -80,7 +83,7 @@ for (const switchUser of [false, true]) test(`installed records reject late admi
   const h = hookHarness('../../src/components/addons/AppsView.jsx', 'AppsView', {
     ...Object.fromEntries([...names, ...defaults].filter(n => !n.startsWith('use')).map(n => [n, () => null])),
     useAuth: () => auth, useContext: () => null, useTranslation: () => ({ t: k => k, i18n: {} }),
-    useAddonActions: () => ({}), useAddonUpgrade: () => ({ checks: {}, records: [] }), useBulkUpgrade: () => ({}),
+    useAddonConnections: () => ({ byAddon: {}, addonIds: new Set(), agents: [], kinds: [] }), useAddonActions: () => ({}), useAddonUpgrade: () => ({ checks: {}, records: [] }), useBulkUpgrade: () => ({}),
     useOutletContext: () => ({}), useNavigation: () => ({ pins: [] }), useHubAuth: () => ({ features: {} }),
     useSearchParams: () => [new URLSearchParams(), () => {}],
     buildTiles: () => [], resolvePins: () => [], filterTiles: () => [], filterByState: () => [], sortByAttention: () => [],
@@ -182,7 +185,8 @@ async function providerAuthority() {
   const logoutReply = deferred()
   const h = hookHarness('../../src/context/AuthContext.jsx', 'AuthProvider', {
     apiUrl: x => x, addonUpgrades: (await import('../../src/utils/addonUpgrades.js')).createUpgradeStore(),
-    fetch: url => url.endsWith('/logout') ? logoutReply.promise : Promise.resolve({ json: async () => status }),
+    ...(await import('../../src/utils/authSession.js')), ...(await import('../../src/utils/sessionEvents.js')),
+    fetch: url => url.endsWith('/logout') ? logoutReply.promise : Promise.resolve({ ok: true, json: async () => status }),
     document: { cookie: '' }, window: { location: {} },
   }, source => ts.transpileModule(source.replace(/return \(\s*<AuthContext.Provider[\s\S]*?\n  \)/, 'return value'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
@@ -218,7 +222,7 @@ for (const path of ['observer', 'completion', 'verification']) {
         installed: () => { verified++; verifying.resolve(); return verification.promise },
       }
       const view = hookHarness('../../src/components/addons/useAddonUpgrade.js', 'useAddonUpgrade', {
-        useAuth: () => provider.auth, newOperationId, addonUpgrades: store,
+        useAuth: () => provider.auth, newOperationId, ...operations, addonUpgrades: store,
         useAddonUpgrades: () => store.getSnapshot(),
       })
       const origin = view.render(api, { onChanged: () => changed++ }); view.flush()

@@ -34,7 +34,7 @@ func (s *Service) egressAudit() audit.Store { return s.egressAuditStore }
 // forkEgress is the network state a fork copies: the preset and the allow
 // rules. The cards and the deny rules belong to the chat that asked.
 func forkEgress(src egress.ChatState) egress.ChatState {
-	out := egress.ChatState{Preset: src.Preset}
+	out := egress.ChatState{Preset: src.Preset, Profile: src.Profile}
 	for _, r := range src.Rules {
 		if r.Allow {
 			out.Rules = append(out.Rules, r)
@@ -89,7 +89,7 @@ func (s *Service) egressLine(ctx context.Context, rec session.ChatRecord, web bo
 	}
 	if ceiling == egress.PresetOff {
 		// Hint would tell the model to ask the user to turn the network on.
-		return egress.DescribeLimit(preset, ceiling, egress.BuiltinRegistries(), false, name), nil
+		return egress.DescribeLimitFor(set, preset, ceiling, egress.BuiltinRegistries(), false, name), nil
 	}
 	// A card appears only in a chat a person watches (not an unattended run
 	// or a sub-agent), and only for a host the ceiling admits beyond the
@@ -97,7 +97,7 @@ func (s *Service) egressLine(ctx context.Context, rec session.ChatRecord, web bo
 	attended := rec.Origin == "" && rec.Kind != session.KindSubAgent
 	asks := attended && (ceiling.Rank() > preset.Rank() || set.AllowPrivate)
 	if capped {
-		return egress.DescribeLimit(preset, ceiling, egress.BuiltinRegistries(), asks, name) + " " + egress.Hint(preset, web, name), nil
+		return egress.DescribeLimitFor(set, preset, ceiling, egress.BuiltinRegistries(), asks, name) + " " + egress.Hint(preset, web, name), nil
 	}
-	return egress.Describe(preset, egress.BuiltinRegistries(), asks, name) + " " + egress.Hint(preset, web, name), nil
+	return egress.DescribeFor(set, preset, egress.BuiltinRegistries(), asks, name) + " " + egress.Hint(preset, web, name), nil
 }

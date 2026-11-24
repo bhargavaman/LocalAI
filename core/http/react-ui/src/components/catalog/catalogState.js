@@ -99,9 +99,15 @@ export function classifyResponse(status, body) {
   if (status === 409 && type === 'stale') return { kind: 'stale', status, message, type }
   if (status === 409 && type === 'sharing_disabled') return { kind: 'sharing_disabled', status, message, type }
   if (status === 404 && type === 'not_selected') return { kind: 'not_selected', status, message, type }
+  // The owner does not know the operation: it is gone, or it was never this
+  // user's. This is not a refusal of the role.
+  if (status === 404 && type === 'operation_not_found') return { kind: 'operation_not_found', status, message, type }
   if (status === 503 && type === 'outcome_unknown') {
     return { kind: 'unknown_outcome', status, message, operationId: typeof err.operationId === 'string' ? err.operationId : '' }
   }
+  // The owner is up but did not answer in time (an upgrade runs on it). The
+  // page keeps what it shows and asks again; this is never "no add-ons".
+  if (status === 503 && type === 'owner_busy') return { kind: 'busy', status, message, type }
   return { kind: 'unavailable', status, message }
 }
 
@@ -154,12 +160,25 @@ export function validateSourceDraft(draft = {}) {
     const pattern = String(draft.identityRegex || '').trim()
     if (!exact && !pattern) errors.identity = 'required'
     else if (exact && pattern) errors.identityRegex = 'either'
+    // The repository the signature was made for, compared exactly with the
+    // signing certificate. The server applies the same https rule.
+    const repo = String(draft.sourceRepository || '').trim()
+    if (repo && !httpsAddress(repo)) errors.sourceRepository = 'sourceRepository'
   }
   return errors
 }
 
 // The wire form of a library. The editor sends a reference by name and never a
 // secret; a field the owner did not configure is dropped here.
+function httpsAddress(value) {
+  try {
+    const u = new URL(value)
+    return u.protocol === 'https:' && Boolean(u.host)
+  } catch {
+    return false
+  }
+}
+
 export function draftToSource(draft) {
   const source = {
     id: draft.id,
@@ -174,6 +193,8 @@ export function draftToSource(draft) {
     const pattern = String(draft.identityRegex || '').trim()
     if (exact) source.policy.identity = exact
     if (pattern) source.policy.identityRegex = pattern
+    const repo = String(draft.sourceRepository || '').trim()
+    if (repo) source.policy.sourceRepository = repo
   }
   const ref = String(draft.authReference || '').trim()
   if (ref) source.authReference = ref
@@ -194,6 +215,7 @@ export function sourceToDraft(source = {}) {
     issuer: source.policy?.issuer || '',
     identity: source.policy?.identity || '',
     identityRegex: source.policy?.identityRegex || '',
+    sourceRepository: source.policy?.sourceRepository || '',
     authReference: source.authReference || '',
     allowLoopbackHTTP: Boolean(source.allowLoopbackHTTP),
     mirrors: (source.mirrors || []).join('\n'),

@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"sync"
+	"time"
 
 	"github.com/mudler/LocalAI/core/config"
 	. "github.com/onsi/ginkgo/v2"
@@ -14,10 +15,13 @@ var _ = Describe("chats limits read while settings are applied", func() {
 	It("does not race", func() {
 		o := &config.ApplicationConfig{}
 		days, runs, perChat, perUser, daily := 10, 5, 2, 3, 4
-		interval := "2m"
+		interval, runLimit := "2m", "20m"
+		perUserTrig, maxCap, scriptChecks := 7, 100, 900
 		rs := &config.RuntimeSettings{
 			ChatsEgressAuditDays: &days, ChatsLoopMaxRuns: &runs, ChatsLoopMaxPerChat: &perChat,
 			ChatsLoopMaxPerUser: &perUser, ChatsLoopDailyRuns: &daily, ChatsLoopMinInterval: &interval,
+			ChatsTriggerRunLimit: &runLimit, ChatsTriggerMaxPerUser: &perUserTrig, ChatsTriggerMaxDailyCap: &maxCap,
+			ChatsLoopDailyScriptChecks: &scriptChecks,
 		}
 		var wg sync.WaitGroup
 		stop := make(chan struct{})
@@ -37,6 +41,10 @@ var _ = Describe("chats limits read while settings are applied", func() {
 					_ = o.EffectiveChatsLoopMaxPerChat()
 					_ = o.EffectiveChatsLoopMaxPerUser()
 					_ = o.EffectiveChatsLoopDailyRuns()
+					_ = o.EffectiveChatsLoopDailyScriptChecks()
+					_ = o.EffectiveChatsTriggerRunLimit()
+					_ = o.EffectiveChatsTriggerMaxPerUser()
+					_ = o.EffectiveChatsTriggerMaxDailyCap()
 				}
 			}()
 		}
@@ -47,5 +55,9 @@ var _ = Describe("chats limits read while settings are applied", func() {
 		wg.Wait()
 		Expect(o.EffectiveChatsEgressAuditDays()).To(Equal(10))
 		Expect(o.EffectiveChatsLoopMaxRuns()).To(Equal(5))
+		Expect(o.EffectiveChatsLoopDailyScriptChecks()).To(Equal(900))
+		Expect(o.EffectiveChatsTriggerRunLimit()).To(Equal(20 * time.Minute))
+		Expect(o.EffectiveChatsTriggerMaxPerUser()).To(Equal(7))
+		Expect(o.EffectiveChatsTriggerMaxDailyCap()).To(Equal(100))
 	})
 })

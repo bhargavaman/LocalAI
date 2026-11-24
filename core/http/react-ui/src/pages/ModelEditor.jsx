@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, useOutletContext, useSearchParams, useLocation } from 'react-router-dom'
 import YAML from 'yaml'
+import { isUnsetContextSize } from '../utils/contextDefaults'
 import { modelsApi } from '../utils/api'
 import { waitForImportJob as waitForJob } from '../utils/importJob'
 import { apiUrl } from '../utils/basePath'
@@ -19,6 +20,7 @@ import PlacementSection from '../components/models/placement/PlacementSection'
 import MODEL_TEMPLATES from '../utils/modelTemplates'
 import { useTranslation } from 'react-i18next'
 import Icon from '../components/Icon'
+import { Button, EmptyState } from '../components/ui'
 
 const SECTION_ICONS = {
   general: 'settings', llm: 'cpu', parameters: 'sliders',
@@ -183,7 +185,7 @@ export default function ModelEditor() {
     const flat = flattenConfig(loadedConfig, leafPaths)
     // A key the Placement section set back to Auto is stored as null, which
     // means unset. It must not come back as a field with a value.
-    for (const key of ['gpu_layers', 'tensor_split', 'main_gpu']) {
+    for (const key of ['gpu_layers', 'tensor_split', 'main_gpu', 'options']) {
       if (flat[key] === null) delete flat[key]
     }
     setValues(flat)
@@ -320,7 +322,11 @@ export default function ModelEditor() {
     try {
       const patchFlat = {}
       for (const path of activeFieldPaths) {
-        if (path in values) patchFlat[path] = values[path]
+        if (!(path in values)) continue
+        // The LLM template starts context_size at 0, a placeholder. Saved as a
+        // value it would pin the window instead of letting the server size it.
+        if (path === 'context_size' && isCreateMode && isUnsetContextSize(values[path])) continue
+        patchFlat[path] = values[path]
       }
       if (!isCreateMode) {
         // Only a key the file had needs removing; one that was never there does not.
@@ -421,7 +427,9 @@ export default function ModelEditor() {
     if (!isCreateMode || tab !== 'yaml') return ''
     const patchFlat = {}
     for (const path of activeFieldPaths) {
-      if (path in values && values[path] !== '' && values[path] !== null) patchFlat[path] = values[path]
+      if (!(path in values) || values[path] === '' || values[path] === null) continue
+      if (path === 'context_size' && isUnsetContextSize(values[path])) continue
+      patchFlat[path] = values[path]
     }
     try {
       return YAML.stringify(unflattenConfig(patchFlat))
@@ -497,7 +505,13 @@ export default function ModelEditor() {
   const showTemplateSelector = isCreateMode && !selectedTemplate
 
   if (loading) return <div className="page page--medium loading-center"><LoadingSpinner size="lg" /></div>
-  if (metaError) return <div className="page page--medium"><div className="empty-state"><p className="empty-state-text">Failed to load config metadata: {metaError}</p></div></div>
+  if (metaError) {
+    return (
+      <div className="page page--medium">
+        <EmptyState variant="unavailable" body={`Failed to load config metadata: ${metaError}`} />
+      </div>
+    )
+  }
 
   const backPage = isCreateMode && selectedTemplate ? t('actions.templates')
     : backState ? backState.fromLabel
@@ -517,29 +531,29 @@ export default function ModelEditor() {
           </p>
         </div>
         <div className="hstack">
-          <button className="btn btn-secondary" onClick={() => {
+          <Button icon="arrow-left" onClick={() => {
             if (isCreateMode && selectedTemplate) { setSelectedTemplate(null); setValues({}); setActiveFieldPaths(new Set()) }
             else if (backState) navigate(backState.from)
             else navigate(isCreateMode ? '/app/models' : '/app/models?view=installed')
           }}>
-            <Icon name="arrow-left" /> {t('actions.backTo', {page: backPage})}
-          </button>
+            {t('actions.backTo', {page: backPage})}
+          </Button>
           {/* Adding a model from a file or a Hugging Face repository is the
               import flow; it starts here as well as from the models list. */}
           {showTemplateSelector && (
-            <button className="btn btn-secondary" data-testid="add-model-import" onClick={() => navigate('/app/import-model')}>
-              <Icon name="upload" /> {tModels('actions.importModel')}
-            </button>
+            <Button icon="upload" data-testid="add-model-import" onClick={() => navigate('/app/import-model')}>
+              {tModels('actions.importModel')}
+            </Button>
           )}
           {!showTemplateSelector && tab === 'interactive' && (
-            <button className={`btn ${isDirty ? 'btn-primary' : 'btn-secondary'}`} onClick={handleInteractiveSave} disabled={saving || !isDirty}>
-              {saving ? <><LoadingSpinner size="sm" /> {t('actions.saving')}</> : <><Icon name="save" /> {isCreateMode ? t('actions.createModel') : (isDirty ? t('actions.saveChanges') : t('actions.saved'))}</>}
-            </button>
+            <Button variant={isDirty ? 'primary' : 'secondary'} icon="save" busy={saving} onClick={handleInteractiveSave} disabled={saving || !isDirty}>
+              {saving ? t('actions.saving') : (isCreateMode ? t('actions.createModel') : (isDirty ? t('actions.saveChanges') : t('actions.saved')))}
+            </Button>
           )}
           {!showTemplateSelector && tab === 'yaml' && (
-            <button className={`btn ${isDirty ? 'btn-primary' : 'btn-secondary'}`} onClick={handleYamlSave} disabled={saving || !isDirty}>
-              {saving ? <><LoadingSpinner size="sm" /> {t('actions.saving')}</> : <><Icon name="save" /> {isCreateMode ? t('actions.createModel') : (isDirty ? t('actions.saveChanges') : t('actions.saved'))}</>}
-            </button>
+            <Button variant={isDirty ? 'primary' : 'secondary'} icon="save" busy={saving} onClick={handleYamlSave} disabled={saving || !isDirty}>
+              {saving ? t('actions.saving') : (isCreateMode ? t('actions.createModel') : (isDirty ? t('actions.saveChanges') : t('actions.saved')))}
+            </Button>
           )}
         </div>
       </div>
@@ -578,9 +592,7 @@ export default function ModelEditor() {
             <div className="me-warn">
               <Icon name="warning" />
               <span>{t('actions.switchWarning')}</span>
-              <button
-                className="btn btn-secondary ml-auto pill-tiny"
-                onClick={() => {
+              <Button className="ml-auto" onClick={() => {
                   if (tab === 'yaml') {
                     setYamlText(savedYamlText)
                   } else {
@@ -590,10 +602,9 @@ export default function ModelEditor() {
                   }
                   setTabSwitchWarning(false)
                   setTab(tab === 'yaml' ? 'interactive' : 'yaml')
-                }}
-              >
+                }}>
                 {t('actions.discardAndSwitch')}
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -701,6 +712,8 @@ export default function ModelEditor() {
                         tensor_split: values['tensor_split'],
                         main_gpu: values['main_gpu'],
                         context_size: values['context_size'],
+                        options: values['options'],
+                        backend: values['backend'],
                       }}
                       onChange={handlePlacementChange}
                     />
@@ -711,11 +724,14 @@ export default function ModelEditor() {
               {activeSections.length === 0 && (
                 // .loading-center is a flex row, which set the icon, the title and
                 // the text side by side with no gap; this is a stacked empty state.
-                <div className="dk-empty" data-testid="editor-no-fields">
-                  <div className="dk-empty-icon"><Icon name="sliders" /></div>
-                  <h3 className="dk-empty-title">{t('forms.empty.title')}</h3>
-                  <p className="dk-empty-text">{t('forms.empty.text')}</p>
-                </div>
+                <EmptyState
+                  variant="first-run"
+                  icon="sliders"
+                  title={t('forms.empty.title')}
+                  level={3}
+                  body={t('forms.empty.text')}
+                  testId="editor-no-fields"
+                />
               )}
 
               {activeSections.map(s => {

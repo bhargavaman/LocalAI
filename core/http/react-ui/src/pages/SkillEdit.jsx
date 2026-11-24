@@ -5,7 +5,8 @@ import { useTranslation } from 'react-i18next'
 import { chatSkillsApi } from '../utils/api'
 import { useAuth } from '../context/AuthContext'
 // eslint-disable-next-line no-unused-vars
-import { Button, LoadError, Page, PageHeader, SkeletonRows } from '../components/ui'
+import { Button, Callout, LoadError, Page, PageHeader, SkeletonRows } from '../components/ui'
+import { estimateTokens } from '../utils/library'
 import Icon from '../components/Icon'
 import './library.css'
 import './agents.css'
@@ -23,22 +24,27 @@ export default function SkillEdit() {
   const { t } = useTranslation('skills')
   const { isAdmin } = useAuth()
   const isNew = !name
+  // A skill of a project lives in the project folder: the route names the
+  // project, and Save and Back return to the Skills tab of that project.
+  const projectId = search.get('project') || ''
+  const forProject = Boolean(projectId) && (isNew ? search.get('layer') === 'project' : layerParam === 'project')
+  const ref = forProject ? { project: projectId } : {}
+  const home = forProject ? `/app/projects/${encodeURIComponent(projectId)}?tab=skills` : '/app/skills'
 
   const [loading, setLoading] = useState(!isNew)
   const [loadError, setLoadError] = useState(null)
   const [attempt, setAttempt] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [activeSection, setActiveSection] = useState('basic')
   const [editable, setEditable] = useState(true)
   const [form, setForm] = useState({
-    layer: search.get('layer') === 'shared' && isAdmin ? 'shared' : 'personal',
+    layer: forProject ? 'project' : search.get('layer') === 'shared' && isAdmin ? 'shared' : 'personal',
     name: '', description: '', body: '',
   })
 
   useEffect(() => {
     if (isNew) return undefined
     let live = true
-    chatSkillsApi.get(layerParam, name)
+    chatSkillsApi.get(layerParam, name, ref)
       .then(d => {
         if (!live) return
         setForm({ layer: d.layer, name: d.name, description: d.description || '', body: d.body || '' })
@@ -48,25 +54,24 @@ export default function SkillEdit() {
       .catch(err => { if (live) setLoadError(err) })
       .finally(() => { if (live) setLoading(false) })
     return () => { live = false }
-  }, [isNew, layerParam, name, attempt])
+  }, [isNew, layerParam, name, attempt, projectId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!form.name.trim() || !form.description.trim()) {
       addToast(t('edit.required'), 'error')
-      setActiveSection('basic')
       return
     }
     setSaving(true)
     try {
       if (isNew) {
-        await chatSkillsApi.create({ layer: form.layer, name: form.name.trim(), description: form.description, body: form.body })
+        await chatSkillsApi.create({ layer: form.layer, ...(forProject ? { project: projectId } : {}), name: form.name.trim(), description: form.description, body: form.body })
         addToast(t('edit.created'), 'success')
       } else {
-        await chatSkillsApi.update(form.layer, form.name, { description: form.description, body: form.body })
+        await chatSkillsApi.update(form.layer, form.name, { description: form.description, body: form.body, ...(forProject ? { project: projectId } : {}) }, ref)
         addToast(t('edit.updated'), 'success')
       }
-      navigate('/app/skills')
+      navigate(home)
     } catch (err) {
       addToast(err.message || t('edit.saveFailed'), 'error')
     } finally {
@@ -74,7 +79,7 @@ export default function SkillEdit() {
     }
   }
 
-  const back = <Link className="ag-back" to="/app/skills"><Icon name="arrow-left" /> {t('edit.back')}</Link>
+  const back = <Link className="ag-back" to={home}><Icon name="arrow-left" /> {t('edit.back')}</Link>
 
   if (loading || loadError) {
     return (
@@ -89,10 +94,7 @@ export default function SkillEdit() {
     )
   }
 
-  const sections = [
-    { id: 'basic', label: t('edit.basic'), icon: 'info' },
-    { id: 'content', label: t('edit.content'), icon: 'file-text' },
-  ]
+  const nameBad = isNew && form.name !== '' && !new RegExp(`^${NAME_PATTERN}$`).test(form.name)
 
   return (
     <Page>
@@ -101,103 +103,89 @@ export default function SkillEdit() {
         <PageHeader title={isNew ? t('edit.titleNew') : t('edit.titleEdit', { name })} />
       </div>
 
-      <div className="card">
-        <div className="skilledit-layout">
-          <div className="skilledit-sidebar">
-            <ul className="skilledit-sidebar-nav">
-              {sections.map((s) => (
-                <li
-                  key={s.id}
-                  className={`skilledit-sidebar-item ${activeSection === s.id ? 'active' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={activeSection === s.id}
-                  onClick={() => setActiveSection(s.id)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveSection(s.id) } }}
-                >
-                  <Icon name={s.icon} /> {s.label}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="skilledit-form-area">
-            {!editable && <p className="lib-note lib-note--warn" role="note" data-testid="skill-readonly">{t('edit.readOnly')}</p>}
-            <form onSubmit={handleSubmit} noValidate>
-              <fieldset className="skilledit-set" disabled={!editable}>
-                <div hidden={activeSection !== 'basic'}>
-                  <h3 className="skilledit-section-title">{t('edit.basic')}</h3>
-                  {isNew && isAdmin && (
-                    <div className="skilledit-field">
-                      <label htmlFor="skill-layer">{t('edit.layer')}</label>
-                      <select id="skill-layer" className="input" value={form.layer} onChange={(e) => setForm((f) => ({ ...f, layer: e.target.value }))}>
-                        <option value="personal">{t('layers.personal')}</option>
-                        <option value="shared">{t('layers.shared')}</option>
-                      </select>
-                      <p className="help-text">{t('edit.layerHelp')}</p>
-                    </div>
-                  )}
-                  {!isNew && (
-                    <div className="skilledit-field">
-                      <label>{t('edit.layer')}</label>
-                      <p data-testid="skill-edit-layer">{t(`layers.${form.layer}`)}</p>
-                    </div>
-                  )}
-                  <div className="skilledit-field">
-                    <label htmlFor="skill-name">{t('edit.name')} <span className="required">*</span></label>
-                    <input
-                      id="skill-name"
-                      type="text"
-                      className="input"
-                      value={form.name}
-                      onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                      required
-                      pattern={NAME_PATTERN}
-                      disabled={!isNew}
-                      placeholder="my-skill"
-                    />
-                    {!isNew && <p className="help-text">{t('edit.nameLocked')}</p>}
-                  </div>
-                  <div className="skilledit-field">
-                    <label htmlFor="skill-desc">{t('edit.description')} <span className="required">*</span></label>
-                    <textarea
-                      id="skill-desc"
-                      className="input"
-                      value={form.description}
-                      onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                      required
-                      maxLength={1024}
-                      rows={2}
-                    />
-                    <p className="help-text">{t('edit.descriptionHelp')}</p>
-                  </div>
-                </div>
-
-                <div hidden={activeSection !== 'content'}>
-                  <h3 className="skilledit-section-title">{t('edit.content')}</h3>
-                  <div className="skilledit-field">
-                    <label htmlFor="skill-content">{t('edit.body')}</label>
-                    <textarea
-                      id="skill-content"
-                      className="input skilledit-body"
-                      value={form.body}
-                      onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
-                      rows={14}
-                    />
-                  </div>
-                </div>
-              </fieldset>
-
-              <div className="skilledit-form-actions">
-                <Button variant="ghost" onClick={() => navigate('/app/skills')}>{t('edit.cancel')}</Button>
-                {editable && (
-                  <Button type="submit" variant="primary" icon="save" busy={saving}>{isNew ? t('edit.create') : t('edit.save')}</Button>
-                )}
+      {!editable && <Callout tone="warn" testId="skill-readonly">{t('edit.readOnly')}</Callout>}
+      <form className="lib-edit" onSubmit={handleSubmit} noValidate>
+        <fieldset className="lib-edit__set" disabled={!editable}>
+          <section className="dk-card lib-edit__card">
+            <h2>{t('edit.basic')}</h2>
+            {isNew && isAdmin && !forProject && (
+              <div className="lib-edit__field">
+                <label className="dk-label" htmlFor="skill-layer">{t('edit.layer')}</label>
+                <span className="dk-select-wrap">
+                  <select id="skill-layer" className="dk-select" value={form.layer} onChange={(e) => setForm((f) => ({ ...f, layer: e.target.value }))}>
+                    <option value="personal">{t('layers.personal')}</option>
+                    <option value="shared">{t('layers.shared')}</option>
+                  </select>
+                </span>
+                <p className="lib-edit__hint">{t('edit.layerHelp')}</p>
               </div>
-            </form>
-          </div>
+            )}
+            {(!isNew || forProject) && (
+              <div className="lib-edit__field">
+                <span className="dk-label">{t('edit.layer')}</span>
+                <p className="lib-fine" data-testid="skill-edit-layer">{t(`layers.${form.layer}`)}</p>
+              </div>
+            )}
+            <div className="lib-edit__field">
+              <label className="dk-label" htmlFor="skill-name">{t('edit.name')} <span aria-hidden="true">*</span></label>
+              <input
+                id="skill-name"
+                type="text"
+                className="dk-input dk-input--mono"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                required
+                aria-invalid={nameBad || undefined}
+                aria-describedby="skill-name-hint"
+                pattern={NAME_PATTERN}
+                disabled={!isNew}
+                placeholder="my-skill"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p id="skill-name-hint" className={`lib-edit__hint${nameBad ? ' lib-edit__hint--error' : ''}`}>
+                {nameBad ? t('edit.nameInvalid') : (!isNew ? t('edit.nameLocked') : '')}
+              </p>
+            </div>
+            <div className="lib-edit__field">
+              <label className="dk-label" htmlFor="skill-desc">{t('edit.description')} <span aria-hidden="true">*</span></label>
+              <textarea
+                id="skill-desc"
+                className="dk-textarea"
+                value={form.description}
+                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                required
+                maxLength={1024}
+                rows={3}
+              />
+              <p className="lib-edit__hint"><span>{t('edit.descriptionHelp')}</span><span>{t('edit.counter', { count: form.description.length, max: 1024 })}</span></p>
+            </div>
+          </section>
+
+          <section className="dk-card lib-edit__card">
+            <h2>{t('edit.content')}</h2>
+            <div className="lib-edit__field">
+              <label className="dk-label" htmlFor="skill-content">{t('edit.body')}</label>
+              <textarea
+                id="skill-content"
+                className="dk-textarea lib-edit__body"
+                value={form.body}
+                onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
+                rows={16}
+                spellCheck={false}
+              />
+              <p className="lib-edit__hint"><span>{t('edit.bodyHelp')}</span><span>{t('pane.tokens', { count: estimateTokens(form.body) })}</span></p>
+            </div>
+          </section>
+        </fieldset>
+
+        <div className="lib-edit__bar">
+          <Button variant="ghost" onClick={() => navigate(home)}>{t('edit.cancel')}</Button>
+          {editable && (
+            <Button type="submit" variant="primary" icon="save" busy={saving}>{isNew ? t('edit.create') : t('edit.save')}</Button>
+          )}
         </div>
-      </div>
+      </form>
     </Page>
   )
 }

@@ -76,10 +76,22 @@ const (
 	// cleared, paused, resumed, reached or blocked, or it counted a turn.
 	// Text is the state ("" when cleared). Read the chat again.
 	KindGoal EventKind = "goal"
+	// KindDock says that the chat's dock changed: a page was opened in it,
+	// here, in another tab or by the assistant. Read the chat again.
+	KindDock EventKind = "dock"
+	// KindResync says that the stream cannot give what the client missed: the
+	// resume point is too old, of another run, or not known to this server.
+	// Read the transcript again. ID is the newest event the server knows of in
+	// this run, so the client can go on from there.
+	KindResync EventKind = "resync"
 )
 
 // Event is one thing that happened in a chat.
 type Event struct {
+	// ID names the event inside its run ("<run>.<n>", n from 1). The turn's
+	// owner sets it before the event reaches the bus, so every frontend sends
+	// the same id. Events that do not come from the turn have none.
+	ID     string `json:",omitempty"`
 	Kind   EventKind
 	Turn   int
 	Text   string       // text, reasoning: a delta; error: a fixed reason
@@ -97,6 +109,8 @@ type Event struct {
 	Model  string `json:",omitempty"`
 	Retry  int    `json:",omitempty"`
 	Detail string `json:",omitempty"`
+	// Backend names the backend of a model_backend_outdated failure.
+	Backend string `json:",omitempty"`
 	// Before and After are the size of the model's context in tokens, before
 	// and after a compaction (compacted only).
 	Before, After int

@@ -31,7 +31,7 @@ var _ = Describe("conversion of the old data at start", func() {
 		Expect(err).NotTo(HaveOccurred())
 		opts := append([]config.AppOption{}, extra...)
 		app, err := New(append(opts, config.WithContext(ctx), config.WithSystemState(sys), config.DisableMetricsEndpoint,
-			config.WithDisableLocalAIAssistant(true), config.WithDisableStats(true), config.WithDataPath(data),
+			config.WithDisableStats(true), config.WithDataPath(data),
 			config.WithCollectionsStateDir(state), config.WithAuthEnabled(true), config.WithAuthDatabaseURL(dbFile),
 			config.WithAuthAPIKeyHMACSecret("convert-test-secret"))...)
 		Expect(err).NotTo(HaveOccurred())
@@ -44,7 +44,7 @@ var _ = Describe("conversion of the old data at start", func() {
 	}
 
 	inbox := func(app *Application, user string) int {
-		list, err := app.StudioService().Notifications(context.Background(), user, false, 50)
+		list, err := app.Notifier().List(context.Background(), user, false, 50)
 		Expect(err).NotTo(HaveOccurred())
 		return len(list)
 	}

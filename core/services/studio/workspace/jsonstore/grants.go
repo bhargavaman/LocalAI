@@ -2,6 +2,7 @@ package jsonstore
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 
@@ -13,22 +14,50 @@ func (s *Store) setGrant(rec grantRec) error {
 	if err := s.persist(record{Grants: []grantRec{rec}}); err != nil {
 		return err
 	}
-	k := grantKey{rec.Principal, rec.Node}
-	if rec.Mode == workspace.ModeNone {
-		delete(s.d.grants, k)
-	} else {
-		s.d.grants[k] = rec.Mode
-	}
+	s.d.putGrant(rec)
 	s.maybeCompact()
 	return nil
 }
 
-// Grant gives principal mode m on the folder p and everything below it.
+// Grant gives principal mode m (read, data or write) on the folder p and
+// everything below it. A grant that carried the page mark loses it.
 func (s *Store) Grant(ctx context.Context, admin workspace.Actor, principal, p string, m workspace.Mode) error {
+	return s.grant(ctx, admin, principal, p, m, false)
+}
+
+// GrantPage is Grant with the page mark: the grant was made through the page
+// routes by the person who owns the page.
+func (s *Store) GrantPage(ctx context.Context, admin workspace.Actor, principal, p string, m workspace.Mode) error {
+	return s.grant(ctx, admin, principal, p, m, true)
+}
+
+// PageShared reports whether the actor, or one of its groups, holds a grant
+// with the page mark on the live folder p itself.
+func (s *Store) PageShared(ctx context.Context, a workspace.Actor, p string) (bool, error) {
+	found := false
+	err := s.readLocked(ctx, func(d *data) error {
+		n, err := d.lookupPath(p)
+		if err != nil {
+			return err
+		}
+		for _, who := range a.Principals() {
+			if d.pages[grantKey{who, n.ID}] {
+				found = true
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, workspace.ErrNotFound) {
+		return false, nil
+	}
+	return found, err
+}
+
+func (s *Store) grant(ctx context.Context, admin workspace.Actor, principal, p string, m workspace.Mode, page bool) error {
 	if !s.isAdmin(admin) {
 		return workspace.ErrNotAdmin
 	}
-	if principal == "" || (m != workspace.ModeRead && m != workspace.ModeWrite) {
+	if principal == "" || workspace.StoredMode(m) == 0 {
 		return workspace.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -43,7 +72,7 @@ func (s *Store) Grant(ctx context.Context, admin workspace.Actor, principal, p s
 	if n.Kind != workspace.KindDir {
 		return workspace.ErrInvalid
 	}
-	return s.setGrant(grantRec{Principal: principal, Node: n.ID, Mode: m})
+	return s.setGrant(grantRec{Principal: principal, Node: n.ID, Mode: workspace.StoredMode(m), Page: page})
 }
 
 // Revoke removes the grant of principal on p. A missing grant is not an error.
@@ -63,7 +92,7 @@ func (s *Store) Revoke(ctx context.Context, admin workspace.Actor, principal, p 
 	if _, ok := s.d.grants[grantKey{principal, n.ID}]; !ok {
 		return nil
 	}
-	return s.setGrant(grantRec{Principal: principal, Node: n.ID, Mode: workspace.ModeNone})
+	return s.setGrant(grantRec{Principal: principal, Node: n.ID})
 }
 
 // View checks each request against the actor's grants. A mount gets at most
@@ -181,7 +210,7 @@ func (s *Store) Grants(ctx context.Context, admin workspace.Actor, p string) ([]
 		}
 		for k, m := range d.grants {
 			if k.Node == n.ID && m >= workspace.ModeRead {
-				out = append(out, workspace.Grant{Principal: k.Principal, Mode: m})
+				out = append(out, workspace.Grant{Principal: k.Principal, Mode: m, Page: d.pages[k]})
 			}
 		}
 		return nil
@@ -190,5 +219,45 @@ func (s *Store) Grants(ctx context.Context, admin workspace.Actor, p string) ([]
 		return nil, err
 	}
 	slices.SortFunc(out, func(a, b workspace.Grant) int { return strings.Compare(a.Principal, b.Principal) })
+	return out, nil
+}
+
+// GrantsBelow returns the grants on the live folders strictly below the live
+// folder p, sorted by path and principal.
+func (s *Store) GrantsBelow(ctx context.Context, admin workspace.Actor, p string) ([]workspace.NodeGrant, error) {
+	if !s.isAdmin(admin) {
+		return nil, workspace.ErrNotAdmin
+	}
+	var out []workspace.NodeGrant
+	err := s.readLocked(ctx, func(d *data) error {
+		top, err := d.lookupPath(p)
+		if err != nil {
+			return err
+		}
+		for k, m := range d.grants {
+			if k.Node == top.ID || m < workspace.ModeRead || !d.isLive(k.Node) {
+				continue
+			}
+			n, err := d.get(k.Node)
+			if err != nil || n.Kind != workspace.KindDir {
+				continue
+			}
+			np := d.pathOf(k.Node)
+			if !workspace.Within(np, d.pathOf(top.ID)) {
+				continue
+			}
+			out = append(out, workspace.NodeGrant{NodeID: k.Node, Path: np, Grant: workspace.Grant{Principal: k.Principal, Mode: m, Page: d.pages[k]}})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b workspace.NodeGrant) int {
+		if c := strings.Compare(a.Path, b.Path); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Principal, b.Principal)
+	})
 	return out, nil
 }

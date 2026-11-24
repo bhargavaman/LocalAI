@@ -2,6 +2,7 @@ package studio
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -38,14 +39,27 @@ const costRuns = 10
 
 func triggerOut(ctx context.Context, host *studiosvc.Triggers, t triggers.Trigger, withLast bool) schema.ChatsTrigger {
 	out := schema.ChatsTrigger{ID: t.ID, Name: t.Name, Prompt: t.Prompt, Kind: string(t.Kind), Schedule: t.Schedule, TimeZone: t.TZ,
-		Folder: host.RelFolder(t), QuietSeconds: int(t.Quiet / time.Second), DailyCap: t.CapOrDefault(), Enabled: t.Enabled,
+		Folder: host.RelFolder(t), QuietSeconds: int(t.Quiet / time.Second), DailyCap: host.DailyCapOf(t), RunLimit: runLimitOut(t.RunLimit), EffectiveRunLimit: host.RunLimitText(t), Enabled: t.Enabled,
 		AgentID: t.AgentID, Model: t.Model, SourceChatID: t.SourceChatID, Summary: host.Summary(t),
 		Plan: schema.ChatsTriggerPlan{Reads: t.Reads, Writes: t.Writes, Widget: t.Widget},
 		Cost: schema.ChatsTriggerCost{EstimatedTokens: t.EstTokens, MaxRunsPerDay: host.MaxRunsPerDay(t), Remote: host.RemoteModel(t.Model)},
 		Acts: t.Acts}
 	av := host.ActsView(ctx, t)
 	out.ActsHeld, out.ReadOnly, out.ReadOnlyWhy = av.Held, av.ReadOnly, av.Why
-	if t.Kind == triggers.KindFile {
+	if t.Route.Auto {
+		out.Binding = t.Route.Binding
+	}
+	d := host.DeliveryOf(ctx, t)
+	out.Delivery = schema.ChatsTriggerDelivery{Target: d.Target, ChannelLabel: d.ChannelLabel, ConnectionName: d.ConnectionName, InThread: d.InThread, Mode: d.Mode,
+		ChannelRef: d.ChannelRef, ChatRef: d.ChatRef, ConnectionID: d.ConnectionID, ConnectionKind: d.ConnectionKind,
+		ConnectionKindTitle: d.ConnectionKindTitle, ConnectionAddon: d.ConnectionAddon, State: d.State}
+	if t.Kind == triggers.KindEvent {
+		out.Source, out.EventType, out.Matches = t.Source, t.EventType, t.Matches
+		if !t.Proposed {
+			out.HookPath = hookPath(t.ID)
+		}
+	}
+	if t.Kind == triggers.KindFile || t.Kind == triggers.KindEvent {
 		out.MinGapSeconds = int(t.GapOrDefault() / time.Second)
 	}
 	if next, ok := host.NextRun(t); ok {
@@ -73,10 +87,19 @@ func triggerOut(ctx context.Context, host *studiosvc.Triggers, t triggers.Trigge
 	return out
 }
 
-func triggerIn(req schema.ChatsTriggerWrite) studiosvc.TriggerInput {
+// hookPath is the path of the public hook of an event trigger, as the router
+// registers it. The page adds the address of the server.
+func hookPath(id string) string { return "/api/chats/triggers/" + id + "/hook" }
+
+func triggerIn(req schema.ChatsTriggerWrite) (studiosvc.TriggerInput, error) {
+	runLimit, err := studiosvc.ParseRunLimit(req.RunLimit)
+	if err != nil {
+		return studiosvc.TriggerInput{}, fmt.Errorf("%w: %v", studiosvc.ErrBadTrigger, err)
+	}
 	in := studiosvc.TriggerInput{Name: req.Name, Prompt: req.Prompt, Kind: triggers.Kind(req.Kind), Schedule: req.Schedule, TZ: req.TimeZone,
-		Folder: req.Folder, Quiet: time.Duration(req.QuietSeconds) * time.Second, DailyCap: req.DailyCap,
-		AgentID: req.AgentID, Model: req.Model, SourceChatID: req.SourceChatID, Enabled: req.Enabled}
+		Folder: req.Folder, Quiet: time.Duration(req.QuietSeconds) * time.Second, DailyCap: req.DailyCap, RunLimit: runLimit,
+		AgentID: req.AgentID, Model: req.Model, SourceChatID: req.SourceChatID, Enabled: req.Enabled,
+		Source: req.Source, EventType: req.EventType, Matches: req.Matches}
 	in.MinGap, in.EstTokens = time.Duration(req.MinGapSeconds)*time.Second, req.EstimatedTokens
 	if req.Acts != nil {
 		in.Acts = req.Acts
@@ -84,7 +107,7 @@ func triggerIn(req schema.ChatsTriggerWrite) studiosvc.TriggerInput {
 	if req.Plan != nil {
 		in.Reads, in.Writes, in.Widget = req.Plan.Reads, req.Plan.Writes, req.Plan.Widget
 	}
-	return in
+	return in, nil
 }
 
 var triggerRules = []errRule{
@@ -125,10 +148,10 @@ func (h *Handlers) ListTriggers(c echo.Context) error {
 
 // CreateTrigger creates a trigger.
 // @Summary Create a trigger.
-// @Description kind is schedule (schedule: "daily 08:00", "weekdays 09:30", "weekly mon,thu 09:30", "monthly 15 08:00", "once 2026-12-24 18:00" or five cron fields; time_zone: an IANA name) or file (folder: a path inside your files). It runs nothing for the time before it was saved. At most 50 triggers.
+// @Description kind is schedule (schedule: "daily 08:00", "weekdays 09:30", "weekly mon,thu 09:30", "monthly 15 08:00", "once 2026-12-24 18:00" or five cron fields; time_zone: an IANA name), file (folder: a path inside your files) or event (source: the sender name; event_type and matches narrow the events it takes). It runs nothing for the time before it was saved. At most 50 triggers. The response to an event trigger has secret, the key that signs its events: it is shown here and when you rotate it, and never again. hook_path is where the events go.
 // @Tags chats
 // @Param request body schema.ChatsTriggerWrite true "the trigger"
-// @Success 201 {object} schema.ChatsTrigger "The trigger"
+// @Success 201 {object} schema.ChatsTriggerCreated "The trigger, with its secret when it is an event trigger"
 // @Failure 400 {object} schema.ErrorResponse "The request is not valid"
 // @Router /api/chats/triggers [post]
 func (h *Handlers) CreateTrigger(c echo.Context) error {
@@ -140,11 +163,41 @@ func (h *Handlers) CreateTrigger(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return fail(c, http.StatusBadRequest, "invalid_request_error", "the body is not valid JSON")
 	}
-	t, err := host.CreateTrigger(c.Request().Context(), userID(c), triggerIn(req))
+	in, err := triggerIn(req)
 	if err != nil {
 		return failTrigger(c, err)
 	}
-	return c.JSON(http.StatusCreated, triggerOut(c.Request().Context(), host, t, false))
+	t, err := host.CreateTrigger(c.Request().Context(), userID(c), in)
+	if err != nil {
+		return failTrigger(c, err)
+	}
+	if t.Secret != "" {
+		c.Response().Header().Set("Cache-Control", "no-store")
+	}
+	out := schema.ChatsTriggerCreated{ChatsTrigger: triggerOut(c.Request().Context(), host, t, false), Secret: t.Secret}
+	return c.JSON(http.StatusCreated, out)
+}
+
+// RotateTriggerSecret makes a new secret for an event trigger.
+// @Summary Make a new secret for an event trigger.
+// @Description Returns the new secret once. The old secret stops working at once, so update the sender before the next event. 400 when the trigger is not an event trigger.
+// @Tags chats
+// @Param id path string true "the trigger's id"
+// @Success 200 {object} schema.ChatsTriggerSecret "The new secret"
+// @Failure 400 {object} schema.ErrorResponse "The trigger is not an event trigger"
+// @Failure 404 {object} schema.ErrorResponse "No such trigger"
+// @Router /api/chats/triggers/{id}/secret [post]
+func (h *Handlers) RotateTriggerSecret(c echo.Context) error {
+	host, ok := h.triggerHost(c)
+	if !ok {
+		return nil
+	}
+	secret, err := host.RotateSecret(c.Request().Context(), userID(c), c.Param("id"))
+	if err != nil {
+		return failTrigger(c, err)
+	}
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.JSON(http.StatusOK, schema.ChatsTriggerSecret{Secret: secret})
 }
 
 // GetTrigger reads a trigger.
@@ -183,7 +236,11 @@ func (h *Handlers) UpdateTrigger(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return fail(c, http.StatusBadRequest, "invalid_request_error", "the body is not valid JSON")
 	}
-	t, err := host.UpdateTrigger(c.Request().Context(), userID(c), c.Param("id"), triggerIn(req))
+	in, err := triggerIn(req)
+	if err != nil {
+		return failTrigger(c, err)
+	}
+	t, err := host.UpdateTrigger(c.Request().Context(), userID(c), c.Param("id"), in)
 	if err != nil {
 		return failTrigger(c, err)
 	}
@@ -333,11 +390,11 @@ func (h *Handlers) ListTriggerProposals(c echo.Context) error {
 
 // ConfirmTriggerProposal confirms a proposal.
 // @Summary Confirm a trigger proposal.
-// @Description Turns the proposal into a trigger that is on. time_zone is used when the proposal names none.
+// @Description Turns the proposal into a trigger that is on. time_zone is used when the proposal names none. For an event trigger the response has secret, the key that signs its events: it is shown here and when you rotate it, and never again; hook_path is where the events go.
 // @Tags chats
 // @Param id path string true "the proposal's id"
 // @Param request body schema.ChatsTriggerConfirm false "the time zone of the person confirming"
-// @Success 200 {object} schema.ChatsTrigger "The trigger"
+// @Success 200 {object} schema.ChatsTriggerCreated "The trigger, with its secret when it is an event trigger"
 // @Router /api/chats/triggers/proposals/{id}/confirm [post]
 func (h *Handlers) ConfirmTriggerProposal(c echo.Context) error {
 	host, ok := h.triggerHost(c)
@@ -350,7 +407,10 @@ func (h *Handlers) ConfirmTriggerProposal(c echo.Context) error {
 	if err != nil {
 		return failTrigger(c, err)
 	}
-	return c.JSON(http.StatusOK, triggerOut(c.Request().Context(), host, t, true))
+	if t.Secret != "" {
+		c.Response().Header().Set("Cache-Control", "no-store")
+	}
+	return c.JSON(http.StatusOK, schema.ChatsTriggerCreated{ChatsTrigger: triggerOut(c.Request().Context(), host, t, true), Secret: t.Secret})
 }
 
 // EditTriggerProposal changes a proposal.
@@ -370,7 +430,11 @@ func (h *Handlers) EditTriggerProposal(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return fail(c, http.StatusBadRequest, "invalid_request_error", "the body is not valid JSON")
 	}
-	t, err := host.EditProposal(c.Request().Context(), userID(c), c.Param("id"), triggerIn(req))
+	in, err := triggerIn(req)
+	if err != nil {
+		return failTrigger(c, err)
+	}
+	t, err := host.EditProposal(c.Request().Context(), userID(c), c.Param("id"), in)
 	if err != nil {
 		return failTrigger(c, err)
 	}
@@ -545,4 +609,12 @@ func (h *Handlers) UndoTriggerChange(c echo.Context) error {
 		return failTrigger(c, err)
 	}
 	return h.GetTriggerChange(c)
+}
+
+// runLimitOut is a run limit as the text of the API: empty for the default.
+func runLimitOut(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return triggers.ShortDuration(d)
 }

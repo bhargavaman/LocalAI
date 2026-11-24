@@ -39,7 +39,7 @@ var _ = Describe("API Instructions Endpoints", func() {
 
 			instructions, ok := resp["instructions"].([]any)
 			Expect(ok).To(BeTrue())
-			Expect(instructions).To(HaveLen(31))
+			Expect(instructions).To(HaveLen(35))
 
 			// Verify each instruction has required fields and correct URL format
 			seen := map[string]bool{}
@@ -74,6 +74,7 @@ var _ = Describe("API Instructions Endpoints", func() {
 			Expect(names).To(ContainElements(
 				"addons",
 				"chats",
+				"notifications",
 				"workspace",
 				"pages",
 				"library-sources",
@@ -91,10 +92,13 @@ var _ = Describe("API Instructions Endpoints", func() {
 				"voice-library",
 				"3d",
 				"failover",
+				"remotes",
+				"p2p",
 				"decisions",
 				"motion",
 				"agent-jobs",
 				"collections",
+				"sharing",
 			))
 		})
 	})
@@ -127,6 +131,34 @@ var _ = Describe("API Instructions Endpoints", func() {
 			Expect(md).To(HavePrefix("# chat-inference"))
 			// Should contain at least one endpoint heading
 			Expect(md).To(MatchRegexp(`## (GET|POST|PUT|PATCH|DELETE) /`))
+		})
+
+		It("describes sharing a saved agent in the sharing and the chats instructions", func() {
+			for _, name := range []string{"sharing", "chats"} {
+				req := httptest.NewRequest(http.MethodGet, "/api/instructions/"+name, nil)
+				rec := httptest.NewRecorder()
+				app.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+				body, _ := io.ReadAll(rec.Body)
+				for _, want := range []string{"POST /api/chats/agents/{id}/share", "GET /api/chats/agents/{id}/references", "GET /api/chats/agents/{id}/needs"} {
+					Expect(string(body)).To(ContainSubstring(want), name)
+				}
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/instructions/sharing", nil)
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			body, _ := io.ReadAll(rec.Body)
+			Expect(string(body)).To(ContainSubstring("agent, a saved agent"))
+		})
+
+		It("describes the background jobs of a chat and their stop route", func() {
+			req := httptest.NewRequest(http.MethodGet, "/api/instructions/chats", nil)
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			body, _ := io.ReadAll(rec.Body)
+			Expect(string(body)).To(ContainSubstring("GET .../{id}/loops and GET /api/chats/{id} also give jobs"))
+			Expect(string(body)).To(ContainSubstring("POST /api/chats/{id}/jobs/{job}/kill"))
 		})
 
 		It("should include intro text for instructions that have one", func() {

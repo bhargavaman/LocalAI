@@ -91,7 +91,7 @@ test('an API key made on the account page works for the API and stops working wh
   const panel = page.getByTestId('api-keys-panel')
   await expect(panel).toBeVisible()
   await panel.getByPlaceholder('Key name (e.g. my-app)').fill('spec key')
-  await panel.getByRole('button', { name: 'Create', exact: true }).click()
+  await panel.getByRole('button', { name: 'New API key', exact: true }).click()
   const secret = (await panel.locator('code').first().innerText()).trim()
   const auth = { Authorization: `Bearer ${secret}` }
   const ok = await request.get(`${server.url}/api/chats`, { headers: auth })
@@ -135,16 +135,16 @@ test('a user whose chats feature is off loses All chats, the recent chats, the F
   await context.close()
 })
 
-test('a user whose collections feature is off cannot open Memory or call the collections API', async ({ browser, request }) => {
+test('a user whose collections feature is off cannot open Knowledge or call the collections API', async ({ browser, request }) => {
   await setPerms(request, { collections: false })
   const { context, page } = await carolPage(browser)
   expect([403, 404]).toContain((await page.request.get(`${server.url}/api/collections`)).status())
   await page.goto(`${server.url}/app/collections`)
-  await expect(page.getByRole('heading', { name: 'Memory' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Knowledge' })).toHaveCount(0)
   // The same page opens once the feature is back, so the absence above is the permission.
   await setPerms(request, { collections: true })
   await page.goto(`${server.url}/app/collections`)
-  await expect(page.getByRole('heading', { name: 'Memory' }).first()).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Knowledge' }).first()).toBeVisible()
   await context.close()
 })
 

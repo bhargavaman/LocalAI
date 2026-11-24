@@ -78,7 +78,25 @@ func CreateAPIKey(db *gorm.DB, userID, name, role, hmacSecret string, expiresAt 
 // ValidateAPIKey looks up an API key by hashing the plaintext and searching
 // the database. Returns the key record if found, or an error.
 // Updates LastUsed on successful validation.
+//
+// A client key is refused here: it is not a stand-in for its owner, so the
+// callers that turn a key into a user session or a user identity never accept
+// it. Request authentication uses ValidateCredentialKey, which does.
 func ValidateAPIKey(db *gorm.DB, plaintext, hmacSecret string) (*UserAPIKey, error) {
+	key, err := ValidateCredentialKey(db, plaintext, hmacSecret)
+	if err != nil {
+		return nil, err
+	}
+	if key.IsClientKey() {
+		return nil, fmt.Errorf("invalid API key")
+	}
+	return key, nil
+}
+
+// ValidateCredentialKey validates a key of any kind, including a client key.
+// Only the request middleware should call it, and it must then apply the
+// client allow-list (see RequireRouteFeature).
+func ValidateCredentialKey(db *gorm.DB, plaintext, hmacSecret string) (*UserAPIKey, error) {
 	hash := HashAPIKey(plaintext, hmacSecret)
 
 	var key UserAPIKey
@@ -86,17 +104,9 @@ func ValidateAPIKey(db *gorm.DB, plaintext, hmacSecret string) (*UserAPIKey, err
 		return nil, fmt.Errorf("invalid API key")
 	}
 
-	if key.ExpiresAt != nil && time.Now().After(*key.ExpiresAt) {
-		return nil, fmt.Errorf("API key expired")
-	}
-
-	if key.User.Status != StatusActive {
-		return nil, fmt.Errorf("user account is not active")
-	}
-
 	now := time.Now()
-	if key.IsPaused(now) {
-		return nil, fmt.Errorf("API key is paused")
+	if err := key.CheckUsable(now); err != nil {
+		return nil, err
 	}
 
 	// Update LastUsed
@@ -105,13 +115,35 @@ func ValidateAPIKey(db *gorm.DB, plaintext, hmacSecret string) (*UserAPIKey, err
 	return &key, nil
 }
 
-// ListAPIKeys returns all API keys for the given user (without plaintext).
+// ListAPIKeys returns the user keys of the given user (without plaintext).
+// Client keys are listed by ListClientKeys.
 func ListAPIKeys(db *gorm.DB, userID string) ([]UserAPIKey, error) {
 	var keys []UserAPIKey
-	if err := db.Where("user_id = ?", userID).Order("created_at DESC").Find(&keys).Error; err != nil {
+	if err := db.Where("user_id = ? AND (kind IS NULL OR kind <> ?)", userID, KeyKindClient).Order("created_at DESC").Find(&keys).Error; err != nil {
 		return nil, err
 	}
 	return keys, nil
+}
+
+// CountAPIKeysByUser returns how many user keys each person holds, by user
+// id, in one query. Client keys are not counted: the list a person sees does
+// not hold them either. It returns counts only, never a key or its name.
+func CountAPIKeysByUser(db *gorm.DB) (map[string]int64, error) {
+	var rows []struct {
+		UserID string
+		N      int64
+	}
+	if err := db.Model(&UserAPIKey{}).
+		Select("user_id, COUNT(*) AS n").
+		Where("kind IS NULL OR kind <> ?", KeyKindClient).
+		Group("user_id").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		out[r.UserID] = r.N
+	}
+	return out, nil
 }
 
 // RevokeAPIKey deletes an API key. Only the owner can revoke their own key.

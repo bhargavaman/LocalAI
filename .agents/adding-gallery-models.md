@@ -4,7 +4,7 @@ When adding a GGUF model from HuggingFace to the LocalAI model gallery, follow t
 
 ## Gallery file
 
-The source of the models is the library file, `gallery/models/index.yaml`. Edit it there, in the library entry shape (header plus a `model:` body; see `docs/content/features/model-gallery.md`). `gallery/index.yaml` is a generated copy for releases before the cutover and is never edited by hand: after an edit run `go run ./scripts/models/cmd/modelcatalog --library gallery/models/index.yaml --out gallery/index.yaml` and commit both files. CI fails when the copy differs. The examples below use the gallery field names (`files`, `overrides`, `config_file`); in the library they sit under `model:`, with `config_file` written as `configFile`.
+The source of the models is the library file, `gallery/models/index.yaml`. Edit it there, in the library entry shape (header plus a `model:` body; see `docs/content/models/_index.md`). `gallery/index.yaml` is a generated copy for releases before the cutover and is never edited by hand: after an edit run `go run ./scripts/models/cmd/modelcatalog --library gallery/models/index.yaml --out gallery/index.yaml` and commit both files. CI fails when the copy differs. The examples below use the gallery field names (`files`, `overrides`, `config_file`); in the library they sit under `model:`, with `config_file` written as `configFile`.
 
 Find the appropriate section (embedding models near other embeddings, chat models near similar chat models) and add a new entry.
 
@@ -160,7 +160,7 @@ Rules:
 
 Users can override the automatic choice with `variant` on `POST /models/apply`,
 `local-ai models install --variant`, or the `install_model` MCP tool. See
-`docs/content/features/model-gallery.md`.
+`docs/content/models/_index.md`.
 
 The gallery lint specs live in `core/gallery`, so run that suite after adding a
 `variants` list.
@@ -175,9 +175,18 @@ backend uses:
 
 | Backend | Configures the feature when it declares |
 |---------|------------------------------------------|
-| `llama-cpp` | `overrides.options` contains `spec_type:draft-dflash` or `spec_type:draft-mtp` |
+| `llama-cpp` | `overrides.options` contains `spec_type:draft-dflash`, `spec_type:draft-dspark` or `spec_type:draft-mtp` |
 | `ds4` | `overrides.options` contains `mtp_path:` / `mtp_draft:` |
 | `sglang` | the referenced `gallery/*.yaml` sets `speculative_algorithm:` |
+
+`draft-dspark` entries are tagged `dflash`: DSpark is a DFlash-family drafter
+(a DFlash backbone with a Markov head, see llama.cpp `docs/speculative.md`), so
+it is the same feature for ranking. The importer writes `draft_model`,
+`spec_type:draft-dspark` and `spec_n_max:3` when a repository ships a `dspark-`
+drafter; tag the gallery entry made from that import `dflash`. A `dspark-`,
+`dflash-`, `eagle3-` or `mtp-` GGUF is a drafter, never the entry's main model
+(llama.cpp's own sidecar keywords), so it goes in `overrides.draft_model`, not
+in `overrides.parameters.model`.
 
 That check is curation-time only. `spec_type` is llama.cpp's config vocabulary,
 and a cross-backend ranking decision must not depend on one backend's option

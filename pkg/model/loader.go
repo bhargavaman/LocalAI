@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mudler/LocalAI/pkg/diagnostics"
+	grpc "github.com/mudler/LocalAI/pkg/grpc"
 	pb "github.com/mudler/LocalAI/pkg/grpc/proto"
 	"github.com/mudler/LocalAI/pkg/system"
 	"github.com/mudler/LocalAI/pkg/utils"
@@ -117,6 +118,9 @@ type ModelLoader struct {
 	loadFailures            map[string]*loadFailureState
 	loadFailureBaseCooldown time.Duration // first cooldown after a failure
 	loadFailureMaxCooldown  time.Duration // cap for the exponential backoff
+	// blockedLoads are the models whose loads are refused while their files
+	// change (a model upgrade). Guarded by mu.
+	blockedLoads map[string]bool
 }
 
 // loadFailureState tracks consecutive load failures for a single modelID and
@@ -127,6 +131,9 @@ type loadFailureState struct {
 	// backendMissing records that the last failure was a backend that is not
 	// installed, so a caller can tell the user to install it instead of waiting.
 	backendMissing bool
+	// outdatedBackend names the backend that refused the model because it is
+	// too old for it, so a caller can tell the user to update that backend.
+	outdatedBackend string
 }
 
 // LoadFailedHeader is set on an HTTP answer that refuses a request because the
@@ -145,6 +152,10 @@ const UpstreamStatusHeader = "X-Localai-Upstream-Status"
 const (
 	LoadCauseHeader         = "X-Localai-Model-Load-Cause"
 	LoadCauseBackendMissing = "backend-missing"
+	// LoadCauseBackendOutdated says the backend is too old for the model. The
+	// name of the backend is in LoadBackendHeader.
+	LoadCauseBackendOutdated = "backend-outdated"
+	LoadBackendHeader        = "X-Localai-Model-Load-Backend"
 )
 
 // ModelLoadCooldownError is returned when a model load is skipped because a
@@ -157,11 +168,55 @@ type ModelLoadCooldownError struct {
 	// BackendMissing is true when the failure that armed the cooldown was a
 	// backend that is not installed.
 	BackendMissing bool
+	// OutdatedBackend is the backend that was too old for the model, when
+	// that was the failure that armed the cooldown.
+	OutdatedBackend string
 }
 
 func (e *ModelLoadCooldownError) Error() string {
 	return fmt.Sprintf("model %q load is in cooldown after a recent failure; retry after %s",
 		e.ModelID, e.RetryAfter.Round(time.Second))
+}
+
+// ModelLoadsBlockedError is returned when a load is refused because the
+// model's files are being replaced (a model upgrade). The HTTP layer maps it
+// to 503 with a Retry-After header.
+type ModelLoadsBlockedError struct {
+	ModelID string
+}
+
+func (e *ModelLoadsBlockedError) Error() string {
+	return fmt.Sprintf("model %q is being upgraded and cannot be loaded now; retry shortly", e.ModelID)
+}
+
+// BlockLoads refuses every new load of modelID until UnblockLoads. A model
+// upgrade blocks the loads between stopping the model and switching its
+// files: a load in that window would start the old version, and the load
+// check of the upgrade would then find it running. It does not stop a model
+// that runs; the caller does.
+//
+// A load that passed the check before the flag was set still runs and would
+// register the old version after the caller stopped it. BlockLoads therefore
+// waits for the loads in flight to end: every load holds the shared
+// operation lock of its model, and taking and releasing the exclusive lock
+// returns only when they are gone.
+func (ml *ModelLoader) BlockLoads(modelID string) {
+	ml.mu.Lock()
+	if ml.blockedLoads == nil {
+		ml.blockedLoads = map[string]bool{}
+	}
+	ml.blockedLoads[modelID] = true
+	ml.mu.Unlock()
+
+	ml.operations.acquire(modelID, true)()
+}
+
+// UnblockLoads ends BlockLoads. It does nothing for a model that is not
+// blocked.
+func (ml *ModelLoader) UnblockLoads(modelID string) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	delete(ml.blockedLoads, modelID)
 }
 
 // NewModelLoader creates a new ModelLoader instance.
@@ -205,15 +260,15 @@ func (ml *ModelLoader) SetLoadFailureCooldown(base, max time.Duration) {
 
 // cooldownRemaining returns how long the modelID's load cooldown still has to
 // run, or 0 if there is none. Callers must hold ml.mu.
-func (ml *ModelLoader) cooldownRemaining(modelID string) (time.Duration, bool) {
+func (ml *ModelLoader) cooldownRemaining(modelID string) (time.Duration, bool, string) {
 	st := ml.loadFailures[modelID]
 	if st == nil {
-		return 0, false
+		return 0, false, ""
 	}
 	if remaining := time.Until(st.cooldownUntil); remaining > 0 {
-		return remaining, st.backendMissing
+		return remaining, st.backendMissing, st.outdatedBackend
 	}
-	return 0, false
+	return 0, false, ""
 }
 
 // recordLoadFailure grows the modelID's consecutive-failure count and arms the
@@ -231,6 +286,7 @@ func (ml *ModelLoader) recordLoadFailure(modelID string, cause error) {
 	}
 	st.consecutive++
 	st.backendMissing = errors.Is(cause, ErrBackendNotFound)
+	st.outdatedBackend = OutdatedBackendOf(cause)
 	// base * 2^(consecutive-1), clamped. Cap the shift to avoid overflowing
 	// the Duration; anything past the cap collapses to loadFailureMaxCooldown.
 	shift := st.consecutive - 1
@@ -519,7 +575,11 @@ func (ml *ModelLoader) LoadModelWithFile(modelID, modelName, modelFileName strin
 func (ml *ModelLoader) loadModel(modelID, modelName, modelFileName string, loader func(string, string, string) (*Model, error), checkCooldown bool) (*Model, error) {
 	ml.mu.Lock()
 	distributed := ml.modelRouter != nil
+	blocked := ml.blockedLoads[modelID]
 	ml.mu.Unlock()
+	if blocked {
+		return nil, &ModelLoadsBlockedError{ModelID: modelID}
+	}
 
 	if distributed {
 		// Distributed mode: SmartRouter must run per inference request so
@@ -583,10 +643,10 @@ func (ml *ModelLoader) loadModel(modelID, modelName, modelFileName string, loade
 	// on every request. The coalesced follower-retry below passes
 	// checkCooldown=false so an in-flight burst still gets its one retry.
 	if checkCooldown {
-		if retryAfter, backendMissing := ml.cooldownRemaining(modelID); retryAfter > 0 {
+		if retryAfter, backendMissing, outdated := ml.cooldownRemaining(modelID); retryAfter > 0 {
 			ml.mu.Unlock()
 			xlog.Debug("Model load in cooldown after a recent failure", "modelID", modelID, "retryAfter", retryAfter)
-			return nil, &ModelLoadCooldownError{ModelID: modelID, RetryAfter: retryAfter, BackendMissing: backendMissing}
+			return nil, &ModelLoadCooldownError{ModelID: modelID, RetryAfter: retryAfter, BackendMissing: backendMissing, OutdatedBackend: outdated}
 		}
 	}
 
@@ -720,6 +780,29 @@ func (ml *ModelLoader) shutdownModel(ctx context.Context, modelName string, forc
 	return ml.deleteProcess(ctx, modelName, force)
 }
 
+// evictRemoteStub drops the local stub of a remote model without telling any
+// worker to stop it. A model can run as several replicas, and a connection
+// error says only that the replica this stub points at is unreachable. Stopping
+// the model cluster-wide (ShutdownModel) would also kill the healthy replicas
+// and their in-flight requests. The next request re-routes through the
+// router, whose health probe removes the registry row of a replica that is
+// really gone.
+func (ml *ModelLoader) evictRemoteStub(modelName string) {
+	ml.mu.Lock()
+	store := ml.store
+	wd := ml.wd
+	ml.mu.Unlock()
+
+	m, ok := store.Get(modelName)
+	if !ok {
+		return
+	}
+	store.Delete(modelName)
+	if wd != nil {
+		wd.Untrack(m.address)
+	}
+}
+
 // isResident reports whether the model store already holds an entry for
 // modelID. Unlike checkIsLoaded it never probes the backend and never evicts,
 // so it is safe to call on a per-request hot path: it answers "have we been
@@ -781,7 +864,13 @@ func (ml *ModelLoader) checkIsLoaded(s string) *Model {
 		if process == nil {
 			// Remote/distributed model — no local process to check.
 			// Only evict on definitive connection errors (node is down).
-			// Timeouts may mean the node is busy, so keep the model cached.
+			// Timeouts may mean the node is busy, so keep the model cached. So
+			// does a dial that failed in the transport: it says nothing about
+			// the backend.
+			if transportErr := grpc.TransportFailureOf(client); transportErr != nil {
+				xlog.Warn("Remote model health check failed in the transport, keeping cached", "model", s, "error", transportErr)
+				return m
+			}
 			if isConnectionError(err) {
 				xlog.Warn("Remote model unreachable (connection error), removing from cache", "model", s, "error", err)
 				if delErr := ml.deleteProcess(cTimeout, s, false); delErr != nil {
@@ -792,7 +881,7 @@ func (ml *ModelLoader) checkIsLoaded(s string) *Model {
 			xlog.Warn("Remote model health check failed (possible timeout), keeping cached", "model", s, "error", err)
 			return m
 		}
-		if !process.IsAlive() {
+		if !ProcessAlive(process) {
 			xlog.Debug("GRPC Process is not responding", "model", s)
 			// stop and delete the process, this forces to re-load the model and re-create again the service
 			err := ml.deleteProcess(cTimeout, s, true)

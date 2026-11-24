@@ -2,11 +2,13 @@
 import { Link, NavLink } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { recordStats, stripOf, STRIP_LENGTH } from '../../utils/agentRuns'
-import { folderName, folderRows, folderState } from '../../utils/chatAgents'
+import { filesOff, folderName, folderRows, folderState } from '../../utils/chatAgents'
 import { useAuth } from '../../context/AuthContext'
 import { useHubAuth } from '../hub/useHubAuth'
 // eslint-disable-next-line no-unused-vars
 import StatusChip from '../ui/StatusChip'
+// eslint-disable-next-line no-unused-vars
+import Tag from '../ui/Tag'
 import Icon from '../Icon'
 
 // The Agents area's states drawn with the product's status chip: a tone, an
@@ -79,27 +81,36 @@ export function RecordLine({ runs }) {
   )
 }
 
+// What an agent may use, on its page: a tag, a link when it opens something.
 export function Chip({ to, icon, children, mono = false, count, title, warn = false, testId }) {
-  const cls = `ag-chip${mono ? ' ag-chip--mono' : ''}${to ? ' ag-chip--link' : ''}${warn ? ' ag-chip--warn' : ''}`
-  const body = (
-    <>
-      {icon && <Icon name={icon} />}
+  return (
+    <Tag
+      as={to ? Link : 'span'}
+      to={to}
+      tone={warn ? 'warn' : 'neutral'}
+      icon={icon}
+      mono={mono}
+      title={title}
+      testId={testId}
+    >
       <span className="ag-chip__text">{children}</span>
       {count != null && <span className="ag-chip__count">{count}</span>}
-    </>
+    </Tag>
   )
-  return to
-    ? <Link className={cls} to={to} title={title} data-testid={testId}>{body}</Link>
-    : <span className={cls} title={title} data-testid={testId}>{body}</span>
 }
 
 // The folder an agent works in: its name, with a lock when the agent can only
 // read it; a warning that opens the editor when the folder is gone or was
-// never chosen. An agent on all the files shows nothing, or with `all` the
-// words "All my files".
+// never chosen. An agent with No files says so. An agent on all the files
+// shows nothing, or with `all` the words "All my files".
 //   meta   drawn as an item of the list's meta line instead of a chip
 export function FolderChip({ agent, all = false, meta = false }) {
   const { t } = useTranslation('agents')
+  if (filesOff(agent)) {
+    return meta
+      ? <span data-testid="agent-folder-chip"><Icon name="lock" />{t('folder.none')}</span>
+      : <Chip icon="lock" testId="agent-folder-chip">{t('folder.none')}</Chip>
+  }
   const st = folderState(agent)
   if (st === 'none') return all ? <span className="ag-muted">{t('folder.all')}</span> : null
   if (st !== 'ok') {

@@ -30,12 +30,14 @@ import (
 	"github.com/mudler/LocalAI/core/trace"
 	"github.com/mudler/LocalAI/internal"
 	"github.com/mudler/LocalAI/pkg/downloader"
+	"github.com/mudler/LocalAI/pkg/fsperm"
 	"github.com/mudler/LocalAI/pkg/modelartifacts"
 	"github.com/mudler/LocalAI/pkg/signals"
 	"github.com/mudler/LocalAI/pkg/vram"
 
 	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/sanitize"
+	"github.com/mudler/LocalAI/pkg/utils"
 	"github.com/mudler/LocalAI/pkg/xsysinfo"
 	"github.com/mudler/xlog"
 )
@@ -80,6 +82,13 @@ func New(opts ...config.AppOption) (*Application, error) {
 
 	xlog.Info("Starting LocalAI", "threads", options.Threads, "modelsPath", options.SystemState.Model.ModelsPath)
 	xlog.Info("LocalAI version", "version", internal.PrintableVersion())
+	// ffmpeg is an outside program. Say at start that it is missing, so an
+	// audio request does not fail later with no context.
+	if ffmpeg, err := utils.FFmpegPath(); err != nil {
+		xlog.Warn("ffmpeg is not available; audio conversion will fail", "error", err)
+	} else {
+		xlog.Debug("ffmpeg found", "path", ffmpeg)
+	}
 
 	// The account database is opened before the services start: the add-on
 	// owner checks its callers against it in named-user mode, and has no
@@ -94,6 +103,8 @@ func New(opts ...config.AppOption) (*Application, error) {
 		}
 		application.authDB = authDB
 	}
+
+	sweepInterruptedUpdates(options)
 
 	if err := application.start(); err != nil {
 		if application.authDB != nil {
@@ -144,6 +155,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 	} else if removed > 0 {
 		xlog.Info("Reaped abandoned artifact partials", "count", removed)
 	}
+	recoverModelJournals(options)
 	if options.GeneratedContentDir != "" {
 		err := os.MkdirAll(options.GeneratedContentDir, 0o750)
 		if err != nil {
@@ -287,12 +299,16 @@ func New(opts ...config.AppOption) (*Application, error) {
 	application.failoverManager = failover.New(application.ModelConfigLoader(),
 		failover.WithProber(failover.NewProber(failoverLoadedBackend(application.ModelLoader()), options.ProxyAPIKeyEnvLookup)),
 		failover.WithOnWarmChanged(application.applyFailoverWarmTargets),
+		failover.WithConstrained(application.limitedP2PRemote),
 	)
 	// The assistant client was built in start() (above), before this
 	// manager existed; wire it now so list_failover_chains /
 	// pin_failover_target / unpin_failover_target see real chains.
 	if application.assistantClient != nil {
 		application.assistantClient.Failover = application.failoverManager
+		application.assistantClient.P2P = application.P2P()
+		application.assistantClient.P2PSplit = application.P2PSplit()
+		application.assistantClient.SplitDetacher = application
 	}
 
 	// Subsystem 5: admission control. Limiter is always wired so a
@@ -328,6 +344,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 		distStore := nodes.NewDistributedModelStore(
 			model.NewInMemoryModelStore(),
 			distSvc.Registry,
+			nodes.WithClientFactory(distSvc.Clients),
 		)
 		application.modelLoader.SetModelStore(distStore)
 		// Drop the local stub when a model's last replica leaves the registry.
@@ -349,7 +366,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 		storage.StartEphemeralCleanup(options.Context, distSvc.FileMgr, 0, 0)
 		// Wire NATS and gallery store into GalleryService for cross-instance progress/cancel
 		if application.galleryService != nil {
-			application.galleryService.SetNATSClient(distSvc.Nats)
+			application.galleryService.SetNATSClient(distSvc.Broadcaster)
 			if distSvc.DistStores != nil && distSvc.DistStores.Gallery != nil {
 				// Clean up stale in-progress operations from previous crashed instances
 				if _, err := distSvc.DistStores.Gallery.CleanStale(30 * time.Minute); err != nil {
@@ -394,7 +411,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 			gs := application.galleryService
 			sys := options.SystemState
 			cfgLoaderOpts := options.ToConfigLoaderOptions()
-			modelRevisionLifecycle := modeladmin.NewDistributedModelRevisionLifecycle(distSvc.Registry, distSvc.ModelCleanup)
+			modelRevisionLifecycle := application.ModelRevisionLifecycle()
 			gs.SetModelRevisionLifecycle(modelRevisionLifecycle)
 			// Captured here, used after the model configs are loaded below: the
 			// resync reads the loader, which is still empty at this point.
@@ -423,6 +440,10 @@ func New(opts ...config.AppOption) (*Application, error) {
 		}
 	}
 
+	// The notification center needs the cluster message bus for its fan-out, so
+	// it starts after distributed wiring. It does not depend on the chats.
+	application.initNotifications()
+	application.announceOperations()
 	// The chats service needs the cluster message bus, so it starts after distributed wiring.
 	if err := application.initStudioFiles(); err != nil {
 		return nil, err
@@ -489,6 +510,8 @@ func New(opts ...config.AppOption) (*Application, error) {
 			}
 			return nil
 		})
+		uc.SetLibraryRefresh(application.refreshBackendLibraries)
+		uc.SetLoadedModels(application.loadedModels)
 		// A request that proves a backend is older than the server marks it
 		// stale; refresh the upgrade cache so /backends/upgrades shows it.
 		gallery.SetStaleBackendNotifier(uc.TriggerCheck)
@@ -498,8 +521,19 @@ func New(opts ...config.AppOption) (*Application, error) {
 		if gs := application.GalleryService(); gs != nil {
 			gs.OnBackendOpCompleted = uc.TriggerCheck
 		}
+		uc.SetAnnouncer(application.updateEmitter())
+		uc.SetAutoRuns(application.autoRunner())
 		go uc.Run(options.Context)
 	}
+
+	// The update check of gallery models: single-runner, never installs.
+	if len(options.Galleries) > 0 {
+		application.startModelUpdates()
+	}
+
+	// The server-owned upgrade runs, fed by the two checks above and the
+	// add-on owner's check.
+	application.startUpgradeRuns()
 
 	// Wire gallery generation counter into VRAM caches so they invalidate
 	// when gallery data refreshes instead of using a fixed TTL.
@@ -535,7 +569,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 	// frontend runs its own pass against the shared models directory; the
 	// pass is idempotent, so no leader is needed.
 	if modelConfigResync != nil && distSvc != nil {
-		modelConfigResync.Start(options.Context, options.Distributed.ModelConfigResyncIntervalOrDefault(), distSvc.Nats)
+		modelConfigResync.Start(options.Context, options.Distributed.ModelConfigResyncIntervalOrDefault(), distSvc.Broadcaster)
 	}
 
 	// Preloads run outside the operation loop, so they do not get the
@@ -602,6 +636,15 @@ func New(opts ...config.AppOption) (*Application, error) {
 			}
 		}
 	}
+
+	// Remotes: the model configs are loaded and the distributed
+	// services exist, so the service can write entries and resolve keys. The
+	// refresh runs in the background and never delays startup.
+	application.startRemotes(options.Context)
+
+	// The P2P layer, in the mode of the settings. A failure leaves it off and
+	// the status says why; it never fails the startup.
+	_ = application.StartP2PNet()
 
 	// Start the failover scheduler: it syncs chains from config, runs
 	// liveness/recovery probes and dwell-based fail-back. Run is the only
@@ -737,7 +780,7 @@ func loadOrGenerateHMACSecret(path string) (string, error) {
 	}
 	secret := hex.EncodeToString(b)
 
-	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
+	if err := fsperm.WriteFile(path, []byte(secret), 0o600); err != nil {
 		return "", fmt.Errorf("failed to persist HMAC secret: %w", err)
 	}
 
@@ -840,7 +883,18 @@ func ensureAuthDBDirs(options *config.ApplicationConfig) error {
 func workspaceStartupCleanup(ctx context.Context, options *config.ApplicationConfig) (context.Context, func(*Application)) {
 	postgres := options.Auth.Enabled && (strings.HasPrefix(options.Auth.DatabaseURL, "postgres://") || strings.HasPrefix(options.Auth.DatabaseURL, "postgresql://"))
 	if options.Distributed.StorageURL == "" && !postgres {
-		return ctx, func(*Application) {}
+		// A failed start leaves no server to shut down, but the workspace index
+		// keeps its log file open. Windows cannot remove an open file, so it
+		// is released here rather than at process exit.
+		return ctx, func(a *Application) {
+			if a.studioTextIndexStop != nil {
+				a.studioTextIndexStop()
+			}
+			if a.studioFilesIndex != nil {
+				_ = a.studioFilesIndex.Close()
+				a.studioFilesIndex = nil
+			}
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	return ctx, func(a *Application) {

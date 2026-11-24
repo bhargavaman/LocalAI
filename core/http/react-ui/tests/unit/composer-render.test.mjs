@@ -15,14 +15,16 @@ const leaf = () => null
 let captured
 const scope = {
   ...Object.fromEntries(names.map(n => [n, leaf])), ...slash,
-  React, useCallback, useMemo, useState,
+  React, useCallback, useEffect: () => {}, useMemo, useState,
   useTranslation: () => ({ t: k => k }), useAuth: () => ({ isAdmin: true, user: { id: 'a' } }),
-  useModelFit: () => ({ resources: null }), useCommandsNotice: () => ({}),
-  hostMemory: () => null, agentFolderLine: () => '', CAP_CHAT: 'chat',
+  useProjectList: () => ({ projects: null, status: 'idle' }),
+  useModelFit: () => ({ resources: null }), useCommandsNotice: () => ({}), useUserCommands: () => [],
+  hostMemory: () => null, agentFolderLine: () => '', folderState: () => 'none', CAP_CHAT: 'chat',
   CHAT_SLASH_ACTIONS: [], SLASH_ACTIONS: [],
   HomeComposer: props => { captured = props; return React.createElement('textarea', { defaultValue: props.message }) },
   useToolGroups: () => [], useChatGrants: () => null, SAVED_AGENTS: 'saved_agents', SUBAGENTS: 'subagents',
   CommandsChip: leaf, CommandsNotice: leaf, ToolFallbacks: leaf, ChatToolsControls: leaf,
+  MemoryChip: leaf, MemoryLine: leaf, memoryOff: () => null, MEMORY_GROUP: 'memory',
 }
 const compiled = ts.transpileModule(source.replace(/^import .*\n/gm, '').replace('export default function', 'function'), {
   compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, fileName: 'ChatComposer.jsx',

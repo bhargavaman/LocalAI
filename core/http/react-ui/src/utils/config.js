@@ -9,11 +9,23 @@ export const API_CONFIG = {
 
     // Models gallery
     models: '/api/models',
+    modelsSearch: '/api/models/search',
+    modelsSearchSources: '/api/models/search/sources',
+    modelsRemoteFiles: '/api/models/remote/files',
+    modelsRemoteEstimate: '/api/models/remote/estimate',
     installModel: (id) => `/api/models/install/${id}`,
     deleteModel: (id) => `/api/models/delete/${id}`,
+    modelsRecommended: '/api/models/recommended',
     modelEstimate: (id) => `/api/models/estimate/${id}`,
     modelVariants: (id) => `/api/models/variants/${id}`,
-    modelConfig: (id) => `/api/models/config/${id}`,
+    // Model updates: the read model, a check, the upgrade and its actions.
+    modelUpdates: '/api/models/updates',
+    modelUpdatesCheck: '/api/models/updates/check',
+    modelUpgrade: (name) => `/api/models/upgrade/${encodeURIComponent(name)}`,
+    modelUpgradeRetry: (name) => `/api/models/${encodeURIComponent(name)}/upgrade/retry`,
+    modelRemoveOld: (name) => `/api/models/${encodeURIComponent(name)}/remove-old`,
+    modelAdopt: (name) => `/api/models/${encodeURIComponent(name)}/adopt`,
+    modelHold: (name) => `/api/models/${encodeURIComponent(name)}/hold`,
     modelConfigJson: (name) => `/api/models/config-json/${name}`,
     configMetadata: '/api/models/config-metadata',
     configAutocomplete: (provider) => `/api/models/config-metadata/autocomplete/${encodeURIComponent(provider)}`,
@@ -27,9 +39,18 @@ export const API_CONFIG = {
     installExternalBackend: '/api/backends/install-external',
     backendJob: (uid) => `/api/backends/job/${uid}`,
     deleteInstalledBackend: (name) => `/api/backends/system/delete/${name}`,
-    backendsUpgrades: '/api/backends/upgrades',
-    backendsUpgradesCheck: '/api/backends/upgrades/check',
+    backendUpdates: '/api/backends/updates',
+    backendUpdatesCheck: '/api/backends/updates/check',
     upgradeBackend: (name) => `/api/backends/upgrade/${name}`,
+
+    // Update runs: the server plans, runs and reports a set of updates of
+    // every kind (backends, add-ons, models) as one run.
+    updateRunsPreview: '/api/updates/runs/preview',
+    updateRuns: '/api/updates/runs',
+    updateRun: (id) => `/api/updates/runs/${encodeURIComponent(id)}`,
+    updateRunCancel: (id) => `/api/updates/runs/${encodeURIComponent(id)}/cancel`,
+    updateRunItemCancel: (id, key) => `/api/updates/runs/${encodeURIComponent(id)}/items/${encodeURIComponent(key)}/cancel`,
+    updateRunRetry: (id) => `/api/updates/runs/${encodeURIComponent(id)}/retry`,
 
     // Resources
     resources: '/api/resources',
@@ -51,11 +72,27 @@ export const API_CONFIG = {
     backendLogsModel: (modelId) => `/api/backend-logs/${encodeURIComponent(modelId)}`,
     clearBackendLogs: (modelId) => `/api/backend-logs/${encodeURIComponent(modelId)}/clear`,
 
-    // P2P
-    p2pWorkers: '/api/p2p/workers',
-    p2pFederation: '/api/p2p/federation',
-    p2pStats: '/api/p2p/stats',
-    p2pToken: '/api/p2p/token',
+    // P2P layer (p2pnet): status, invites, devices, relays, identity
+    p2pStatus: '/api/p2p/status',
+    p2pInvites: '/api/p2p/invites',
+    p2pInvite: (id) => `/api/p2p/invites/${encodeURIComponent(id)}`,
+    p2pDevices: '/api/p2p/devices',
+    p2pDevice: (id) => `/api/p2p/devices/${encodeURIComponent(id)}`,
+    p2pRelays: '/api/p2p/relays',
+    p2pRelay: (id) => `/api/p2p/relays/${encodeURIComponent(id)}`,
+    p2pRelayCheck: (id) => `/api/p2p/relays/${encodeURIComponent(id)}/check`,
+    p2pRelaySync: (id) => `/api/p2p/relays/${encodeURIComponent(id)}/sync`,
+    p2pRelayLimits: (id) => `/api/p2p/relays/${encodeURIComponent(id)}/limits`,
+    p2pRelayClaim: (id) => `/api/p2p/relays/${encodeURIComponent(id)}/claim`,
+    p2pIdentityRegenerate: '/api/p2p/identity/regenerate',
+    // Federation: groups of instances behind one model name
+    federation: '/api/federation',
+    federationGroups: '/api/federation/groups',
+    federationGroup: (name) => `/api/federation/groups/${encodeURIComponent(name)}`,
+    federationDrain: (name) => `/api/federation/groups/${encodeURIComponent(name)}/drain`,
+    // Model-split workers (llama.cpp RPC and MLX over P2P)
+    p2pSplitWorkers: '/api/p2p/split-workers',
+    p2pSplitWorker: (id) => `/api/p2p/split-workers/${encodeURIComponent(id)}`,
 
     // Chats the server keeps: steering, sub-agents and live events
     chats: '/api/chats',
@@ -66,6 +103,7 @@ export const API_CONFIG = {
     chatStop: (id) => `/api/chats/${encodeURIComponent(id)}/stop`,
     chatGoal: (id) => `/api/chats/${encodeURIComponent(id)}/goal`,
     chatGoalResume: (id) => `/api/chats/${encodeURIComponent(id)}/goal/resume`,
+    chatDock: (id) => `/api/chats/${encodeURIComponent(id)}/dock`,
     chatEvents: (id) => `/api/chats/${encodeURIComponent(id)}/events`,
     files: '/api/chats/files',
     filesContent: '/api/chats/files/content',
@@ -73,6 +111,7 @@ export const API_CONFIG = {
     filesFolders: '/api/chats/files/folders',
     filesMove: '/api/chats/files/move',
     filesTrash: '/api/chats/files/trash',
+    filesExtract: '/api/chats/files/extract',
     filesUndo: '/api/chats/files/undo',
     filesHistory: '/api/chats/files/history',
     filesSearch: '/api/chats/files/search',
@@ -109,6 +148,13 @@ export const API_CONFIG = {
     modelsList: '/v1/models',
     modelsCapabilities: '/api/models/capabilities',
     modelsAliases: '/api/aliases',
+
+    // Remotes (admin)
+    remotes: '/api/remotes',
+    remotesTest: '/api/remotes/test',
+    remote: (id) => `/api/remotes/${encodeURIComponent(id)}`,
+    remoteRefresh: (id) => `/api/remotes/${encodeURIComponent(id)}/refresh`,
+    remoteAdopt: (id) => `/api/remotes/${encodeURIComponent(id)}/adopt`,
 
     // Realtime / WebRTC
     realtimeCalls: '/v1/realtime/calls',
@@ -169,6 +215,10 @@ export const API_CONFIG = {
     nodeLabelKey: (id, key) => `/api/nodes/${id}/labels/${key}`,
     nodeMaxReplicasPerModel: (id) => `/api/nodes/${id}/max-replicas-per-model`,
     nodeVramBudget: (id) => `/api/nodes/${id}/vram-budget`,
+    nodeSplitServer: (id) => `/api/nodes/${id}/split-server`,
+    clusterSettings: '/api/cluster/settings',
+    clusterJoinTokens: '/api/cluster/join-tokens',
+    clusterJoinToken: (id) => `/api/cluster/join-tokens/${encodeURIComponent(id)}`,
     nodesScheduling: '/api/nodes/scheduling',
     nodesModels: '/api/nodes/models',
     nodesSchedulingModel: (model) => `/api/nodes/scheduling/${encodeURIComponent(model)}`,

@@ -1,11 +1,16 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import {
-  Button, Callout, EmptyState, LoadError, Page, PageHeader, PaneLayout, SidePane,
-  Skeleton, SkeletonRows, LoadingSpinner, ShellFallback, StatusChip, STATUS, Switch,
+  Button, Callout, EmptyState, ListPicker, Notice, LoadError, Page, PageHeader, PaneLayout, Segmented, SidePane,
+  Skeleton, SkeletonRows, LoadingSpinner, ShellFallback, Slider, StatusChip, STATUS, Switch, TabPanel, Tabs, Tag,
 } from '../components/ui'
 import { useToastAnchor } from '../components/Toast'
+import SideSheet from '../components/SideSheet'
 import StatusPill from '../components/StatusPill'
+import ShareDialog from '../components/share/ShareDialog'
+import { SharedByBadge } from '../components/share/ShareBadges'
+import { kindShareClient } from '../components/share/shareClients'
+import { sharesApi } from '../utils/api'
 import './ui-catalog.css'
 
 // Every UI primitive in every state, on one page. It is the reference for
@@ -27,7 +32,7 @@ function Section({ id, title, note, children }) {
 
 function Buttons() {
   return (
-    <Section id="buttons" title="Button" note="One button: the kit's dk-btn. Legacy .btn classes render the same look.">
+    <Section id="buttons" title="Button" note="One button: the kit's dk-btn. Use primary for the one main action of a region, secondary for the rest, ghost for quiet actions, danger to confirm a delete. Legacy .btn classes render the same look.">
       <div className="ui-cat__table" role="table" aria-label="Button variants">
         {VARIANTS.map(v => (
           <div className="ui-cat__row" role="row" key={v} data-variant={v}>
@@ -84,7 +89,7 @@ function Header() {
 
 function Chips() {
   return (
-    <Section id="chips" title="Status chip" note="Colour, icon and words. One state per chip.">
+    <Section id="chips" title="Status chip" note="The state of one item, as a pill. Colour, icon and words; one state per chip.">
       <div className="ui-cat__cell" data-testid="chips">
         {Object.keys(STATUS).map(s => <StatusChip key={s} status={s} />)}
       </div>
@@ -102,10 +107,62 @@ function Chips() {
   )
 }
 
+function Tags() {
+  return (
+    <Section id="tags" title="Tag" note="A label on an item that is not a state: a kind, a format, a capability. A state is a status chip.">
+      <div className="ui-cat__cell ui-tags" data-testid="tags">
+        <Tag>GGUF</Tag>
+        <Tag tone="accent">alias</Tag>
+        <Tag tone="ok" icon="check">Fits</Tag>
+        <Tag tone="warn">Dev</Tag>
+        <Tag tone="error">Broken</Tag>
+        <Tag mono>v1.4.2</Tag>
+      </div>
+    </Section>
+  )
+}
+
+function TabsDemo() {
+  const [tab, setTab] = useState('overview')
+  const [source, setSource] = useState('file')
+  return (
+    <Section id="tabs" title="Tabs" note="Views of one region, one at a time. One tab stop; arrow keys, Home and End move the selection. The pill variant is a view switch in a header or a small card.">
+      <Tabs
+        label="Sample views"
+        idPrefix="cat-tabs"
+        value={tab}
+        onChange={setTab}
+        testId="cat-tabs"
+        itemTestId="cat-tab-"
+        items={[
+          { id: 'overview', label: 'Overview' },
+          { id: 'files', label: 'Files', icon: 'folder', count: 4 },
+          { id: 'locked', label: 'Locked', disabled: true },
+          { id: 'access', label: 'Access', count: 2, countTone: 'warn', countLabel: '2 waiting' },
+        ]}
+      />
+      <TabPanel idPrefix="cat-tabs" value={tab} tabIndex={0} testId="cat-tabpanel">Panel: {tab}</TabPanel>
+      <div className="ui-cat__stack">
+        <Tabs
+          variant="pill"
+          label="Source"
+          idPrefix="cat-pill"
+          panelId="cat-pill-panel"
+          value={source}
+          onChange={setSource}
+          testId="cat-tabs-pill"
+          items={[{ id: 'file', label: 'Upload', icon: 'upload' }, { id: 'live', label: 'Record', icon: 'mic' }]}
+        />
+        <TabPanel idPrefix="cat-pill" panelId="cat-pill-panel" value={source}>Source: {source}</TabPanel>
+      </div>
+    </Section>
+  )
+}
+
 function Switches() {
   const [on, setOn] = useState(true)
   return (
-    <Section id="switch" title="Switch" note="A control that applies at once. Space toggles. Name it with a label.">
+    <Section id="switch" title="Switch" note="A setting that applies at once, with no Save. Space toggles. Name it with a label.">
       <div className="ui-cat__cell" data-testid="switches">
         <Switch checked={on} onChange={setOn} label="Sample switch" />
         <Switch checked={!on} onChange={() => setOn(v => !v)} label="Opposite switch" />
@@ -116,14 +173,168 @@ function Switches() {
   )
 }
 
+function FormControls() {
+  const [checked, setChecked] = useState(true)
+  return (
+    <Section id="form" title="Input, select and checkbox" note="Text, a choice from a list, and a choice that applies when the person presses Save. Controls and buttons share one height. For a choice that applies at once, use a switch.">
+      <div className="ui-cat__stack ui-cat__form" data-testid="form-controls">
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-input">Name</label>
+          <input id="cat-input" className="dk-input" defaultValue="daily-digest" />
+          <p className="dk-hint">Shown in lists. You can change it later.</p>
+        </div>
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-select">Model</label>
+          <div className="dk-select-wrap">
+            <select id="cat-select" className="dk-select" defaultValue="qwen3-8b">
+              <option value="qwen3-8b">qwen3-8b</option>
+              <option value="gemma-3-4b">gemma-3-4b</option>
+            </select>
+          </div>
+        </div>
+        <label className="ui-cat__check">
+          <input type="checkbox" className="dk-check" checked={checked} onChange={e => setChecked(e.target.checked)} />
+          <span>Keep the run history</span>
+        </label>
+      </div>
+    </Section>
+  )
+}
+
+const PICK_BACKENDS = [
+  { id: 'llama-cpp', label: 'llama-cpp', mono: true, group: 'Text', secondary: 'GGUF', tags: [{ label: 'default', kind: 'alias' }] },
+  { id: 'vllm', label: 'vllm', mono: true, group: 'Text', secondary: 'CUDA' },
+  { id: 'mlx', label: 'mlx', mono: true, group: 'Text', disabled: true, tags: ['not on this host'] },
+  { id: 'whisper', label: 'whisper', mono: true, group: 'Audio', description: 'Speech to text, many languages' },
+  { id: 'piper', label: 'piper', mono: true, group: 'Audio', description: 'Text to speech, fast on a CPU' },
+  { id: 'kokoro', label: 'kokoro', mono: true, group: 'Audio', description: 'Text to speech, natural voices' },
+  { id: 'stablediffusion', label: 'stablediffusion', mono: true, group: 'Image' },
+  { id: 'diffusers', label: 'diffusers', mono: true, group: 'Image' },
+]
+const PICK_TOOLS = [
+  { id: 'search', label: 'Search', icon: 'globe', dot: true },
+  { id: 'files', label: 'Files', icon: 'folder', dot: true },
+  { id: 'memory', label: 'Memory', icon: 'brain', dot: false },
+]
+
+function Pickers() {
+  const [backend, setBackend] = useState('')
+  const [tools, setTools] = useState(['search'])
+  const [mode, setMode] = useState('read')
+  return (
+    <Section id="picker" title="ListPicker" note="A choice from a long list, rows with more than text, several picks, or a chip in a toolbar. A filter box from 8 rows, groups, and the keyboard: arrows, Home, End, Enter, Escape. For a short fixed list in a form, use the native select.">
+      <div className="ui-cat__stack ui-cat__form">
+        <div className="dk-field">
+          <span className="dk-label" id="cat-pick-backend-label">Backend</span>
+          <ListPicker
+            variant="field" icon="server" labelledBy="cat-pick-backend-label" testId="cat-pick-backend"
+            items={PICK_BACKENDS} value={backend} onChange={setBackend}
+            noneLabel="Automatic" placeholder="Automatic" filterLabel="Filter backends" noMatchText="No backend matches."
+          />
+        </div>
+        <div className="ui-cat__cell">
+          <ListPicker
+            icon="wrench" ariaLabel="Tools" testId="cat-pick-tools" multiple
+            items={PICK_TOOLS} value={tools} onChange={setTools} placeholder="No tools"
+          />
+          <ListPicker
+            ariaLabel="Empty list" testId="cat-pick-empty" items={[]} value="" placeholder="Nothing yet" openable
+            emptyText="No backends are installed."
+          />
+          <ListPicker ariaLabel="Disabled" testId="cat-pick-disabled" items={PICK_TOOLS} value="search" disabled />
+        </div>
+        <div className="ui-cat__cell">
+          <span className="dk-select-wrap dk-select-wrap--sm">
+            <select className="dk-select" aria-label="Access" value={mode} onChange={e => setMode(e.target.value)} data-testid="cat-select-sm">
+              <option value="read">Can read</option>
+              <option value="write">Can edit</option>
+            </select>
+          </span>
+          <Button size="sm">A sm button</Button>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+function Segments() {
+  const [filter, setFilter] = useState('all')
+  const [place, setPlace] = useState('auto')
+  return (
+    <Section id="segmented" title="Segmented" note="One choice of a few that filters a list on this page, with a count. To change views, use tabs. In radio mode it sets a value: one tab stop, arrow keys move the choice.">
+      <Segmented
+        label="Show tasks"
+        value={filter}
+        onChange={setFilter}
+        testId="cat-segmented"
+        options={[{ id: 'all', label: 'All', count: 4 }, { id: 'on', label: 'On', count: 3 }, { id: 'off', label: 'Off', count: 1 }]}
+      />
+      <div className="ui-cat__stack" data-testid="cat-segmented-radio-set">
+        <Segmented
+          mode="radio"
+          label="Where it runs"
+          value={place}
+          onChange={setPlace}
+          testId="cat-segmented-radio"
+          itemTestId="cat-segmented-radio-"
+          options={[{ id: 'auto', label: 'Automatic' }, { id: 'here', label: 'Here' }, { id: 'away', label: 'Away', disabled: true }, { id: 'both', label: 'Both' }]}
+        />
+        <Button variant="secondary" data-testid="cat-segmented-after">Next field</Button>
+      </div>
+    </Section>
+  )
+}
+
+function Sliders() {
+  const [temperature, setTemperature] = useState('0.7')
+  const [unset, setUnset] = useState('')
+  const [bad, setBad] = useState('3')
+  const range = { min: 0, max: 2, step: 0.05 }
+  return (
+    <Section id="slider" title="Slider" note="A number in a range, with a number box and a reset. Empty means the default applies. It applies when the form is saved.">
+      <div className="ui-cat__stack ui-cat__form" data-testid="sliders">
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-slider-set">Temperature</label>
+          <Slider id="cat-slider-set" range={range} value={temperature} onChange={setTemperature} label="Temperature" placeholder="Model default" resetLabel="Use the model default" testId="cat-slider" />
+        </div>
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-slider-unset">Not set</label>
+          <Slider id="cat-slider-unset" range={range} value={unset} onChange={setUnset} label="Not set" placeholder="Model default" resetLabel="Use the model default" />
+        </div>
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-slider-bad">Out of range</label>
+          <Slider id="cat-slider-bad" range={range} value={bad} onChange={setBad} label="Out of range" placeholder="Model default" resetLabel="Use the model default" invalid describedBy="cat-slider-bad-err" />
+          <p className="dk-field-error" id="cat-slider-bad-err">Use a number from 0 to 2.</p>
+        </div>
+        <div className="dk-field">
+          <label className="dk-label" htmlFor="cat-slider-off">Disabled</label>
+          <Slider id="cat-slider-off" range={range} value="1" onChange={() => {}} label="Disabled" placeholder="Model default" resetLabel="Use the model default" disabled />
+        </div>
+      </div>
+    </Section>
+  )
+}
+
 function Callouts() {
   return (
-    <Section id="callouts" title="Callout">
+    <Section id="callouts" title="Callout" note="Something on this page that needs attention: a warning, news or a result. For a state of one item, use a status chip.">
       <div className="ui-cat__stack">
         <Callout tone="info" title="Chats use the connectors that are on.">A saved agent uses only the ones you pick for it.</Callout>
         <Callout tone="ok" title="qwen3-8b is ready." actions={<Button size="sm" variant="primary">Start a chat</Button>}>It loaded in 2.1 s.</Callout>
         <Callout tone="warn" title="Notes 1.0.0 is available." actions={<><Button size="sm" variant="ghost">What changed</Button><Button size="sm">Update</Button></>}>You have 0.9.1. It asks for one more permission.</Callout>
         <Callout tone="error" title="research-assistant failed" actions={<Button size="sm">Open the run</Button>}>in “Digest of the week”, 12 minutes ago. The model stopped before it answered.</Callout>
+      </div>
+    </Section>
+  )
+}
+
+function Notices() {
+  return (
+    <Section id="notices" title="Notice" note="Off or not available: what, why, who can fix it, the fix. Error is alert, warn is status, info is note.">
+      <div className="ui-cat__stack" data-testid="notices">
+        <Notice severity="info" title="Thread history is off" reason="This add-on was not allowed to read earlier messages." who="An administrator can allow it in the add-on's permissions." />
+        <Notice severity="warn" title="Commands can't run here" reason="The server's built-in bash is off." who="Ask an administrator of this server." fix={{ label: 'Open the setting', to: '/app/settings' }} secondary={{ label: 'Hide', onClick: () => {} }} />
+        <Notice severity="error" title="Cannot be turned on" reason="This version is not compatible with this server." who="Upgrade it to a newer version." fix={{ label: 'Upgrade', onClick: () => {} }} />
       </div>
     </Section>
   )
@@ -237,7 +448,7 @@ function BottomBar() {
 function Pane() {
   const [open, setOpen] = useState(false)
   return (
-    <Section id="pane" title="Side pane" note="Docked from 1280 px, an overlay below, a bottom sheet on a phone. Escape closes it.">
+    <Section id="pane" title="Side pane" note="The detail of one item beside a list. Docked from 1280 px, an overlay below, a bottom sheet on a phone. Escape closes it.">
       <PaneLayout>
         <div className="ui-cat__stack">
           <div className="ui-cat__list">
@@ -269,6 +480,79 @@ function Pane() {
   )
 }
 
+// The share dialog over the generic sharing routes, for a sample kind. The
+// e2e spec answers those routes itself (e2e/share-dialog.spec.js).
+const SHARE_KIND = 'example:note'
+const SHARE_RESOURCE = 'r0123456789abcdef0123456789abcde'
+const SHARE_ROLES = [
+  { id: 'use', label: 'Can use', help: 'People you add can open and run the note.' },
+  { id: 'manage', label: 'Can manage', help: 'People you add can also change the note.' },
+]
+const SHARE_REFS = [
+  { id: 'c1', label: 'Product docs', kind: 'Collection' },
+  { id: 'k1', label: 'Team chat', kind: 'Connection', options: ['use', 'none'] },
+]
+
+function Share() {
+  const [open, setOpen] = useState('')
+  const [choices, setChoices] = useState(null)
+  const client = useMemo(() => kindShareClient(sharesApi, SHARE_KIND, SHARE_RESOURCE), [])
+  return (
+    <Section id="share" title="Share dialog" note="One dialog for every shareable resource. The transport is a client of four calls; the dialog never names a route.">
+      <div className="ui-cat__cell">
+        <Button icon="users" onClick={() => setOpen('plain')} data-testid="cat-share-open">Share</Button>
+        <Button onClick={() => setOpen('local')} data-testid="cat-share-local">Local-owner mode</Button>
+        <Button onClick={() => setOpen('refs')} data-testid="cat-share-refs">With references</Button>
+      </div>
+      <h3 className="ui-cat__sub">The sharing line of a list row</h3>
+      <div className="ui-cat__cell" data-testid="cat-share-badges">
+        <SharedByBadge entry={{ role: 'owner', sharedWith: 2 }} testId="cat-shared-owned" />
+        <SharedByBadge entry={{ role: 'owner', sharedWith: 0 }} testId="cat-shared-private" />
+        <SharedByBadge entry={{ role: 'use', owner: 'Alice' }} testId="cat-shared-by" />
+        <SharedByBadge entry={{ role: 'manage', owner: 'Alice', everyone: true }} testId="cat-shared-everyone" />
+      </div>
+      {choices && <p className="ui-cat__note" data-testid="cat-share-choices">{JSON.stringify(choices)}</p>}
+      {open && (
+        <ShareDialog
+          client={client}
+          resource={{ id: SHARE_RESOURCE, name: 'Release notes' }}
+          roles={SHARE_ROLES}
+          allowEveryone
+          sharing={open !== 'local'}
+          references={open === 'refs' ? SHARE_REFS : undefined}
+          onShare={(c) => setChoices(c)}
+          close={() => setOpen('')}
+        />
+      )}
+    </Section>
+  )
+}
+
+function Sheet() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Section id="sheet" title="Side sheet" note="A create or edit form that blocks the page until it is saved or closed. 480 px, wide is 720 px, a bottom sheet on a phone. For a detail beside a list, use a side pane.">
+      <div className="ui-cat__cell">
+        <Button variant="primary" icon="plus" onClick={() => setOpen(true)} data-testid="open-sheet">Create agent</Button>
+      </div>
+      {open && (
+        <SideSheet
+          title="Create agent"
+          description="Name it and pick a model. You can change both later."
+          onClose={() => setOpen(false)}
+          testId="cat-sheet"
+          footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" onClick={() => setOpen(false)}>Create agent</Button></>}
+        >
+          <div className="dk-field">
+            <label className="dk-label" htmlFor="cat-sheet-name">Name</label>
+            <input id="cat-sheet-name" className="dk-input" />
+          </div>
+        </SideSheet>
+      )}
+    </Section>
+  )
+}
+
 export default function UiCatalog() {
   return (
     <Page className="ui-cat">
@@ -276,13 +560,22 @@ export default function UiCatalog() {
       <Buttons />
       <Header />
       <Chips />
+      <Tags />
       <Switches />
+      <FormControls />
+      <Pickers />
+      <Segments />
+      <TabsDemo />
+      <Sliders />
       <Callouts />
+      <Notices />
       <LoadErrors />
       <Empties />
       <Loading />
       <Toasts />
       <Pane />
+      <Share />
+      <Sheet />
     </Page>
   )
 }

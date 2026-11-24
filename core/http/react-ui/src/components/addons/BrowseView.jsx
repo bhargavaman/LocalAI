@@ -6,27 +6,41 @@ import Icon from '../Icon'
 import CatalogView from '../catalog/CatalogView'
 import { paramsToQuery, queryToParams } from '../catalog/catalogState'
 import { AppIcon, UnknownNotice, VersionText } from './AddonBits'
-import { Button, StatusChip } from '../ui'
+import { Button, Notice, Segmented, StatusChip } from '../ui'
+import { apiUrl } from '../../utils/basePath'
+import { useAuth } from '../../context/AuthContext'
+import { useAddonConnections } from '../../hooks/useAddonConnections'
 import FlowStatus from './InstallFlow'
-import InstallDialog from './InstallDialog'
-import { addedByEntry } from './addonState'
-import { updateView } from './updateState'
+import { CATEGORIES, addedByEntry, categoryOf, localizeEntry, localizeRecord, sortEntriesByTitle } from './addonState'
+import { updateView, entryUpdateNote, updateNoticeSeverity, upgradeAvailability } from './updateState'
 import { describeError, describeOutcome } from './errors'
 import { useAddonActions } from './useAddonActions'
 import { useAddonUpgrade } from './useAddonUpgrade'
+import { useOperations } from '../../hooks/useOperations'
+import { busyAddonIds } from '../../utils/addonQueue'
 import { AddonUpgradeAction, UpgradeConfirm } from './UpgradeControls'
 import { UpdateBadge } from '../upgrade/UpgradeBits'
 
-// Library entries for this host. An add-on entry has one button, Install and
-// turn on: one confirmation, then the install and the turn on run one after
-// the other. An add-on that is installed but off offers Turn on. Backends are
-// not listed here: they belong to the Backends page.
-export default function BrowseView({ api, adapter }) {
-  const { t } = useTranslation('addons')
+// Library entries for this host. An add-on entry has an Install button and a
+// checkbox to add it to a batch: the person reviews the host access of each one
+// in the dialog, and the installs then run in the background queue (see
+// useInstallQueue). An install does not turn the add-on on; an add-on that is
+// installed but off offers Turn on. Backends are not listed here: they belong
+// to the Backends page.
+export default function BrowseView({ api, adapter, queue }) {
+  const { t, i18n } = useTranslation('addons')
   const [params, setParams] = useSearchParams()
   const [installed, setInstalled] = useState({})
   const [reload, setReload] = useState(0)
-  const [dialog, setDialog] = useState(null)
+  // The entries ticked for the batch, by key. Kept as entries so a tick on one
+  // page of results survives a move to the next.
+  const [selected, setSelected] = useState({})
+  const { operations } = useOperations()
+  const busy = busyAddonIds(operations)
+  const [category, setCategory] = useState('all')
+  const { hasFeature, isAdmin } = useAuth()
+  // The connector kinds the host serves make an installed add-on a chat app.
+  const conns = useAddonConnections({ enabled: hasFeature('chats') })
   const query = paramsToQuery(k => params.get(k))
 
   const onQueryChange = useCallback((next) => {
@@ -45,68 +59,140 @@ export default function BrowseView({ api, adapter }) {
       .then(list => setInstalled(Object.fromEntries(list.map(a => [a.id, a]))))
       .catch(() => { if (!ctl.signal.aborted) setInstalled({}) })
     return () => ctl.abort()
-  }, [api, reload])
+  }, [api, reload, queue.tick])
 
   const actions = useAddonActions(api, { onSettled: () => setReload(n => n + 1), adapter })
 
   const upgrade = useAddonUpgrade(api, { onChanged: () => setReload(n => n + 1) })
 
-  const openInstall = (entry) => setDialog(entry)
+  // Installed add-ons whose update status was never asked of the library.
+  const unchecked = Object.values(installed).filter(a => updateView(a.update).state === 'unknown')
+  const [checkingAll, setCheckingAll] = useState(false)
+  const checkUnchecked = async () => {
+    setCheckingAll(true)
+    try {
+      for (const addon of unchecked) await upgrade.check(addon)
+    } finally {
+      setCheckingAll(false)
+    }
+  }
 
-  const renderEntry = (entry) => {
-    const have = installed[entry.id]
+  const openInstall = (entry) => queue.start([entry])
+  const toggle = (entry, on) => setSelected(s => {
+    const next = { ...s }
+    if (on) next[entry.key] = entry
+    else delete next[entry.key]
+    return next
+  })
+  const picked = Object.values(selected)
+  const reviewPicked = () => { queue.start(picked); setSelected({}) }
+
+  const renderEntry = (raw) => {
+    const entry = localizeEntry(raw, i18n.language)
+    const have = installed[entry.id] ? localizeRecord(installed[entry.id], i18n.language) : undefined
     const flow = actions.flows[`flow:${entry.key}`]
     const pending = Boolean(actions.unknown[entry.id])
     const working = ['install', 'turn-on'].includes(flow?.step)
+    const waiting = busy.has(entry.id)
     const adds = addedByEntry(entry)
     const off = have && have.enabled === false
     const updatable = have && updateView(have.update).state === 'update-available'
+    const checked = have && !updatable && entryUpdateNote(have.update)
+    // An add-on never checked is said once above the grid, not on every card.
+    const found = checked && checked.state !== 'unknown' ? { ...checked, severity: updateNoticeSeverity(checked.state) } : null
+    const note = found
+    const availability = updatable ? upgradeAvailability(have, { isAdmin: true, pending: true, checked: upgrade.checks[have.id]?.phase === 'done' }) : null
+    const upgrading = updatable && (pending || upgrade.working(have.id))
     return (
-      <article className="ad-entry" aria-labelledby={`entry-${entry.key}`} data-addon={entry.id}>
-        <AppIcon src="" id={entry.id} name={entry.title} />
-        <div className="ad-entry__body">
-          <div className="ad-entry__head">
+      <article className="ad-entry ad-card" aria-labelledby={`entry-${entry.key}`} data-addon={entry.id}>
+        <div className="ad-card__head">
+          <AppIcon src={have && have.icon ? apiUrl(have.icon) : ''} id={entry.id} name={entry.title} size={48} />
+          <div className="ad-card__id">
             <h3 className="ad-entry__title" id={`entry-${entry.key}`}>{entry.title}</h3>
-            {have && have.version === entry.version && <StatusChip tone="ok" label={t('browse.installedChip')} testId="entry-installed" />}
-            {updatable && <UpdateBadge version={updateView(have.update).version} />}
+            <p className="ad-card__by"><Icon name="shield" aria-hidden="true" /> {t(entry.policy && entry.policy.requireSignature ? 'meta.signed' : 'meta.checked', { library: entry.sourceId })}</p>
           </div>
-          {entry.description && <p className="ad-entry__text">{entry.description}</p>}
-          <p className="ad-meta ad-entry__meta">
-            {adds.page && <span className="ad-meta__item"><Icon name="file" aria-hidden="true" /> <span data-testid="entry-adds">{t('card.addsPage')}</span></span>}
-            {adds.tools > 0 && <span className="ad-meta__item"><Icon name="wrench" aria-hidden="true" /> <span data-testid="entry-tools">{t('card.addsTools', { count: adds.tools })}</span></span>}
-            <span className="ad-meta__item"><Icon name="shield" aria-hidden="true" /> {t(entry.policy && entry.policy.requireSignature ? 'meta.signed' : 'meta.checked', { library: entry.sourceId })}</span>
-            <span className="ad-meta__item"><VersionText version={entry.version} /></span>
-            {have && have.version !== entry.version && <span className="ad-meta__item" data-testid="entry-have">{t('browse.installedOther', { version: have.version })}</span>}
-          </p>
-          {updatable && (
-            <div className="ad-entry__upgrade" data-testid="entry-upgrade">
-              <AddonUpgradeAction addon={have} pending isAdmin upgrade={upgrade} variant="secondary" working={pending || upgrade.working(have.id)} />
-            </div>
-          )}
-          <EntryFacts entry={entry} have={have} />
-          {pending && <UnknownNotice addonId={entry.id} actions={actions} />}
-          {!pending && !(dialog && dialog.key === entry.key) && <FlowStatus flow={flow} name={entry.title} onRetry={flow?.step === 'failed' ? () => actions.installAndTurnOn(entry, { skipInstall: flow.failedStep === 'turn-on' }) : undefined} />}
-          {flow && flow.step === 'done' && !(dialog && dialog.key === entry.key) && <p className="ad-entry__note" data-tone="ok" role="status"><Icon name="check-circle" aria-hidden="true" /> {t('browse.installedOn', { name: entry.title })}</p>}
         </div>
-        <div className="ad-entry__acts">
-          {!have && (
-            <Button size="sm" icon="download" busy={working} disabled={working || pending} onClick={() => openInstall(entry)} aria-label={t('flow.installNamed', { name: entry.title })}>{t('flow.install')}</Button>
-          )}
-          {off && (
-            <Button size="sm" icon="toggle-on" busy={working} disabled={working || pending} onClick={() => actions.installAndTurnOn(entry, { skipInstall: true })}>{t('apps.start')}</Button>
-          )}
+        {entry.description && <p className="ad-entry__text">{entry.description}</p>}
+        <p className="ad-meta ad-entry__meta">
+          {adds.page && <span className="ad-meta__item"><Icon name="file" aria-hidden="true" /> <span data-testid="entry-adds">{t('card.addsPage')}</span></span>}
+          {adds.tools > 0 && <span className="ad-meta__item"><Icon name="wrench" aria-hidden="true" /> <span data-testid="entry-tools">{t('card.addsTools', { count: adds.tools })}</span></span>}
+          <span className="ad-meta__item"><VersionText version={entry.version} /></span>
+          {have && have.version !== entry.version && !updatable && <span className="ad-meta__item" data-testid="entry-have">{t('browse.installedOther', { version: have.version })}</span>}
+        </p>
+        {note && (!note.severity
+          ? <p className="ad-entry__note" data-testid="entry-update-note" data-state={note.state} data-tone={note.tone}>{t(`updates.state.${note.state}`, { version: note.version })}</p>
+          : <Notice className="ad-entry__notice" severity={note.severity} title={t(`updates.state.${note.state}`, { version: note.version })} testId="entry-update-note" data-state={note.state} data-tone={note.tone} />)}
+        {pending && <UnknownNotice addonId={entry.id} actions={actions} />}
+        {!pending && <FlowStatus flow={flow} name={entry.title} onRetry={flow?.step === 'failed' ? () => actions.installAndTurnOn(entry, { skipInstall: flow.failedStep === 'turn-on' }) : undefined} />}
+        {flow && flow.step === 'done' && <p className="ad-entry__note" data-tone="ok" role="status"><Icon name="check-circle" aria-hidden="true" /> {t('browse.installedOn', { name: entry.title })}</p>}
+        <div className="ad-card__foot">
+          <div className="ad-entry__acts" data-testid="entry-control">
+            {!have && !waiting && (
+              <>
+                <Button size="sm" icon="download" busy={working} disabled={working || pending} onClick={() => openInstall(entry)} aria-label={t('flow.installNamed', { name: entry.title })}>{t('flow.install')}</Button>
+                <label className="ad-select">
+                  <input type="checkbox" className="dk-check" checked={Boolean(selected[entry.key])} disabled={working || pending} onChange={(e) => toggle(entry, e.target.checked)} aria-label={t('queue.selectNamed', { name: entry.title })} data-testid="entry-select" />
+                  {' '}{t('queue.select')}
+                </label>
+              </>
+            )}
+            {!have && waiting && <StatusChip tone="accent" label={t('queue.inQueue')} testId="entry-queued" />}
+            {updatable && (
+              <span data-testid="entry-upgrade">
+                {availability.startable
+                  ? <Button size="sm" icon="arrow-up" busy={upgrading} disabled={upgrading} onClick={() => upgrade.ask(have)} aria-label={t('updates.upgradeNamed', { name: have.title })} data-testid="update-upgrade-card">{t('card.updateTo', { version: updateView(have.update).version })}</Button>
+                  : <AddonUpgradeAction addon={have} pending isAdmin upgrade={upgrade} variant="secondary" working={upgrading} />}
+              </span>
+            )}
+            {have && !updatable && !off && <StatusChip tone="ok" label={t('browse.installedChip')} testId="entry-installed" />}
+            {off && (
+              <Button size="sm" icon="toggle-on" busy={working} disabled={working || pending} onClick={() => actions.installAndTurnOn(entry, { skipInstall: true })}>{t('apps.start')}</Button>
+            )}
+          </div>
         </div>
+        <EntryFacts entry={entry} have={have} />
       </article>
     )
   }
 
+  const categories = ['all', ...CATEGORIES]
+  const toolbar = (
+    <Segmented
+      options={categories.map(id => ({ id, label: t(`browse.category.${id}`) }))}
+      value={category}
+      onChange={setCategory}
+      label={t('browse.category.label')}
+    />
+  )
+  const inCategory = (entries) => (category === 'all' ? entries : entries.filter(e => categoryOf(e, { connector: conns.addonIds.has(e.id) }) === category))
+
   return (
     <>
+      {unchecked.length > 0 && (
+        <Notice
+          className="ad-unchecked"
+          severity="info"
+          title={t('updates.notCheckedYet')}
+          fix={isAdmin ? { label: checkingAll ? t('updates.checkingAll') : t('updates.checkAll'), busy: checkingAll, disabled: checkingAll, onClick: checkUnchecked, testId: 'browse-check-all' } : undefined}
+          testId="browse-unchecked"
+        />
+      )}
+      {picked.length > 0 && (
+        <div className="ad-selbar" role="region" aria-label={t('queue.selectionLabel')} data-testid="queue-selection">
+          <span className="ad-selbar__text">{t('queue.selected', { count: picked.length })}</span>
+          <Button variant="primary" size="sm" icon="download" onClick={reviewPicked} data-testid="queue-review">{t('queue.reviewPicked')}</Button>
+          <Button variant="ghost" size="sm" onClick={() => setSelected({})} data-testid="queue-clear">{t('queue.clear')}</Button>
+        </div>
+      )}
       <CatalogView
         adapter={adapter}
         query={query}
         onQueryChange={onQueryChange}
         renderEntry={renderEntry}
+        filterEntries={inCategory}
+        toolbar={toolbar}
+        listClassName="ad-cards"
+        orderEntries={entries => sortEntriesByTitle(entries, i18n.language)}
         reloadToken={reload}
         describeError={e => describeError(e, t)}
         searchLabel={t('browse.search')}
@@ -114,7 +200,6 @@ export default function BrowseView({ api, adapter }) {
         emptyText={t('browse.emptyBody')}
       />
       <UpgradeConfirm upgrade={upgrade} />
-      <InstallDialog entry={dialog} installed={installed} flow={dialog ? actions.flows[`flow:${dialog.key}`] : undefined} actions={actions} onClose={() => setDialog(null)} />
     </>
   )
 }
@@ -137,6 +222,7 @@ function EntryFacts({ entry: e, have }) {
         <dt>{t('trust.platform')}</dt><dd>{e.platform.os}/{e.platform.arch}</dd>
         <dt>{t('trust.verification')}</dt><dd>{e.policy.requireSignature ? t('trust.signatureRequired') : t('trust.digestOnly')}</dd>
         {e.policy.requireSignature && (<><dt>{t('trust.issuer')}</dt><dd className="dk-mono ad-wrap">{e.policy.issuer}</dd><dt>{t('trust.identity')}</dt><dd className="dk-mono ad-wrap">{e.policy.identity || e.policy.identityRegex}</dd></>)}
+        {e.policy.requireSignature && e.policy.sourceRepository && (<><dt>{t('trust.sourceRepository')}</dt><dd className="dk-mono ad-wrap">{e.policy.sourceRepository}</dd></>)}
         <dt>{t('trust.digest')}</dt><dd className="dk-mono ad-wrap">{e.digest}</dd>
         {have && (<><dt>{t('browse.installedState')}</dt><dd>{t('browse.installedDetail', { version: have.version, generation: have.generation })}</dd></>)}
       </dl>

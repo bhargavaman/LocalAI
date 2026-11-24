@@ -1,15 +1,22 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { createPortal } from 'react-dom'
 // eslint-disable-next-line no-unused-vars
 import { Link, useParams, useNavigate, useLocation, useOutletContext, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { agentCollectionsApi, chatAgentsApi, modelMCPServersApi } from '../utils/api'
+import { agentCollectionsApi, chatAgentsApi, chatProjectsApi } from '../utils/api'
 import { useAgentTools } from '../hooks/useAgentTools'
+import { useModels } from '../hooks/useModels'
 import { useToolGroups } from '../hooks/useToolGroups'
-import { AGENT_TEMPLATES, diffConfig, displayValue, maskSecrets, summarise } from '../utils/agentConfigTools'
-import { agentPayload, effectiveModes, emptyAgent, folderRows, folderState, foldersUnchosen, MAX_FOLDERS, missingConnectorGrants, setGrant } from '../utils/chatAgents'
+import { useMemorySettings } from '../hooks/useMemorySettings'
+import { useAgentAccess } from '../hooks/useAgentAccess'
+import { effectiveLines, flatRows, blockedCount } from '../utils/agentEffective'
+import { diffConfig, displayValue, maskSecrets, summarise } from '../utils/agentConfigTools'
+import { addEntry, agentPayload, emptyAgent, filesChoiceOf, folderRows, folderState, foldersUnchosen, memoryChoiceOf, memoryLevelOf, memorySaveOf, missingConnectorGrants, newAgent, setGrant, removeEntry, withMemoryChoice, withMemoryLevel } from '../utils/chatAgents'
+import { ceilingOf, filesModeOf, limitedTools, projectAgentFolders, unavailableReason } from '../utils/projectAgents'
+import { snapshot } from '../utils/agentPresets'
+import { addonNow, memorySkillsState } from '../utils/agentUses'
+import { modelCaps } from '../utils/modelCaps'
+import { describeChatModel } from '../utils/describeModel'
 import { downloadAgentFile } from '../utils/agentFiles'
-import { joinAgentMCP, splitAgentMCP } from '../utils/chatMCP'
 import './agents.css'
 import './library.css'
 import '../components/home/composer.css'
@@ -22,27 +29,67 @@ import UnsavedChangesGuard from '../components/UnsavedChangesGuard'
 import { CAP_CHAT } from '../utils/capabilities'
 import Icon from '../components/Icon'
 // eslint-disable-next-line no-unused-vars
-import { Button, Callout, LoadError, Page, PageHeader, Segmented, SkeletonRows } from '../components/ui'
+import { Button, Callout, LoadError, Page, Segmented, SkeletonRows, Tabs, Tag } from '../components/ui'
 // eslint-disable-next-line no-unused-vars
 import AgentFolderDialog from '../components/agents/AgentFolderDialog'
 // eslint-disable-next-line no-unused-vars
+import AgentMemoryChoice from '../components/agents/AgentMemoryChoice'
+// eslint-disable-next-line no-unused-vars
 import { SwitchPanel } from '../components/chat/SwitchMenu'
-import { switchCounts } from '../utils/chatSwitchRows'
+import { switchCounts, switchRows } from '../utils/chatSwitchRows'
 // eslint-disable-next-line no-unused-vars
 import { SkillsPanel } from '../components/chat/SkillsMenu'
+// eslint-disable-next-line no-unused-vars
+import AgentPresets, { AppliedNotice } from '../components/agents/AgentPresets'
+// eslint-disable-next-line no-unused-vars
+import AgentConnected from '../components/agents/AgentConnected'
+// eslint-disable-next-line no-unused-vars
+import AgentUsesPanel from '../components/agents/AgentUsesPanel'
+// eslint-disable-next-line no-unused-vars
+import AgentFiles from '../components/agents/AgentFiles'
+// eslint-disable-next-line no-unused-vars
+import AgentProjectFiles from '../components/agents/AgentProjectFiles'
+// eslint-disable-next-line no-unused-vars
+import { Chip } from '../components/agents/AgentBits'
+// eslint-disable-next-line no-unused-vars
+import { SwitchRow } from '../components/chat/SwitchList'
+// eslint-disable-next-line no-unused-vars
+import AgentWizard from './AgentWizard'
+import { useAgentAbilities } from '../hooks/useAgentAbilities'
+import { useActiveProjects } from '../hooks/useActiveProjects'
+// eslint-disable-next-line no-unused-vars
+import AgentProjectField from '../components/agents/AgentProjectField'
+// eslint-disable-next-line no-unused-vars
+import AgentMoveDialog from '../components/agents/AgentMoveDialog'
+// eslint-disable-next-line no-unused-vars
+import AgentMemorySkills, { memorySkillFrom } from '../components/agents/AgentMemorySkills'
+// eslint-disable-next-line no-unused-vars
+import AgentEffective from '../components/agents/AgentEffective'
+// eslint-disable-next-line no-unused-vars
+import AgentTryIt from '../components/agents/AgentTryIt'
+// eslint-disable-next-line no-unused-vars
+import ActionMenu from '../components/ActionMenu'
+// eslint-disable-next-line no-unused-vars
+import SideSheet from '../components/SideSheet'
 
-// The sections of the form. Each folds; Basic info is open at first.
-const SECTIONS = [
-  { id: 'BasicInfo', icon: 'info' },
-  { id: 'ModelSettings', icon: 'brain' },
-  { id: 'PromptsGoals', icon: 'target' },
-  { id: 'Files', icon: 'folder' },
-  { id: 'MemorySettings', icon: 'database' },
-  { id: 'Skills', icon: 'sparkles' },
-  { id: 'Tools', icon: 'plug' },
-  { id: 'Grants', icon: 'shield' },
-  { id: 'MCP', icon: 'server' },
+// The cards of the page, in order. `bare` parts have no heading of their own:
+// the card heading says what they are. `export` exists only for a saved agent.
+const GROUPS = [
+  { id: 'identity', icon: 'info', parts: ['BasicInfo', 'ModelSettings', 'PromptsGoals', 'Connected'], bare: true },
+  { id: 'capabilities', icon: 'plug', parts: ['Uses', 'Skills', 'Files'] },
+  { id: 'memory', icon: 'memory', parts: ['Notes', 'MemorySettings'] },
+  { id: 'effective', icon: 'eye', parts: ['Effective'], bare: true },
+  { id: 'advanced', icon: 'server', parts: ['export'], collapsible: true },
 ]
+const secDomId = (gid) => `aed-sec-${gid}`
+
+// Two letters for the avatar tile of the header: the start of the name.
+function monogram(name) {
+  const words = (name || '').match(/[\p{L}\p{N}]+/gu) || []
+  if (!words.length) return ''
+  const letters = words.length > 1 ? words[0][0] + words[1][0] : words[0].slice(0, 2)
+  return letters.toUpperCase()
+}
 
 // The fields each fold summarises on its closed line.
 const SUMMARY_FIELDS = {
@@ -53,34 +100,66 @@ const SUMMARY_FIELDS = {
 
 // --- Main component ---
 
+// The new-agent route is the wizard. A saved agent, and an agent read from a
+// file (it arrives with its fields in the router state), keep the full editor.
 export default function AgentCreate() {
+  const { id } = useParams()
+  const location = useLocation()
+  const [search] = useSearchParams()
+  // An agent made from a project opens the full editor, where its two fixed
+  // folders and the project's tool limits are drawn.
+  if (!id && !location.state?.importedConfig && !search.get('project')) return <AgentWizard />
+  return <AgentEditor />
+}
+
+// eslint-disable-next-line no-unused-vars
+function AgentEditor() {
   const { id } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
   const { addToast } = useOutletContext()
-  const { t } = useTranslation(['agents', 'library'])
-  const [searchParams] = useSearchParams()
-  const templateId = searchParams.get('template') || ''
+  const { t } = useTranslation(['agents', 'library', 'chats', 'home'])
   const isEdit = !!id
   const imported = location.state?.importedConfig || null
+  const [search] = useSearchParams()
+  // The project of the agent: from the address on create, from the saved
+  // agent on edit. The project is read with the agent; one that is gone
+  // leaves projectGone set, and the agent paused.
+  const [projectId, setProjectId] = useState(isEdit ? '' : (search.get('project') || ''))
+  const [project, setProject] = useState(null)
+  const [projectGone, setProjectGone] = useState(false)
+  // The server's flag for the saved agent: its project folders were replaced.
+  const [foldersChanged, setFoldersChanged] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
+  const projectAgent = Boolean(projectId)
+  // The Project field: the list of projects, and the move dialog of a saved
+  // agent. moveTo is the project the person picked ('' for none) while it
+  // differs from the agent's own; null when nothing is picked.
+  const projectsList = useActiveProjects()
+  const [moveTo, setMoveTo] = useState(null)
+  const [moving, setMoving] = useState(false)
 
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
   const [attempt, setAttempt] = useState(0)
   const [saving, setSaving] = useState(false)
-  // Sections fold. Basics is open at first; the rest open on demand.
-  const [openSections, setOpenSections] = useState(() => new Set(['BasicInfo']))
+  // The section the reader is in, for the section nav.
+  const [activeSec, setActiveSec] = useState(GROUPS[0].id)
   const [savedConfig, setSavedConfig] = useState(null)
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [tryOpen, setTryOpen] = useState(false)
   const [previewTab, setPreviewTab] = useState('config')
   const [form, setForm] = useState(emptyAgent())
-  // null, a row index, or 'new' for a row being added
-  const [choosingFolder, setChoosingFolder] = useState(null)
   // Snapshot of the form as first loaded, for the unsaved-changes guard.
   const initialFormRef = useRef(null)
   const [collectionNames, setCollectionNames] = useState([])
-  const [modelServers, setModelServers] = useState([])
-  const [grantList, setGrantList] = useState([])
+  // The chat models, for the picker and for the capabilities line under it.
+  const { models: chatModels, loading: modelsLoading } = useModels(CAP_CHAT, { keepBroken: true })
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const formRef = useRef(null)
+  // The choice of whose notes the agent last had, for coming back from Off.
+  const lastWhose = useRef('')
+  if (form.memory && form.memory !== 'none') lastWhose.current = form.memory
 
   // Suggestions are best effort: a failure leaves the field free text.
   useEffect(() => {
@@ -89,41 +168,41 @@ export default function AgentCreate() {
       .catch(() => {})
   }, [])
 
-  // The grants the editor can list: best effort, an empty list hides the checklist.
-  useEffect(() => {
-    chatAgentsApi.builtinGrants()
-      .then(r => setGrantList(Array.isArray(r?.grants) ? r.grants : []))
-      .catch(() => {})
-  }, [])
-
-  // The servers of the fixed model are suggestions; with no fixed model the field is free text.
-  const fixedModel = form.model || ''
-  useEffect(() => {
-    if (!fixedModel) { setModelServers([]); return undefined }
-    let live = true
-    modelMCPServersApi.list(fixedModel).then(r => { if (live) setModelServers((r.servers || []).map(s => s.name).filter(Boolean)) }).catch(() => { if (live) setModelServers([]) })
-    return () => { live = false }
-  }, [fixedModel])
-
   useEffect(() => {
     const init = async () => {
       setLoadError(null)
       try {
-        let initialForm = emptyAgent()
+        // A new agent starts with the default choice of notes. An agent that
+        // is read or imported keeps what it has: none means "as before".
+        let initialForm = newAgent()
+        let pid = isEdit ? '' : (search.get('project') || '')
         if (isEdit) {
           const agent = await chatAgentsApi.get(id)
-          initialForm = { ...initialForm, ...agent, folders: folderRows(agent) }
+          initialForm = { ...emptyAgent(), ...agent, memory: memoryChoiceOf(agent), memory_save: memorySaveOf(agent), folders: folderRows(agent) }
           setSavedConfig(agent)
+          if (agent.project_id) { pid = agent.project_id; setProjectId(pid) }
         } else if (imported) {
-          initialForm = { ...initialForm, ...imported.agent, folders: folderRows(imported.agent) }
-        } else if (templateId) {
-          // A starting point fills the form; nothing is saved until the person saves.
-          const tpl = AGENT_TEMPLATES.find(x => x.id === templateId)
-          if (tpl) initialForm = { ...initialForm, name: tpl.name, description: tpl.description, instructions: tpl.instructions }
+          initialForm = { ...emptyAgent(), ...imported.agent, memory: memoryChoiceOf(imported.agent), memory_save: memorySaveOf(imported.agent), folders: folderRows(imported.agent) }
+        }
+        if (pid) {
+          let p = null
+          try {
+            p = await chatProjectsApi.get(pid)
+            setProjectGone(false)
+          } catch (err) {
+            // A saved agent whose project is gone still opens, paused.
+            if (!(isEdit && err?.status === 404)) throw err
+            setProjectGone(true)
+          }
+          setProject(p)
+          initialForm = { ...initialForm, project_files_mode: isEdit ? filesModeOf(initialForm) : 'write' }
+          if (isEdit && p?.status === 'active') {
+            const rows = await chatProjectsApi.agents(pid).then(r => r.agents || []).catch(() => [])
+            setFoldersChanged(Boolean(rows.find(r => r.id === id)?.unavailable))
+          }
         }
         initialFormRef.current = initialForm
         setForm(initialForm)
-        if (imported) setOpenSections(new Set(SECTIONS.map(s => s.id)))
       } catch (err) {
         // An agent that could not be read is said in place of the form: an
         // empty form would save over it.
@@ -133,38 +212,95 @@ export default function AgentCreate() {
       }
     }
     init()
-  }, [id, isEdit, imported, templateId, attempt])
+  }, [id, isEdit, imported, attempt, search])
 
   const updateField = useCallback((name, value) => setForm(prev => ({ ...prev, [name]: value })), [])
 
+  // A new agent takes the project of the field: the project is read for the
+  // folders and the limits, and the files mode starts at write.
+  const pickNewProject = useCallback((pid, picked) => {
+    setProjectId(pid)
+    setProjectGone(false)
+    updateField('project_files_mode', 'write')
+    if (!pid) { setProject(null); return }
+    setProject(picked || null)
+    chatProjectsApi.get(pid).then(setProject).catch(() => {})
+  }, [updateField])
+
   // The Tools and Skills lists are the ones the Tools menu of a chat draws
   // (SwitchPanel), with the agent's grants and switches applied to them.
-  const tools = useAgentTools(form, updateField)
+  const tools = useAgentTools(form, updateField, project)
+  // The person's own memory switch, read only here: an agent cannot widen it.
+  const memoryUser = useMemorySettings()
   const toolGroups = useToolGroups(tools, { commandState: false, forAgent: true })
+  // What the server says each connection of this agent lets its senders do.
+  const access = useAgentAccess(form.id || '', tools.connections)
 
   // The definition exactly as it is saved. The preview shows this object and
   // Save sends it.
   // The folders as saved: a save sends `folders` only when the form changed
   // them, so untouched folders are kept, also a missing one.
   const initialFolders = useMemo(() => (isEdit ? folderRows(savedConfig) : []), [isEdit, savedConfig])
-  const payload = useMemo(() => agentPayload(form, { initialFolders }), [form, initialFolders])
+  const ab = useAgentAbilities({ form, setForm, updateField, tools, initialFolders, project })
+  const { applied, setApplied, undoApplied, filesChoice } = ab
+  // A project agent never sends folders of its own. The server fills the two
+  // project folders on create (files at write) and keeps them on a save, so
+  // `folders` is sent only as those two roots, and only for a files mode that
+  // differs from the stored one. `project_id` goes on create only.
+  const storedMode = isEdit ? filesModeOf(savedConfig) : 'write'
+  const buildPayload = useCallback((f) => {
+    if (!projectAgent) return agentPayload(f, { initialFolders })
+    const body = agentPayload(f)
+    const folders = project ? projectAgentFolders(project, f.project_files_mode || 'write', storedMode) : undefined
+    if (folders) body.folders = folders
+    if (!isEdit) body.project_id = projectId
+    return body
+  }, [projectAgent, project, projectId, isEdit, storedMode, initialFolders])
+  const payload = useMemo(() => buildPayload(form), [form, buildPayload])
+  const limits = useMemo(() => limitedTools(project, {}).limited, [project])
+  const pausedReason = isEdit && projectAgent ? unavailableReason(project, foldersChanged, projectGone) : ''
   // A folder row was added or changed and has no folder chosen.
-  const folderUnchosen = foldersUnchosen(initialFolders, form.folders)
+  // With No files the rows do not count: the server ignores them.
+  const folderUnchosen = !projectAgent && filesChoiceOf(form) !== 'none' && foldersUnchosen(initialFolders, form.folders)
 
   // Adding the first grant to an agent that had none turns off what it did
   // by default on its messaging connections. Say so, and offer the fix.
   const missingGrants = isEdit ? missingConnectorGrants(savedConfig?.builtins, form.builtins) : []
 
+  // Bring a field into view below the sticky header, then focus it.
+  const focusField = (fieldId) => {
+    const el = document.getElementById(fieldId)
+    if (!el) return
+    el.scrollIntoView({ block: 'center' })
+    el.focus({ preventScroll: true })
+  }
+
+  // Saves the agent again with no folder list and no project: the server then
+  // links the two folders of the project again.
+  const reconnect = async () => {
+    setReconnecting(true)
+    try {
+      await chatAgentsApi.update(id, agentPayload(savedConfig))
+      addToast(t('project.reconnected', { name: savedConfig.name }), 'success')
+      setLoading(true)
+      setAttempt(n => n + 1)
+    } catch (err) {
+      addToast(t('project.reconnectFailed', { message: err.message }), 'error')
+    } finally {
+      setReconnecting(false)
+    }
+  }
+
   const handleSubmit = async (e) => {
     e?.preventDefault?.()
     if (!payload.name) {
       addToast(t('create.needsName'), 'warning')
-      setOpenSections(prev => new Set([...prev, 'BasicInfo']))
+      focusField('ag-name')
       return
     }
     if (folderUnchosen) {
       addToast(t('folder.needsChoice'), 'warning')
-      setOpenSections(prev => new Set([...prev, 'Files']))
+      document.querySelector('[data-section="Files"]')?.scrollIntoView({ block: 'start' })
       return
     }
     setSaving(true)
@@ -185,7 +321,54 @@ export default function AgentCreate() {
     }
   }
 
-  const mcp = splitAgentMCP(form.mcp_servers)
+  // Mark the section in view in the nav: the last one whose top has passed
+  // the line under the sticky header.
+  useEffect(() => {
+    if (loading || loadError) return undefined
+    let frame = 0
+    const update = () => {
+      frame = 0
+      let current = GROUPS[0].id
+      // The line under the sticky header (and the nav chips on a phone).
+      const bar = parseFloat(formRef.current?.style.getPropertyValue('--aed-bar-h')) || 132
+      const line = bar + (window.innerWidth <= 768 ? 72 : 40)
+      for (const g of GROUPS) {
+        const el = document.getElementById(secDomId(g.id))
+        if (el && el.getBoundingClientRect().top <= line) current = g.id
+      }
+      setActiveSec(current)
+    }
+    const onScroll = () => { if (!frame) frame = requestAnimationFrame(update) }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onScroll)
+    update()
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onScroll)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [loading, loadError])
+
+  // The sticky nav sits right under the header, whatever height the header has.
+  useEffect(() => {
+    const form = formRef.current
+    const bar = form?.querySelector('.aed-bar')
+    if (!bar) return undefined
+    const set = () => form.style.setProperty('--aed-bar-h', `${Math.round(bar.getBoundingClientRect().height)}px`)
+    set()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(set)
+    ro.observe(bar)
+    return () => ro.disconnect()
+  }, [loading, loadError])
+
+  // An address with #aed-sec-<card> (the Finish setup card sends one) opens on that card.
+  const hashTarget = location.hash.startsWith('#aed-sec-') ? location.hash.slice('#aed-sec-'.length) : ''
+  useEffect(() => {
+    if (!hashTarget || loading || loadError) return
+    document.getElementById(secDomId(hashTarget))?.scrollIntoView({ block: 'start' })
+  }, [hashTarget, loading, loadError])
+
   if (loading || loadError) {
     return (
       <Page className="ag-page" data-testid="agent-edit">
@@ -200,37 +383,62 @@ export default function AgentCreate() {
   }
 
   const dirty = initialFormRef.current != null &&
-    (JSON.stringify(payload) !== JSON.stringify(agentPayload(initialFormRef.current)) || folderUnchosen)
+    (JSON.stringify(payload) !== JSON.stringify(projectAgent ? buildPayload(initialFormRef.current) : agentPayload(initialFormRef.current)) || folderUnchosen)
 
   const leave = () => navigate(isEdit ? `/app/agents/${encodeURIComponent(id)}` : '/app/agents')
 
   // What each fold says about itself: ready mark, one line, and, when editing,
   // how many of its fields differ from the saved agent.
+  const memoryLevel = memoryLevelOf(form)
   const baseline = savedConfig ? agentPayload(savedConfig) : {}
   const diff = diffConfig(baseline, payload)
   const changedKeys = new Set(savedConfig ? diff.map(d => d.key) : [])
+  const effective = effectiveLines({
+    form,
+    rows: flatRows(toolGroups),
+    skills: (tools.skills || []).filter(s => s.enabled && !s.gone && s.layer !== 'addon').map(s => ({ on: true, id: s.name, label: s.name })),
+    addons: tools.addons,
+    skillRows: tools.skills,
+    mcpUnknown: ab.unknownMcp,
+    memory: memoryUser.settings,
+    access,
+    isEdit,
+  })
+  // The add-ons that are on and cannot work: the section says so, and so does
+  // the card on the nav.
+  const stuckAddons = tools.addons.filter(a => !a.gone && !a.off && addonNow(a).tone === 'warn').length + ab.unknownMcp.length
   const countOf = (n, key) => (n ? t(key, { count: n }) : t('create.noneYet'))
 
   const foldInfo = (s) => {
     let summary = ''
     let state = 'empty'
     let keys = (SUMMARY_FIELDS[s.id] || []).map(f => f.name)
-    if (s.id === 'MemorySettings') { keys = ['collections']; summary = countOf(form.collections.length, 'create.countCollections'); state = form.collections.length ? 'ready' : 'empty' }
+    if (s.id === 'Notes') {
+      keys = ['memory']
+      const lv = t(`chats:agentMemory.summary.level.${memoryLevel}`)
+      summary = memoryLevel === 'off' ? lv : t('chats:agentMemory.summary.combined', { level: lv, choice: t(`chats:agentMemory.summary.${form.memory || 'asBefore'}`) })
+      if (form.memory_save === 'auto' && memoryLevel === 'saves') summary = t('chats:agentMemory.summary.withAuto', { choice: summary })
+      state = 'ready'
+    }
+    else if (s.id === 'MemorySettings') { keys = ['collections']; summary = countOf(form.collections.length, 'create.countCollections'); state = form.collections.length ? 'ready' : 'empty' }
     else if (s.id === 'Skills') { keys = ['skills']; summary = countOf(form.skills.length, 'create.countSkills'); state = form.skills.length ? 'ready' : 'empty' }
-    else if (s.id === 'Tools') {
-      keys = ['builtins_off', 'builtins_on', 'addons', 'mcp_servers', 'network', 'connections']
-      const { on, total } = switchCounts(toolGroups.flatMap(g => g.rows))
+    else if (s.id === 'Uses') {
+      keys = ['builtins_off', 'builtins_on', 'builtins', 'addons', 'mcp_servers', 'network', 'sandbox_profile', 'connections', 'resources']
+      const { on, total } = switchCounts(switchRows(toolGroups))
       summary = total ? t('create.toolsSummary', { on, total }) : t('create.noneYet')
       state = on ? 'ready' : 'empty'
-    }
-    else if (s.id === 'Grants') {
-      keys = ['builtins']
-      const n = (form.builtins || []).length
-      summary = n ? t('create.countGrants', { count: n }) : t('create.grantsDefault')
-      state = missingGrants.length ? 'needs' : 'ready'
+      if (stuckAddons > 0) { summary = t('create.uses.needsSummary', { count: stuckAddons }); state = 'needs' }
     }
     else if (s.id === 'Files') { keys = ['folders']; ({ summary, state } = folderFold()) }
-    else if (s.id === 'MCP') { keys = ['mcp_servers']; summary = countOf(form.mcp_servers.length, 'create.countServers'); state = form.mcp_servers.length ? 'ready' : 'empty' }
+    else if (s.id === 'Connected') {
+      summary = tools.connections.length ? t('create.connections.summary', { count: tools.connections.length }) : t('create.noneYet')
+      state = 'ready'
+    }
+    else if (s.id === 'Effective') {
+      const n = blockedCount(effective)
+      summary = n ? t('create.eff.summaryBlocked', { count: n }) : t('create.eff.summaryOk')
+      state = n ? 'needs' : 'ready'
+    }
     else {
       summary = summarise(SUMMARY_FIELDS[s.id], form)
       state = summary ? 'ready' : 'empty'
@@ -244,6 +452,8 @@ export default function AgentCreate() {
   // What the Files fold says when closed, and whether it needs the person.
   function folderFold() {
     const rows = form.folders || []
+    if (projectAgent) return { summary: t(form.project_files_mode === 'read' ? 'project.readOnly' : 'project.canEdit'), state: 'ready' }
+    if (filesChoice === 'none') return { summary: t('folder.none'), state: 'ready' }
     if (!rows.length) return { summary: t('folder.all'), state: 'ready' }
     const open = rows.find(r => !r.path)
     if (open) {
@@ -258,26 +468,32 @@ export default function AgentCreate() {
   }
   function shownPath(path) { return path === '/' ? t('folder.home') : path }
 
-  // All my files, or chosen folders: back to the saved rows when there are some.
-  const setScope = (scope) => {
-    if (scope === 'all') updateField('folders', [])
-    else if (!(form.folders || []).length) updateField('folders', initialFolders.length ? initialFolders : [{ mode: 'read' }])
+  // The level of the tool switches and a template applied by hand are in
+  // useAgentAbilities; both stay in the form until Save and can be undone.
+  const levelReady = ab.levelReady
+  const level = ab.level
+  const applyLevel = ab.applyLevel
+  // The memory level: it sets the choice and the grant together (see
+  // withMemoryLevel), with the same way back as a level. The choice of whose
+  // notes the agent had is kept for when it comes back from Off.
+  const setMemoryLevel = (lv) => {
+    if (lv === memoryLevel) return
+    setApplied({ kind: 'level', id: lv, name: t(`chats:agentMemory.level.${lv}.title`), before: snapshot(form, ['memory', 'builtins']) })
+    setForm(prev => withMemoryLevel(prev, lv, lastWhose.current))
   }
-  const setRow = (i, patch) => updateField('folders', form.folders.map((r, j) => (j === i ? { ...r, ...patch } : r)))
-  const removeRow = (i) => updateField('folders', form.folders.filter((_, j) => j !== i))
-  const addRow = () => { updateField('folders', [...form.folders, { mode: 'read' }]); setChoosingFolder('new') }
-
-  const toggleSection = (sid) => setOpenSections(prev => {
-    const next = new Set(prev)
-    if (next.has(sid)) next.delete(sid)
-    else next.add(sid)
-    return next
-  })
-
-  const applyTemplate = (tpl) => {
-    setForm(prev => ({ ...prev, name: tpl.name, description: tpl.description, instructions: tpl.instructions }))
-    setOpenSections(prev => new Set([...prev, 'BasicInfo', 'PromptsGoals']))
-  }
+  // The skills with an "its add-on is off" line, and the add-on's title as the source.
+  const skillRowsShown = tools.skills.map(sk => (sk.layer === 'addon' && !sk.gone && !(form.addons || []).includes(sk.addon)
+    ? { ...sk, unavailable: t('create.uses.skillAddonOff') } : sk))
+  // The skills the host grants with the notes are rows of their own: on while
+  // memory is on, off with the reason when it is not. They have no switch to flip.
+  const memSkillState = memorySkillsState(form, memoryUser.settings)
+  const grantedRowsShown = (tools.grantedSkills || []).map(sk => ({
+    ...sk, enabled: memSkillState === 'on', locked: true,
+    sourceLabel: memorySkillFrom(t, sk.provider), unavailable: t(`create.uses.memorySkills.${memSkillState}`),
+  }))
+  const allSkillRowsShown = [...skillRowsShown, ...grantedRowsShown]
+  const chosenModel = chatModels.find(m => m.id === form.model)
+  const describeModel = (name) => describeChatModel(chatModels, name, c => t(`home:picker.cap.${c}`, { defaultValue: c }))
 
   const renderSection = (sid) => {
     switch (sid) {
@@ -310,8 +526,24 @@ export default function AgentCreate() {
               value={form.model}
               onChange={(v) => updateField('model', v)}
               capability={CAP_CHAT}
+              models={chatModels}
+              loading={modelsLoading}
+              describe={describeModel}
+              variant="field"
+              searchable
               placeholder={t('create.modelPlaceholder')}
             />
+            {chosenModel && (
+              <>
+                <p className="aed-caps__lead">{t('create.modelCaps')}</p>
+                <ul className="aed-caps" data-testid="agent-model-caps">
+                  <Tag as="li">{t('create.modelChat')}</Tag>
+                  {modelCaps(chosenModel).filter(c => c !== 'chat').map(c => (
+                    <Tag as="li" key={c}>{c === 'vision' ? t('home:picker.vision') : t(`home:picker.cap.${c}`, { defaultValue: c })}</Tag>
+                  ))}
+                </ul>
+              </>
+            )}
             <p className="ag-note">{t('create.modelHelp')}</p>
           </div>
         )
@@ -323,7 +555,39 @@ export default function AgentCreate() {
             <p className="ag-note">{t('create.instructionsHelp')}</p>
           </div>
         )
+      case 'Notes':
+        return (
+          <AgentMemoryChoice
+            level={memoryLevel}
+            onLevel={setMemoryLevel}
+            value={form.memory || ''}
+            onChange={(c) => setForm(prev => withMemoryChoice(prev, c))}
+            userOff={memoryUser.settings?.enabled === false}
+            saveRule={form.memory_save || ''}
+            onSaveRule={(r) => updateField('memory_save', r || 'use_mine')}
+            userLevel={memoryUser.settings?.save_mode}
+            notice={applied?.kind === 'level' && (
+              <AppliedNotice applied={applied} onUndo={undoApplied} onKeep={() => setApplied(null)} testId="agent-memory-applied" />
+            )}
+          >
+            <AgentMemorySkills rows={tools.grantedSkills} state={memorySkillsState(form, memoryUser.settings)} />
+          </AgentMemoryChoice>
+        )
       case 'MemorySettings':
+        if (limits.collections) {
+          return (
+            <>
+              <p className="ag-note">{t('create.collectionsHelp')}</p>
+              <LimitNote t={t} />
+              <div className="ag-switches" data-testid="agent-collections">
+                {ceilingOf(project, 'collections').map(name => (
+                  <SwitchRow key={name} name={name} checked={form.collections.includes(name)} testId="agent-collection-row"
+                    onChange={(on) => updateField('collections', on ? addEntry(form.collections, name) : removeEntry(form.collections, name))} />
+                ))}
+              </div>
+            </>
+          )
+        }
         return (
           <>
             <p className="ag-note">{t('create.collectionsHelp')}</p>
@@ -335,134 +599,60 @@ export default function AgentCreate() {
         return (
           <>
             <p className="ag-note">{t('create.skillsHelp')}</p>
+            {limits.skills && <LimitNote t={t} />}
             <div className="ag-switches" data-testid="agent-skills-panel">
               <SkillsPanel
-                skills={tools.skills} replaced={tools.replacedSkills} onSet={tools.setSkillsOn} error={tools.skillsError}
-                testId="agent-skills" heading={t('create.skillsHeading')} later={t('create.skillsLater')}
+ skills={allSkillRowsShown} replaced={tools.replacedSkills} onSet={tools.setSkillsOn} error={tools.skillsError}
+                testId="agent-skills" fromLabel heading={t('create.skillsHeading')} later={t('create.skillsLater')}
               />
             </div>
           </>
         )
-      case 'Tools':
+      case 'Effective':
+        return <AgentEffective lines={effective} dirty={dirty} isEdit={isEdit} hasConnections={access.length > 0} onGoTo={goTo} />
+      case 'Connected':
+        return <AgentConnected bindings={tools.connections} />
+      case 'Uses':
         return (
-          <>
-            <p className="ag-note">{t('create.toolsHelp')}</p>
-            <div className="ag-switches" data-testid="agent-tools-panel">
-              <SwitchPanel
-                heading={t('create.toolsHeading')} groups={toolGroups} error={tools.error} testId="agent-tools"
-                footer={<Button size="sm" variant="ghost" iconEnd="arrow-right" to="/app/mcp-connectors" data-testid="agent-tools-manage">{t('create.manageConnectors')}</Button>}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label" htmlFor="ag-network">{t('create.network')}</label>
-              <select id="ag-network" className="input" value={form.network || 'off'} onChange={(e) => updateField('network', e.target.value)} data-testid="agent-network">
-                {['off', 'registries', 'all'].map(p => <option key={p} value={p}>{t(`create.networkPresets.${p}`)}</option>)}
-              </select>
-              <p className="ag-note">{t('create.networkHelp')}</p>
-            </div>
-          </>
-        )
-      case 'Grants':
-        return (
-          <>
-            <p className="ag-note">{t('create.grantsHelp')}</p>
-            {missingGrants.length > 0 && (
-              <Callout
-                tone="warn" testId="agent-grants-notice"
-                title={t('create.grantsNoticeTitle')}
-                actions={<Button size="sm" onClick={() => updateField('builtins', missingGrants.reduce((l, g) => setGrant(l, g, true), form.builtins || []))} data-testid="agent-grants-add-missing">{t('create.grantsAddMissing')}</Button>}
-              >
-                {t('create.grantsNotice', { grants: missingGrants.join(', ') })}
-              </Callout>
-            )}
-            <div className="ag-grants" data-testid="agent-grants">
-              {grantList.map(g => (
-                <label key={g.name} className="ag-grants__row" data-testid="agent-grant">
-                  <input type="checkbox" checked={(form.builtins || []).includes(g.name)} onChange={(e) => updateField('builtins', setGrant(form.builtins, g.name, e.target.checked))} />
-                  <span className="ag-grants__text">
-                    <span className="ag-grants__title">{g.title}{g.sensitive && <span className="ag-grants__tag">{t('create.grantSensitive')}</span>}</span>
-                    <span className="ag-note">{g.description}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </>
-        )
-      case 'Files': {
-        const rows = form.folders || []
-        const effective = effectiveModes(rows)
-        return (
-          <>
-            <Segmented
-              label={t('folder.scopeLabel')} testId="agent-folder-scope" itemTestId="agent-folder-scope-"
-              value={rows.length ? 'one' : 'all'} onChange={setScope}
-              options={[{ id: 'all', label: t('folder.all') }, { id: 'one', label: t('folder.one') }]}
-            />
-            {rows.length > 0 && (
-              <div className="ag-folder" data-testid="agent-folder">
-                {rows.map((f, i) => {
-                  const st = f.path ? 'ok' : folderState({ folder: f })
-                  const forced = f.path && effective[i] !== (f.mode === 'write' ? 'write' : 'read')
-                  return (
-                    <div className="ag-folder__item" key={i} data-testid="agent-folder-row">
-                      {f.path ? (
-                        <div className="ag-folder__row">
-                          <span className="ag-folder__path" data-testid="agent-folder-path"><Icon name="folder" />{shownPath(f.path)}</span>
-                          <Button size="sm" onClick={() => setChoosingFolder(i)} data-testid="agent-folder-change">{t('folder.change')}</Button>
-                          <Button size="sm" variant="ghost" icon="close" onClick={() => removeRow(i)} aria-label={t('folder.remove', { path: shownPath(f.path) })} data-testid="agent-folder-remove" />
-                        </div>
-                      ) : st === 'missing' || st === 'unset' ? (
-                        <Callout
-                          tone="error" role="alert" testId="agent-folder-missing"
-                          actions={(
-                            <>
-                              <Button size="sm" icon="folder" onClick={() => setChoosingFolder(i)}>{t('folder.chooseOther')}</Button>
-                              <Button size="sm" variant="ghost" onClick={() => removeRow(i)} data-testid="agent-folder-remove">{t('folder.removeRow')}</Button>
-                            </>
-                          )}
-                        >
-                          {t(st === 'missing' ? 'folder.missing' : 'folder.unset')}
-                        </Callout>
-                      ) : (
-                        <div className="ag-folder__row">
-                          <Button size="sm" icon="folder" onClick={() => setChoosingFolder(i)} data-testid="agent-folder-choose">{t('folder.choose')}</Button>
-                          <Button size="sm" variant="ghost" icon="close" onClick={() => removeRow(i)} aria-label={t('folder.removeRow')} data-testid="agent-folder-remove" />
-                        </div>
-                      )}
-                      <div className="form-group">
-                        <span className="form-label">{t('folder.modeLabel')}</span>
-                        <Segmented
-                          label={t('folder.modeLabel')} testId={`agent-folder-mode-${i}`} itemTestId={`agent-folder-mode-${i}-`}
-                          value={f.mode === 'write' ? 'write' : 'read'} onChange={(mode) => setRow(i, { mode })}
-                          options={[{ id: 'read', label: t('folder.read') }, { id: 'write', label: t('folder.write') }]}
-                        />
-                        {forced && <p className="ag-note" data-testid="agent-folder-effective">{t(effective[i] === 'write' ? 'folder.effectiveWrite' : 'folder.effectiveRead')}</p>}
-                      </div>
-                    </div>
-                  )
-                })}
-                <div className="ag-folder__row">
-                  <Button size="sm" icon="plus" onClick={addRow} disabled={rows.length >= MAX_FOLDERS} data-testid="agent-folder-add">{t('folder.add')}</Button>
-                  <span className="ag-note" data-testid="agent-folder-count">{t('folder.count', { n: rows.length, max: MAX_FOLDERS })}</span>
-                </div>
-                {savedConfig?.folder_notice?.not_mounted > 0 && (
-                  <p className="ag-note" data-testid="agent-folder-notice">{t('folder.notMounted', { n: savedConfig.folder_notice.not_mounted })}</p>
+          <AgentUsesPanel
+            abilities={ab} tools={tools} toolGroups={toolGroups} form={form} updateField={updateField}
+            presets={<AgentPresets active={level} ready={levelReady} onPick={applyLevel} />}
+            presetNote={t('create.uses.presetNote')}
+            notices={(
+              <>
+                <AppliedNotice applied={applied?.kind === 'preset' ? applied : null} onUndo={undoApplied} onKeep={() => setApplied(null)} testId="agent-preset-applied" />
+                <p className="ag-note">{t('create.toolsHelp')}</p>
+                {(limits.addons || limits.mcp_servers || limits.connectors) && <LimitNote t={t} />}
+                {memoryUser.settings && memoryUser.settings.enabled === false && (
+                  <Callout tone="info" icon="eye-off" testId="agent-memory-off">
+                    {t('create.memoryOffUser')}{' '}<Link className="cs-link" to="/app/account?tab=memory">{t('create.memoryOffFix')}</Link>
+                  </Callout>
                 )}
-                <p className="ag-note">{t('folder.help')}</p>
-                <p className="ag-note">{t('folder.commands')}</p>
-                {isEdit && <p className="ag-note">{t('folder.nextMessage')}</p>}
-              </div>
+                {missingGrants.length > 0 && (
+                  <Callout
+                    tone="warn" testId="agent-grants-notice"
+                    title={t('create.grantsNoticeTitle')}
+                    actions={<Button size="sm" onClick={() => updateField('builtins', missingGrants.reduce((l, g) => setGrant(l, g, true), form.builtins || []))} data-testid="agent-grants-add-missing">{t('create.grantsAddMissing')}</Button>}
+                  >
+                    {t('create.grantsNotice', { grants: missingGrants.map(g => t(`create.grantNames.${g.replace(/\./g, '_')}`, { defaultValue: g })).join(', ') })}
+                  </Callout>
+                )}
+              </>
             )}
-            {!rows.length && <p className="ag-note ag-note--gap">{t('folder.allHelp')}</p>}
-          </>
+          />
         )
-      }
-      case 'MCP':
+      case 'Files':
+        if (projectAgent) return <AgentProjectFiles project={project} mode={form.project_files_mode} onMode={(m) => updateField('project_files_mode', m)} />
+        return <AgentFiles form={form} updateField={updateField} abilities={ab} savedConfig={savedConfig} isEdit={isEdit} />
+      case 'export':
         return (
           <>
-            <p className="ag-note">{t('create.mcpHelp')}</p>
-            <NameList label={t('create.mcpServers')} hint={t('create.mcpHint')} value={mcp.servers} suggestions={modelServers}
-              onChange={(v) => updateField('mcp_servers', joinAgentMCP(v, mcp.connectors))} testId="agent-mcp" />
+            {projectAgent && <Callout tone="info" icon="lock" testId="agent-share-note">{t('project.noShare')}</Callout>}
+            <p className="ag-note">{projectAgent ? t('project.exportHelp') : t('create.exportHelp')}</p>
+            {!projectAgent && savedConfig?.folder?.path && <p className="ag-note ag-note--bottom" data-testid="agent-export-folder">{folderRows(savedConfig).length > 1 ? t('folder.exportNoteMany', { n: folderRows(savedConfig).length }) : t('folder.exportNote', { path: shownPath(savedConfig.folder.path) })}</p>}
+            <Button icon="download" onClick={() => downloadAgentFile(savedConfig, addToast, t)}>
+              {t('create.exportButton')}
+            </Button>
           </>
         )
       default:
@@ -470,125 +660,203 @@ export default function AgentCreate() {
     }
   }
 
-  const title = isEdit ? t('create.titleEdit', { name: savedConfig?.name || '' }) : imported ? t('create.titleImport') : t('create.titleCreate')
   const saveLabel = isEdit ? t('create.save') : imported ? t('create.titleImport') : t('create.titleCreate')
+  const headName = (form.name || '').trim()
+  // A card with nothing in it (Advanced holds only the export of a saved agent) is not shown.
+  const visibleGroups = GROUPS.map(g => ({ ...g, parts: g.parts.filter(pid => pid !== 'export' || (isEdit && savedConfig)) })).filter(g => g.parts.length > 0)
+
+  // A card needs the person when one of its parts does.
+  const groupNeeds = (g) => g.parts.some(pid => pid !== 'export' && foldInfo({ id: pid }).state === 'needs')
+
+  const folded = (g) => !!g.collapsible && collapsed.has(g.id)
+  const flip = (gid) => setCollapsed(prev => { const n = new Set(prev); if (n.has(gid)) n.delete(gid); else n.add(gid); return n })
+
+  const goTo = (gid) => {
+    const el = document.getElementById(secDomId(gid))
+    if (!el) return
+    if (collapsed.has(gid)) setCollapsed(prev => { const n = new Set(prev); n.delete(gid); return n })
+    const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
+    setActiveSec(gid)
+  }
+
+  const status = dirty
+    ? t('create.status.unsaved', { count: Math.max(diff.length, 1) })
+    : t(isEdit ? 'create.status.clean' : 'create.status.new')
+  const toolsInfo = foldInfo({ id: 'Uses' })
+  const memoryInfo = foldInfo({ id: 'Notes' })
 
   return (
-    <Page className="ag-page" data-testid="agent-edit">
+    <Page className="ag-page aed-page" data-testid="agent-edit">
       <UnsavedChangesGuard when={dirty && !saving} />
-      <form onSubmit={handleSubmit} noValidate className="ag-edit">
-        <div className="ag-edit__head">
-          <button type="button" className="ag-back" onClick={leave}><Icon name="arrow-left" /> {isEdit ? savedConfig?.name : t('agent.back')}</button>
-          <PageHeader
-            title={title}
-            supporting={isEdit ? t('create.subEdit') : t('create.subCreate')}
-            actions={(
-              <div className="ag-edit__acts">
-                <Button variant="ghost" onClick={leave}>{t('create.discard')}</Button>
-                <Button icon="eye" onClick={() => { setPreviewTab('config'); setPreviewOpen(true) }} data-testid="agent-preview-open">
-                  {t('create.preview')}
-                  {diff.length > 0 && <span className="dk-badge dk-badge--count">{diff.length}</span>}
-                </Button>
-                <Button type="submit" variant="primary" icon="save" busy={saving}>{saveLabel}</Button>
-              </div>
-            )}
-          />
-        </div>
-
-        {imported && (
-          <div className="ag-import-note" role="note" data-testid="agent-import-note">
-            <p>{imported.legacy ? t('create.importLegacy') : t('create.importNew')}</p>
-            {imported.dropped.length > 0 && <p>{t('create.importDropped', { keys: imported.dropped.join(', ') })}</p>}
-          </div>
-        )}
-
-        {!isEdit && !imported && (
-          <section className="ag-start" aria-labelledby="ag-start-h" data-testid="agent-start">
-            <h2 id="ag-start-h" className="ag-h3">{t('create.startFrom')}</h2>
-            <div className="ag-start__row">
-              {AGENT_TEMPLATES.map(tpl => (
-                <button key={tpl.id} type="button" className="dk-chip" onClick={() => applyTemplate(tpl)} data-template={tpl.id}>
-                  {t(`templates.${tpl.id}.label`)}
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
-
-        <div className="ag-folds">
-          {SECTIONS.map(s => {
-            const open = openSections.has(s.id)
-            const info = foldInfo(s)
-            return (
-              <section key={s.id} className="ag-fold" data-open={open || undefined} data-section={s.id}>
-                <h2 className="ag-fold__h">
-                  <button
-                    type="button"
-                    className="ag-fold__button"
-                    aria-expanded={open}
-                    aria-controls={`ag-fold-${s.id}`}
-                    onClick={() => toggleSection(s.id)}
-                  >
-                    <span className="ag-ready" data-state={info.state} aria-hidden="true"><Icon name={info.state === 'needs' ? 'warning' : 'check'} /></span>
-                    <span className="ag-fold__title">{t(`create.sections.${s.id}`)}</span>
-                    <span className="ag-fold__sum">{info.summary}</span>
-                    {info.changed > 0 ? <span className="ag-badge-changed">{t('create.changed', { count: info.changed })}</span> : <span />}
-                    <Icon name="chevron-down" className="ag-fold__chev" />
-                  </button>
-                </h2>
-                {open && (
-                  <div className="ag-fold__body" id={`ag-fold-${s.id}`}>
-                    {renderSection(s.id)}
-                  </div>
-                )}
-              </section>
-            )
-          })}
-          {isEdit && savedConfig && (
-            <section className="ag-fold" data-open={openSections.has('export') || undefined} data-section="export">
-              <h2 className="ag-fold__h">
-                <button type="button" className="ag-fold__button" aria-expanded={openSections.has('export')} aria-controls="ag-fold-export" onClick={() => toggleSection('export')}>
-                  <span className="ag-ready" data-state="ready" aria-hidden="true"><Icon name="check" /></span>
-                  <span className="ag-fold__title">{t('create.sections.export')}</span>
-                  <span className="ag-fold__sum">{t('create.exportSummary')}</span>
-                  <span />
-                  <Icon name="chevron-down" className="ag-fold__chev" />
-                </button>
-              </h2>
-              {openSections.has('export') && (
-                <div className="ag-fold__body" id="ag-fold-export">
-                  <p className="ag-note">{t('create.exportHelp')}</p>
-                  {savedConfig.folder?.path && <p className="ag-note ag-note--bottom" data-testid="agent-export-folder">{folderRows(savedConfig).length > 1 ? t('folder.exportNoteMany', { n: folderRows(savedConfig).length }) : t('folder.exportNote', { path: shownPath(savedConfig.folder.path) })}</p>}
-                  <Button icon="download" onClick={() => downloadAgentFile(savedConfig, addToast, t)}>
-                    {t('create.exportButton')}
-                  </Button>
+      <form ref={formRef} onSubmit={handleSubmit} noValidate className="ag-edit aed">
+        <button type="button" className="ag-back" onClick={leave}><Icon name="arrow-left" /> {isEdit ? savedConfig?.name : t('agent.back')}</button>
+        <header className="aed-bar" data-testid="agent-edit-header">
+          <div className="aed-bar__who">
+            <span className="aed-avatar" aria-hidden="true">{monogram(headName) || <Icon name="sparkles" />}</span>
+            <div className="aed-bar__text">
+              <h1 className="aed-bar__name" data-empty={headName ? undefined : ''}>{headName || t('create.header.unnamed')}</h1>
+              <p className="aed-bar__sub">{isEdit ? t('create.header.modeEdit') : imported ? t('create.titleImport') : t('create.header.modeCreate')}</p>
+              <p className="aed-bar__sub aed-bar__sub--status" aria-hidden="true" data-dirty={dirty || undefined}>{status}</p>
+              {projectAgent && (
+                <div className="ag-project-chip">
+                  <Chip to={`/app/projects/${encodeURIComponent(projectId)}`} icon="layers" testId="agent-project-chip">{t('project.chip', { name: project?.name || t('project.deleted') })}</Chip>
                 </div>
               )}
-            </section>
-          )}
-        </div>
+            </div>
+          </div>
+          <div className="aed-bar__acts">
+            <span className="aed-status" role="status" data-dirty={dirty || undefined} data-testid="agent-edit-status">{status}</span>
+            <Button variant="ghost" onClick={leave}>{t('create.discard')}</Button>
+            <Button icon="eye" onClick={() => { setPreviewTab('config'); setPreviewOpen(true) }} data-testid="agent-preview-open">
+              {t('create.preview')}
+              {diff.length > 0 && <span className="dk-badge dk-badge--count">{diff.length}</span>}
+            </Button>
+            <Button icon="flask" disabled={Boolean(pausedReason)} onClick={() => setTryOpen(true)} data-testid="agent-try-open">{t('create.try.open')}</Button>
+            <Button type="submit" variant="primary" icon="save" busy={saving}>{saveLabel}</Button>
+            {isEdit && savedConfig && (
+              <ActionMenu
+                ariaLabel={t('create.more')}
+                items={[{ key: 'export', icon: 'download', label: t('create.exportButton'), onClick: () => downloadAgentFile(savedConfig, addToast, t) }]}
+              />
+            )}
+          </div>
+          <ul className="aed-chips" aria-label={t('create.header.summary')}>
+            <li className="aed-chip"><span className="aed-chip__k">{t('create.sections.ModelSettings')}</span><span className="aed-chip__v">{form.model || t('create.anyModel')}</span></li>
+            <li className="aed-chip"><span className="aed-chip__k">{t('create.sections.Uses')}</span><span className="aed-chip__v">{toolsInfo.summary}</span></li>
+            <li className="aed-chip"><span className="aed-chip__k">{t('create.sections.Notes')}</span><span className="aed-chip__v">{memoryInfo.summary}</span></li>
+          </ul>
+        </header>
 
-        <div className="ag-foot">
-          <Button variant="ghost" onClick={leave}>{t('create.discard')}</Button>
-          <Button type="submit" variant="primary" icon="save" busy={saving}>{saveLabel}</Button>
+        <div className="aed-layout">
+          <nav className="aed-nav" aria-label={t('create.nav.label')}>
+            {visibleGroups.map(g => (
+              <a
+                key={g.id}
+                href={`#${secDomId(g.id)}`}
+                className="aed-nav__item"
+                aria-current={activeSec === g.id ? 'true' : undefined}
+                data-needs={groupNeeds(g) || undefined}
+                data-testid={`agent-nav-${g.id}`}
+                onClick={(e) => { e.preventDefault(); goTo(g.id) }}
+              >
+                <span className="aed-nav__dot" aria-hidden="true" />
+                {t(`create.nav.${g.id}`)}
+              </a>
+            ))}
+          </nav>
+
+          <div className="aed-main">
+            {pausedReason && (
+              <Callout
+                tone="warn" testId="agent-paused"
+                title={t('project.paused', { reason: t(`project.reason.${pausedReason}`) })}
+                actions={pausedReason === 'changed'
+                  ? <Button size="sm" icon="refresh" busy={reconnecting} onClick={reconnect} data-testid="agent-reconnect">{t('project.reconnect')}</Button>
+                  : pausedReason === 'deleted' && !project
+                    ? <Button size="sm" icon="close-circle" onClick={() => setMoving(true)} data-testid="agent-detach">{t('move.detach')}</Button>
+                    : <Button size="sm" iconEnd="arrow-right" to={project ? `/app/projects/${encodeURIComponent(projectId)}` : '/app/projects'} data-testid="agent-open-project">{t('project.openProject')}</Button>}
+              >
+                {t(pausedReason === 'deleted' && !project ? 'project.fix.deletedDetach' : `project.fix.${pausedReason}`)}
+              </Callout>
+            )}
+            <section className="aed-card" aria-labelledby="aed-project-h" data-testid="agent-project-card">
+              <div className="aed-card__head">
+                <h2 id="aed-project-h" className="aed-card__title">{t('projectField.title')}</h2>
+                <p className="aed-card__lead">{t(isEdit ? 'projectField.leadEdit' : 'projectField.leadNew')}</p>
+              </div>
+              <div className="aed-card__body ag-projcard">
+                {isEdit ? (
+                  <>
+                    <div className="ag-projcard__row">
+                      <AgentProjectField
+                        list={projectsList} value={moveTo ?? projectId} id="ag-project"
+                        disabled={projectGone && !projectsList.ready}
+                        onChange={(pid) => setMoveTo(pid === projectId ? null : pid)}
+                        help={t('projectField.helpEdit')}
+                      />
+                      <Button
+                        icon="arrow-right" disabled={moveTo === null || dirty} onClick={() => setMoving(true)}
+                        data-testid="agent-project-move"
+                      >{t('move.open')}</Button>
+                    </div>
+                    {moveTo !== null && dirty && <p className="ag-note" data-testid="agent-project-dirty">{t('projectField.saveFirst')}</p>}
+                  </>
+                ) : (
+                  <AgentProjectField list={projectsList} value={projectId} id="ag-project" onChange={pickNewProject} />
+                )}
+              </div>
+            </section>
+            {imported && (
+              <div className="ag-import-note" role="note" data-testid="agent-import-note">
+                <p>{imported.legacy ? t('create.importLegacy') : t('create.importNew')}</p>
+                {imported.dropped.length > 0 && <p>{t('create.importDropped', { keys: imported.dropped.join(', ') })}</p>}
+              </div>
+            )}
+
+            {visibleGroups.map(g => {
+              // What the card says about itself: the first part that needs the
+              // person, and how many of its fields differ from the saved agent.
+              const infos = g.parts.filter(pid => pid !== 'export').map(pid => foldInfo({ id: pid }))
+              const needs = infos.find(i => i.state === 'needs')
+              const changed = infos.reduce((n, i) => n + i.changed, 0)
+              return (
+              <section key={g.id} id={secDomId(g.id)} className="aed-card" aria-labelledby={`${secDomId(g.id)}-h`} data-group={g.id} data-collapsed={folded(g) || undefined}>
+                <div className="aed-card__head">
+                  <h2 id={`${secDomId(g.id)}-h`} className="aed-card__title">
+                    {g.collapsible ? (
+                      <button type="button" className="aed-card__toggle" aria-expanded={!folded(g)} aria-controls={`${secDomId(g.id)}-body`} onClick={() => flip(g.id)} data-testid={`agent-toggle-${g.id}`}>
+                        {t(`create.nav.${g.id}`)}<Icon name="chevron-down" className="aed-card__chev" />
+                      </button>
+                    ) : t(`create.nav.${g.id}`)}
+                  </h2>
+                  <p className="aed-card__lead">{t(`create.lead.${g.id}`)}</p>
+                  {needs && <span className="aed-card__needs" data-testid="agent-card-needs">{needs.summary}</span>}
+                  {changed > 0 && <span className="ag-badge-changed">{t('create.changed', { count: changed })}</span>}
+                </div>
+                <div className="aed-card__body" id={`${secDomId(g.id)}-body`} hidden={folded(g)}>
+                {g.parts.map(pid => {
+                  const info = pid === 'export' ? null : foldInfo({ id: pid })
+                  return (
+                    <div key={pid} className="aed-part" data-section={pid} data-bare={g.bare || undefined}>
+                      {!g.bare && (
+                        <div className="aed-part__head">
+                          {info && <span className="ag-ready" data-state={info.state} aria-hidden="true"><Icon name={info.state === 'needs' ? 'warning' : 'check'} /></span>}
+                          <h3 className="aed-part__title">{t(`create.sections.${pid}`)}</h3>
+                          {info && <span className="aed-part__sum">{info.summary}</span>}
+                          {info && info.changed > 0 && <span className="ag-badge-changed">{t('create.changed', { count: info.changed })}</span>}
+                        </div>
+                      )}
+                      <div className="aed-part__body" data-pair={pid === 'BasicInfo' || undefined}>
+                        {renderSection(pid)}
+                      </div>
+                    </div>
+                  )
+                })}
+                </div>
+              </section>
+              )
+            })}
+          </div>
         </div>
       </form>
 
-      {choosingFolder !== null && (
-        <AgentFolderDialog
-          start={(form.folders || [])[choosingFolder === 'new' ? form.folders.length - 1 : choosingFolder]?.path || '/'}
-          onCancel={() => {
-            // A row that was just added and never chosen goes away again.
-            if (choosingFolder === 'new') removeRow(form.folders.length - 1)
-            setChoosingFolder(null)
-          }}
-          onChoose={(path) => {
-            const at = choosingFolder === 'new' ? form.folders.length - 1 : choosingFolder
-            setChoosingFolder(null)
-            setRow(at, { path, state: 'ok' })
+      {moving && (
+        <AgentMoveDialog
+          agent={{ id, name: savedConfig?.name || form.name }}
+          target={moveTo ? projectsList.all.find(p => p.id === moveTo) || { id: moveTo, name: '' } : null}
+          from={project}
+          detach={moveTo === null && pausedReason === 'deleted'}
+          onCancel={() => setMoving(false)}
+          onDone={(r) => {
+            addToast(t(r.to ? 'move.done' : 'move.doneOut', { name: savedConfig?.name || form.name }), 'success')
+            setMoving(false); setMoveTo(null); setProject(null); setProjectGone(false); setProjectId('')
+            setLoading(true); setAttempt(n => n + 1)
           }}
         />
       )}
+
+      {tryOpen && <AgentTryIt form={form} tools={tools} models={chatModels} onClose={() => setTryOpen(false)} />}
 
       {previewOpen && (
         <PreviewSheet
@@ -606,109 +874,77 @@ export default function AgentCreate() {
   )
 }
 
+// "Limited by the project": the list below holds only what the project allows.
+// eslint-disable-next-line no-unused-vars
+function LimitNote({ t }) {
+  return <p className="ag-limit" data-testid="agent-limited"><Icon name="lock" />{t('project.limited')}</p>
+}
+
 // The config as it will be saved, and what differs from the saved agent.
 // Secret values are hidden here; they are saved as typed.
 // eslint-disable-next-line no-unused-vars
 function PreviewSheet({ tab, onTab, payload, diff, isEdit, saving, onSave, onClose }) {
   const { t } = useTranslation('agents')
-  const sheetRef = useRef(null)
-  const closeRef = useRef(null)
-  const openerRef = useRef(null)
-  // The parent passes a fresh onClose on every render. Read it through a ref
-  // so the effect below runs once per open: re-running it would move focus to
-  // the opener and back to Close, pulling it out of the control in use.
-  const onCloseRef = useRef(onClose)
-  useEffect(() => { onCloseRef.current = onClose })
-
-  useEffect(() => {
-    openerRef.current = document.activeElement
-    closeRef.current?.focus()
-    const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onCloseRef.current(); return }
-      if (e.key !== 'Tab' || !sheetRef.current) return
-      const focusable = Array.from(sheetRef.current.querySelectorAll('button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
-      if (focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => {
-      window.removeEventListener('keydown', onKey, true)
-      const el = openerRef.current
-      if (el && document.contains(el)) el.focus?.()
-    }
-  }, [])
-
   const shown = useCallback((v) => displayValue(maskSecrets(v)), [])
   const json = useMemo(() => JSON.stringify(maskSecrets(payload), null, 2), [payload])
 
-  return createPortal(
-    <div className="dk-sheet-veil" data-state="open" onMouseDown={onClose}>
-      <div
-        ref={sheetRef}
-        className="dk-sheet dk-sheet--wide"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="agent-preview-title"
-        data-state="open"
-        data-testid="agent-preview"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <span className="dk-sheet-grip" aria-hidden="true" />
-        <div className="dk-sheet-head">
-          <div>
-            <h2 className="dk-sheet-title" id="agent-preview-title">{t('create.previewTitle')}</h2>
-            <p className="dk-sheet-desc">{isEdit ? t('create.previewEdit') : t('create.previewNew')}</p>
-          </div>
-          <button ref={closeRef} type="button" className="dk-btn dk-btn--ghost dk-btn--icon dk-btn--sm" aria-label={t('create.close')} onClick={onClose}>
-            <Icon name="close" />
-          </button>
-        </div>
-        <div className="dk-sheet-body">
-          <div className="dk-tabs ag-sheet-tabs" role="tablist" aria-label={t('create.previewTitle')}>
-            <button type="button" role="tab" className="dk-tab" aria-selected={tab === 'config'} onClick={() => onTab('config')}>{t('create.tabConfig')}</button>
-            <button type="button" role="tab" className="dk-tab" aria-selected={tab === 'changes'} onClick={() => onTab('changes')}>
-              {t('create.tabChanges')}{diff.length > 0 && <span className="dk-badge dk-badge--count">{diff.length}</span>}
-            </button>
-          </div>
-          {tab === 'config' ? (
-            <div className="dk-tabpanel" role="tabpanel" data-testid="agent-preview-config">
-              <p className="ag-note ag-note--bottom">{t('create.configNote')}</p>
-              <pre className="ag-pre">{json}</pre>
-            </div>
-          ) : (
-            <div className="dk-tabpanel" role="tabpanel" data-testid="agent-preview-changes">
-              {diff.length === 0 ? (
-                <p className="ag-note">{isEdit ? t('create.noChanges') : t('create.nothingSet')}</p>
-              ) : (
-                <>
-                  {!isEdit && <p className="ag-note ag-note--bottom">{t('create.allNew')}</p>}
-                  <div className="ag-diff">
-                    {diff.map(d => (
-                      <div key={d.key} className="ag-diff__item" data-key={d.key}>
-                        <span className="ag-diff__key">{d.key}</span>
-                        <div className="ag-diff__pair">
-                          <div className="ag-diff__side" data-side="before"><span className="ag-diff__label">{isEdit ? t('create.saved') : t('create.default')}</span>{shown(d.before) || t('create.empty')}</div>
-                          <div className="ag-diff__side" data-side="after"><span className="ag-diff__label">{t('create.new')}</span>{shown(d.after) || t('create.empty')}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-        <div className="dk-sheet-foot">
+  return (
+    <SideSheet
+      wide
+      title={t('create.previewTitle')}
+      description={isEdit ? t('create.previewEdit') : t('create.previewNew')}
+      closeLabel={t('create.close')}
+      labelId="agent-preview-title"
+      testId="agent-preview"
+      initialFocus="close"
+      onClose={onClose}
+      footer={(
+        <>
           <button type="button" className="dk-btn dk-btn--secondary" onClick={onClose}>{t('create.close')}</button>
           <button type="button" className="dk-btn dk-btn--primary" disabled={saving} onClick={onSave}>
             {isEdit ? t('create.save') : t('create.titleCreate')}
           </button>
+        </>
+      )}
+    >
+      <Tabs
+        className="ag-sheet-tabs"
+        label={t('create.previewTitle')}
+        idPrefix="agent-preview"
+        value={tab}
+        onChange={onTab}
+        items={[
+          { id: 'config', label: t('create.tabConfig') },
+          { id: 'changes', label: t('create.tabChanges'), ...(diff.length > 0 ? { count: diff.length } : {}) },
+        ]}
+      />
+      {tab === 'config' ? (
+        <div className="dk-tabpanel" role="tabpanel" id="agent-preview-panel-config" aria-labelledby="agent-preview-tab-config" data-testid="agent-preview-config">
+          <p className="ag-note ag-note--bottom">{t('create.configNote')}</p>
+          <pre className="ag-pre">{json}</pre>
         </div>
-      </div>
-    </div>,
-    document.body,
+      ) : (
+        <div className="dk-tabpanel" role="tabpanel" id="agent-preview-panel-changes" aria-labelledby="agent-preview-tab-changes" data-testid="agent-preview-changes">
+          {diff.length === 0 ? (
+            <p className="ag-note">{isEdit ? t('create.noChanges') : t('create.nothingSet')}</p>
+          ) : (
+            <>
+              {!isEdit && <p className="ag-note ag-note--bottom">{t('create.allNew')}</p>}
+              <div className="ag-diff">
+                {diff.map(d => (
+                  <div key={d.key} className="ag-diff__item" data-key={d.key}>
+                    <span className="ag-diff__key">{d.key}</span>
+                    <div className="ag-diff__pair">
+                      <div className="ag-diff__side" data-side="before"><span className="ag-diff__label">{isEdit ? t('create.saved') : t('create.default')}</span>{shown(d.before) || t('create.empty')}</div>
+                      <div className="ag-diff__side" data-side="after"><span className="ag-diff__label">{t('create.new')}</span>{shown(d.after) || t('create.empty')}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </SideSheet>
   )
 }

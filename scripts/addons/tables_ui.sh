@@ -49,13 +49,13 @@ PY
 }
 report="$cache/logs/tables-ui-apply.json"
 rm -f "$report"
-go test -count=1 -p 2 -tags auth ./tests/addons/tablesadmin -ginkgo.focus='UI changes of a database' -ginkgo.json-report="$report" >"$cache/logs/tables-ui-apply.log" 2>&1 || { tail -40 "$cache/logs/tables-ui-apply.log" >&2; exit 1; }
+go test -count=1 -p 2 -tags auth,nosqlite,purego_utp ./tests/addons/tablesadmin -ginkgo.focus='UI changes of a database' -ginkgo.json-report="$report" >"$cache/logs/tables-ui-apply.log" 2>&1 || { tail -40 "$cache/logs/tables-ui-apply.log" >&2; exit 1; }
 go_cases "$report"
 
 # 3. The real owner, the real Tables executable, the built package.
 node "$pkg/build.mjs" >"$cache/logs/tables-ui-build.log" 2>&1 || { cat "$cache/logs/tables-ui-build.log" >&2; exit 1; }
 tables_exe="$cache/tmp/tables-ui-exe"
-CGO_ENABLED=1 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
+CGO_ENABLED=0 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
 fixture_dir="$cache/tmp/tables-ui-fixture"
 rm -rf "$fixture_dir"
 mkdir -p "$fixture_dir/tables" "$fixture_dir/tables-next"

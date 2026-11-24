@@ -3,6 +3,7 @@ package studio_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/mudler/LocalAI/addons/telegram/transport"
@@ -42,7 +43,15 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 	ask := func(sender string, roles []string, text string) {
 		n++
 		Expect(r.conns.Ingest(ctx, "telegram", contract.ConnectorInbound{BindingID: b.ID, ConnectorMessage: contract.ConnectorMessage{
-			Chat: sender, Direct: true, SenderID: sender, SenderName: "S", Text: text, Roles: roles}})).To(Succeed())
+			Chat: sender, ChatName: "Room " + sender, Direct: true, SenderID: sender, SenderName: "S", Text: text, Roles: roles}})).To(Succeed())
+		waitFor("the answer", func() bool { return len(r.bot.answers()) >= n })
+	}
+	// askMember sends a message from a person who is not on the allowlist
+	// themselves: they write in a group that is, and name the bot.
+	askMember := func(roles []string, text string) {
+		n++
+		Expect(r.conns.Ingest(ctx, "telegram", contract.ConnectorInbound{BindingID: b.ID, ConnectorMessage: contract.ConnectorMessage{
+			Chat: "-100", Mention: true, SenderID: "21", SenderName: "M", Text: text, Roles: roles}})).To(Succeed())
 		waitFor("the answer", func() bool { return len(r.bot.answers()) >= n })
 	}
 	tools := func() []string {
@@ -61,7 +70,7 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		r = newConnRigWith(sh, connStore(), studiobot.NewTransport(addon), script, nil)
 		r.bot, r.untrusted = bot, true
 		r.grantBuiltins(contract.CapMemoryWrite, contract.CapProfileWrite, contract.CapTriggersPropose)
-		b = r.bind(studio.ConnectorInput{Allow: []string{"11", "12"}, Caps: caps, Grants: grants})
+		b = r.bind(studio.ConnectorInput{Allow: []string{"11", "12", "-100", "@boss"}, Caps: caps, Grants: grants})
 		got, err := r.store.GetBinding(ctx, b.ID)
 		Expect(err).NotTo(HaveOccurred())
 		for _, p := range paired {
@@ -72,9 +81,18 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 	}
 	admin := []connectors.RoleGrant{{Role: "admin", Caps: []string{contract.CapMemoryWrite}}}
 
-	It("offers no gated tool to a sender who holds no capability", func() {
-		setup([]string{contract.CapMemoryWrite}, admin)
+	It("offers a gated tool to a sender who is on the allowlist, without a pairing or a role", func() {
+		setup([]string{contract.CapMemoryWrite}, nil)
 		ask("11", nil, "remember")
+		Expect(tools()).To(ContainElement("propose_change"))
+		res := r.h.ResultsFor("propose_change")
+		Expect(res).To(HaveLen(1))
+		Expect(res[0].Err).NotTo(HaveOccurred())
+	})
+
+	It("offers no gated tool to a sender who only came in through a listed group", func() {
+		setup([]string{contract.CapMemoryWrite}, admin)
+		askMember(nil, "remember")
 		Expect(tools()).NotTo(ContainElement("propose_change"))
 		res := r.h.ResultsFor("propose_change")
 		Expect(res).To(HaveLen(1))
@@ -99,7 +117,7 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		ask("11", []string{"admin"}, "profile")
 		res = r.h.ResultsFor("propose_change")
 		Expect(res).To(HaveLen(2))
-		Expect(res[1].Err).To(MatchError(ContainSubstring("not permitted: the owner has not allowed profile.write")))
+		Expect(res[1].Err).To(MatchError(ContainSubstring("not permitted: You need to be verified with this bot by the owner before it can change the agent's rules for you.")))
 		list, _ := r.svc.Changes().List(ctx, alice)
 		Expect(list).To(HaveLen(1), "the refused change made no proposal")
 	})
@@ -114,7 +132,7 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 
 	It("does not trust a role that the sender claims on a binding that did not grant it", func() {
 		setup([]string{contract.CapMemoryWrite}, nil)
-		ask("11", []string{"admin"}, "remember")
+		askMember([]string{"admin"}, "remember")
 		Expect(tools()).NotTo(ContainElement("propose_change"))
 	})
 
@@ -130,6 +148,20 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		Expect(strings.Contains(string(raw), "be brief")).To(BeFalse(), "no message content in the audit")
 	})
 
+	It("names the sender and the chat in the audit, next to their IDs", func() {
+		setup([]string{contract.CapMemoryWrite, contract.CapProfileWrite}, admin)
+		ask("11", []string{"admin"}, "profile")
+		view, err := r.conns.Access(ctx, alice, b.ID)
+		Expect(err).NotTo(HaveOccurred())
+		i := slices.IndexFunc(view.Recent, func(e studio.AccessEvent) bool { return e.Capability == contract.CapProfileWrite })
+		Expect(i).To(BeNumerically(">=", 0))
+		e := view.Recent[i]
+		Expect([]string{e.SenderName, e.Chat, e.ChatName}).To(Equal([]string{"S", "11", "Room 11"}))
+		Expect(e.Senders).To(Equal([]string{"11"}), "the ID is still there")
+		raw, _ := json.Marshal(e)
+		Expect(string(raw)).To(And(ContainSubstring(`"sender_name":"S"`), ContainSubstring(`"chat_name":"Room 11"`)))
+	})
+
 	It("shows what each kind of sender may do", func() {
 		setup([]string{contract.CapMemoryWrite, contract.CapProfileWrite}, admin)
 		view, err := r.conns.Access(ctx, alice, b.ID)
@@ -137,14 +169,16 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		allowed := map[string][]string{}
 		for _, s := range view.Subjects {
 			for _, d := range s.Decisions {
-				if d.Allowed {
+				if d.Allowed && d.Capability != studio.NotesReadCapability {
 					allowed[s.ID] = append(allowed[s.ID], d.Capability)
 				}
 			}
 		}
 		Expect(allowed).To(Equal(map[string][]string{
-			"paired":     {contract.CapMemoryWrite, contract.CapProfileWrite},
-			"role:admin": {contract.CapMemoryWrite},
+			"listed":       {contract.CapMemoryWrite},
+			"channel_acts": {contract.CapMemoryWrite},
+			"paired":       {contract.CapMemoryWrite, contract.CapProfileWrite},
+			"role:admin":   {contract.CapMemoryWrite},
 		}))
 	})
 
@@ -153,7 +187,7 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		Expect(r.conns.Ingest(ctx, "telegram", contract.ConnectorInbound{BindingID: b.ID, ConnectorMessage: contract.ConnectorMessage{
 			Chat: "11", Direct: true, SenderID: "11", Media: []string{"m1"}}})).To(Succeed())
 		waitFor("the refusal", func() bool { return len(r.bot.answers()) == 1 })
-		Expect(r.bot.answers()[0]).To(Equal("You may not send files to this bot."))
+		Expect(r.bot.answers()[0]).To(Equal("The owner has not turned that on for this bot."))
 		chats, _ := r.svc.List(ctx, alice, 10)
 		Expect(chats).To(BeEmpty())
 	})
@@ -167,10 +201,21 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 		}
 		Expect(req(studio.CapabilityRequest{Capability: contract.CapTriggersPropose})).To(BeTrue(), "the binding allows it")
 		Expect(req(studio.CapabilityRequest{Capability: contract.CapTriggersRun})).To(BeFalse(), "not in the ceiling")
-		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "11"})).To(BeFalse())
-		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "11", Roles: []string{"admin"}})).To(BeTrue(), "a role the owner granted it")
-		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "11", Roles: []string{"admin"}, Sensitive: true})).To(BeFalse(), "a role never counts for a sensitive request")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "11"})).To(BeTrue(), "a sender on the allowlist")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "7", Username: "Boss"})).To(BeTrue(), "a sender on the allowlist by handle")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "7", Username: "other"})).To(BeFalse(), "not on the allowlist")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "21"})).To(BeFalse(), "a member of a listed group is not on the allowlist")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "21", Roles: []string{"admin"}})).To(BeTrue(), "a role the owner granted it")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "21", Roles: []string{"admin"}, Sensitive: true})).To(BeFalse(), "a role never counts for a sensitive request")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "11", Sensitive: true})).To(BeFalse(), "neither does the allowlist")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "12", Sensitive: true})).To(BeTrue(), "a pairing does")
 		Expect(req(studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Sender: "12"})).To(BeTrue(), "paired")
+		// The gate behind the auto start of a trigger that acts asks about a
+		// capability that is not sensitive, with the Sensitive mark: the
+		// allowlist must not pass it, only a pairing.
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapTriggersPropose, Sender: "11"})).To(BeTrue(), "the allowlist holds a capability that is not sensitive")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapTriggersPropose, Sender: "11", Sensitive: true})).To(BeFalse(), "but not when the request is marked sensitive")
+		Expect(req(studio.CapabilityRequest{Capability: contract.CapTriggersPropose, Sender: "12", Sensitive: true})).To(BeTrue(), "a pairing passes")
 		Expect(gate.Allow(ctx, studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Binding: "nope", Sender: "12"})).To(BeFalse())
 		Expect(gate.Allow(ctx, studio.CapabilityRequest{Capability: contract.CapProposalsConfirm, Binding: b.ID, Owner: "mallory", Sender: "12"})).To(BeFalse())
 	})
@@ -178,11 +223,11 @@ var _ = Describe("permissions in the turns of a connector chat", func() {
 	It("lets an extra switch turn a capability off for everyone", func() {
 		setup([]string{contract.CapMemoryWrite}, nil, "11")
 		off := true
-		r.conns.AddCapabilitySwitch(func(_ context.Context, _ connectors.Binding, c string) string {
+		r.conns.AddCapabilitySwitch(func(_ context.Context, _ connectors.Binding, c string) studio.Block {
 			if off && c == contract.CapMemoryWrite {
-				return "memory is switched off on this server"
+				return studio.Block{Code: studio.CodeServerSettingOff, Reason: "memory is switched off on this server"}
 			}
-			return ""
+			return studio.Block{}
 		})
 		ask("11", nil, "remember")
 		Expect(tools()).NotTo(ContainElement("propose_change"))

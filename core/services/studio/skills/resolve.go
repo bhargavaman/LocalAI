@@ -19,9 +19,15 @@ import (
 // Layer is where a skill comes from. A nearer layer wins over a farther one.
 type Layer string
 
-// The six layers, nearest first.
+// The seven layers, nearest first.
 const (
 	LayerFolder Layer = "folder"
+	// LayerProject holds the skills of one project, in the project folder under
+	// Projects/<folder>/skills. Only a chat or an agent of that project sees
+	// them. It is nearer than the agent and personal layers, so the project's
+	// version of a skill wins over the owner's; a skill in the working folder
+	// still wins over it.
+	LayerProject Layer = "project"
 	// LayerAgent holds the skills of one saved agent, in the owner's home under
 	// LocalAI/agents/<agent>/skills. Only a chat that runs that agent sees
 	// them. It is nearer than the personal layer, so an agent's own version of
@@ -40,18 +46,20 @@ func (l Layer) rank() int {
 	switch l {
 	case LayerFolder:
 		return 0
-	case LayerAgent:
+	case LayerProject:
 		return 1
-	case LayerPersonal:
+	case LayerAgent:
 		return 2
-	case LayerShared:
+	case LayerPersonal:
 		return 3
-	case LayerAddon:
+	case LayerShared:
 		return 4
-	case LayerBuiltin:
+	case LayerAddon:
 		return 5
+	case LayerBuiltin:
+		return 6
 	}
-	return 6
+	return 7
 }
 
 // SkillsDir is the name of the folder that holds the skills of a folder.
@@ -100,6 +108,9 @@ type Root struct {
 	// Agent names the saved agent of an agent layer root. It is copied to the
 	// skills found there, with AgentName, its display name.
 	Agent, AgentName string
+	// Project is the folder name of the project of a project layer root. It is
+	// copied to the skills found there.
+	Project string
 }
 
 // Skill is one skill that Resolve saw.
@@ -118,9 +129,17 @@ type Skill struct {
 	// Off is true when Options.Off turned the skill off. An off skill takes
 	// no part in the precedence rule and is not in the index.
 	Off bool
+	// Provider names the provider slot that grants the skill to every chat
+	// that uses the slot ("memory"), and Locked is true then: the person does
+	// not grant it in an agent, the host does. Set by the product.
+	Provider string
+	Locked   bool
 	// Requires are the capabilities the skill needs (the "requires" key of
 	// its frontmatter), for example RequireExec.
 	Requires []string
+	// Sandbox is the sandbox profile the skill prefers (the "sandbox" key of
+	// its frontmatter), or "". It is a hint: nothing switches the profile.
+	Sandbox string
 	// Unavailable, set by the product, says why the skill cannot be used in
 	// this chat, for example "needs command execution". Index lists such a
 	// skill with the reason, so the model explains instead of starting it.
@@ -130,6 +149,9 @@ type Skill struct {
 	Addon, AddonTitle string
 	// Agent names the saved agent that owns a skill of the agent layer.
 	Agent, AgentName string
+	// Project is the folder name of the project that owns a skill of the
+	// project layer.
+	Project string
 	// Fallback, set by the product, names the add-on whose own skill of this
 	// name would replace this built-in one but is off or not running here.
 	Fallback string
@@ -160,6 +182,11 @@ type Options struct {
 	// layer in the same call is Invalid. Nil: no add-on skill may replace a
 	// built-in one.
 	Replaceable func(name string) bool
+	// Ignore reports a workspace folder whose skills Resolve leaves out, as
+	// if it did not exist: a folder of skills, or the folder of one skill.
+	// The host passes the folders that another person may write, so their
+	// text never becomes the owner's skill. Nil leaves nothing out.
+	Ignore func(folder string) bool
 }
 
 // ErrNotReplaceable is the reason of an add-on skill that has the name of a
@@ -176,6 +203,7 @@ type container struct {
 	title     string
 	agent     string
 	agentName string
+	project   string
 }
 
 // Resolve reads the skills that the actor can see in roots and applies the
@@ -228,7 +256,7 @@ func Resolve(ctx context.Context, s workspace.Store, a workspace.Actor, roots []
 			boxes = append(boxes, found...)
 			continue
 		}
-		boxes = append(boxes, container{layer: r.Layer, path: cleanPath(r.Path), guest: strings.TrimSuffix(r.Guest, "/"), addon: r.Addon, title: r.AddonTitle, agent: r.Agent, agentName: r.AgentName})
+		boxes = append(boxes, container{layer: r.Layer, path: cleanPath(r.Path), guest: strings.TrimSuffix(r.Guest, "/"), addon: r.Addon, title: r.AddonTitle, agent: r.Agent, agentName: r.AgentName, project: r.Project})
 	}
 	if o.Logger != nil {
 		o.Logger.Debug("skills: folder walk", "folders", walked, "limit", maxWalkFolders)
@@ -241,6 +269,9 @@ func Resolve(ctx context.Context, s workspace.Store, a workspace.Actor, roots []
 	reads, probes := 0, 0
 scan:
 	for _, b := range boxes {
+		if o.Ignore != nil && o.Ignore(b.path) {
+			continue
+		}
 		kids, err := s.List(ctx, a, b.path)
 		if err != nil {
 			// ErrInvalid: the layer folder is a file, for example a user wrote
@@ -259,6 +290,9 @@ scan:
 				break scan
 			}
 			probes++
+			if o.Ignore != nil && o.Ignore(skillDir(b, k)) {
+				continue
+			}
 			sk, ok, err := readSkill(ctx, s, a, b, k)
 			if err != nil {
 				return nil, nil, err
@@ -384,13 +418,18 @@ func walk(ctx context.Context, s workspace.Store, a workspace.Actor, r Root, ski
 	return found, cut, nil
 }
 
+// skillDir is the workspace path of the skill folder dir of the container b.
+func skillDir(b container, dir workspace.Node) string {
+	if dir.Path != "" {
+		return dir.Path
+	}
+	return path.Join(b.path, dir.Name)
+}
+
 // readSkill reads <container>/<dir>/SKILL.md. ok is false when the folder has
 // no SKILL.md, which is not an error.
 func readSkill(ctx context.Context, s workspace.Store, a workspace.Actor, b container, dir workspace.Node) (Skill, bool, error) {
-	dp := dir.Path
-	if dp == "" {
-		dp = path.Join(b.path, dir.Name)
-	}
+	dp := skillDir(b, dir)
 	sk := Skill{
 		Name:       dir.Name,
 		Layer:      b.layer,
@@ -401,6 +440,7 @@ func readSkill(ctx context.Context, s workspace.Store, a workspace.Actor, b cont
 		AddonTitle: b.title,
 		Agent:      b.agent,
 		AgentName:  b.agentName,
+		Project:    b.project,
 	}
 	rc, node, err := s.Open(ctx, a, dp+"/"+SkillFile)
 	if err != nil {
@@ -433,6 +473,7 @@ func readSkill(ctx context.Context, s workspace.Store, a workspace.Actor, b cont
 	}
 	sk.Name, sk.Description = name, desc
 	sk.Requires = Requires(data)
+	sk.Sandbox = Sandbox(data)
 	return sk, true, nil
 }
 

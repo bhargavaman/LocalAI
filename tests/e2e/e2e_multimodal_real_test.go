@@ -153,7 +153,7 @@ func decisionIsolatedApp(dir, binary string) (*localaiapp.Application, string, f
 	DeferCleanup(cancel)
 	// These optional services own process-global meters/exporters and signal
 	// handlers. An isolated HTTP fixture must not replace or retain them.
-	a, err := localaiapp.New(config.WithContext(ctx), config.WithSystemState(state), config.WithGeneratedContentDir(filepath.Join(dir, "generated")), config.DisableMetricsEndpoint, config.WithDisableLocalAIAssistant(true), config.WithDisableStats(true), config.WithRouterDecisionLog(true))
+	a, err := localaiapp.New(config.WithContext(ctx), config.WithSystemState(state), config.WithGeneratedContentDir(filepath.Join(dir, "generated")), config.DisableMetricsEndpoint, config.WithDisableStats(true), config.WithRouterDecisionLog(true))
 	var server *httptest.Server
 	var once sync.Once
 	cleanup := func() {
@@ -169,6 +169,12 @@ func decisionIsolatedApp(dir, binary string) (*localaiapp.Application, string, f
 	}
 	DeferCleanup(cleanup)
 	Expect(err).NotTo(HaveOccurred())
+	// Starting an application installs its remotes service as the one
+	// process-wide key resolver. Give it back to the shared application, or
+	// the proxy models of the shared server lose the keys of their remotes.
+	if localAIApp != nil && localAIApp.Remotes() != nil {
+		config.SetProxyKeyResolver(localAIApp.Remotes())
+	}
 	a.ModelLoader().SetExternalBackend("llama-cpp", binary)
 	a.ModelLoader().SetExternalBackend("mock-backend", mockBackendPath)
 	app, err := httpapi.API(a)
@@ -199,8 +205,6 @@ var _ = Describe("Decision fixture isolation", Label("Multimodal"), func() {
 		Expect(isolated.ApplicationConfig().DisableStats).To(BeTrue())
 		Expect(isolated.StatsRecorder()).To(BeNil())
 		Expect(isolated.RouterDecisions()).NotTo(BeNil())
-		Expect(isolated.ApplicationConfig().DisableLocalAIAssistant).To(BeTrue())
-		Expect(isolated.LocalAIAssistant()).To(BeNil())
 		code, _ := decisionPostAt(url, "/systemone", map[string]any{"model": "mm-decision", "state": map[string]any{}, "questions": map[string]any{"q": map[string]any{"type": "noul"}}})
 		Expect(code).To(Equal(500))
 		checkShared()

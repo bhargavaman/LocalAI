@@ -2,8 +2,10 @@
 package catalog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -30,7 +32,11 @@ var _ = Describe("official library default", func() {
 		Expect(list[0].ID).To(Equal(OfficialLibraryID))
 		info, e := os.Stat(s.path)
 		Expect(e).NotTo(HaveOccurred())
-		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+		// POSIX permission bits are not enforceable on Windows, where the file
+		// is reported with the default 0666 mode regardless of chmod.
+		if runtime.GOOS != "windows" {
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+		}
 		reloaded, e := NewSources(s.path, checker, CredentialResolver{})
 		Expect(e).NotTo(HaveOccurred())
 		Expect(reloaded.sources).To(HaveKey(OfficialLibraryID))
@@ -92,7 +98,7 @@ var _ = Describe("official library index", func() {
 			Expect(versionPattern.MatchString(r.Version)).To(BeTrue(), r.ID)
 			Expect(r.Artifact).To(HavePrefix("oci://"), r.ID)
 		}
-		Expect(slices.Compact(slices.Sorted(slices.Values(ids)))).To(ConsistOf("fine-tuning", "quantization", "voice", "face", "studio", "talk", "telegram", "slack", "github", "tables", "office", "sandbox", "web", "memory"))
+		Expect(slices.Compact(slices.Sorted(slices.Values(ids)))).To(ConsistOf("fine-tuning", "quantization", "voice", "face", "studio", "talk", "telegram", "slack", "discord", "github", "gdrive", "gmail", "home-assistant", "jellyfin", "calendar", "contacts", "mail", "pikvm", "pirateface-search", "ollama-search", "ssh", "tables", "office", "sandbox", "web"))
 	})
 })
 
@@ -170,5 +176,50 @@ var _ = Describe("official library index platforms", func() {
 			}
 		}
 		Expect(have).To(Equal(want), "regenerate with scripts/addons/catalog.sh")
+	})
+})
+
+var _ = Describe("official flag of an entry", func() {
+	It("is true only for the official ID at an address the shipped library has used", func() {
+		Expect(IsOfficialSource(OfficialLibraryID, OfficialLibraryURL)).To(BeTrue())
+		Expect(IsOfficialSource(OfficialLibraryID, OfficialLibrary().URL)).To(BeTrue())
+		Expect(IsOfficialSource(OfficialLibraryID, "https://example.org/index.yaml")).To(BeFalse())
+		Expect(IsOfficialSource("mine", OfficialLibraryURL)).To(BeFalse())
+		Expect(IsOfficialSource("", "")).To(BeFalse())
+	})
+	It("is false for an entry of another library, even when the index claims otherwise", func() {
+		// The reader is strict, so the field is accepted; the stamp then
+		// overwrites whatever the remote index said.
+		r, e, s := refreshBody(yamlEntry + "  official: true\n")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(r.Count).To(Equal(1))
+		got, e := (Catalog{Sources: s, TargetOS: "linux", TargetArch: "amd64"}).Resolve(ctx, "lib", "tables", "1.0.0")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(got.Official).To(BeFalse())
+		raw, e := json.Marshal(got)
+		Expect(e).NotTo(HaveOccurred())
+		Expect(string(raw)).To(ContainSubstring(`"official":false`))
+	})
+})
+
+var _ = Describe("pinned signer of a source", func() {
+	pinned := VerificationPolicy{RequireSignature: true, Issuer: "https://issuer.example", Identity: "signer@registry.example"}
+	It("names the pinned identity of a signed source that is not official", func() {
+		Expect(pinnedSigner(Source{ID: "mine", URL: "oci://registry.example/libs/x:latest", Policy: pinned})).To(Equal("signer@registry.example"))
+	})
+	It("names nobody for the official library, a source without a signature rule or a pattern", func() {
+		official := OfficialLibrary()
+		Expect(official.Policy.RequireSignature).To(BeTrue())
+		Expect(pinnedSigner(official)).To(BeEmpty())
+		Expect(pinnedSigner(Source{ID: "mine", URL: "https://example.org/i.yaml"})).To(BeEmpty())
+		Expect(pinnedSigner(Source{ID: "mine", Policy: VerificationPolicy{Issuer: "https://issuer.example", Identity: "signer@registry.example"}})).To(BeEmpty())
+		Expect(pinnedSigner(Source{ID: "mine", Policy: VerificationPolicy{RequireSignature: true, Issuer: "https://issuer.example", IdentityRegex: "^a$"}})).To(BeEmpty())
+	})
+	It("is not carried by an encoded index", func() {
+		r := release()
+		r.Signer = "signer@registry.example"
+		raw, e := EncodeIndex([]Release{r})
+		Expect(e).NotTo(HaveOccurred())
+		Expect(string(raw)).NotTo(ContainSubstring("signer"))
 	})
 })

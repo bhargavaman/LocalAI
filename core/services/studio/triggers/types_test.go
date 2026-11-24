@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,7 +17,91 @@ func goodFile() Trigger {
 	return Trigger{ID: "t", Owner: "1", Name: "Contracts", Prompt: "Read it.", Kind: KindFile, Folder: "/users/1/Contracts", Quiet: time.Minute}
 }
 
+func goodEvent() Trigger {
+	return Trigger{ID: "t", Owner: "1", Name: "PRs", Prompt: "Review it.", Kind: KindEvent, Source: "github", EventType: "pull_request", Matches: []string{"action=opened"}}
+}
+
 var _ = Describe("Trigger types", func() {
+	It("validates an event trigger", func() {
+		Expect(goodEvent().Validate()).To(Succeed())
+		bare := goodEvent()
+		bare.EventType, bare.Matches = "", nil
+		Expect(bare.Validate()).To(Succeed(), "type and matches are optional")
+		long := strings.Repeat("x", MaxEventField+1)
+		for name, c := range map[string]struct {
+			edit func(*Trigger)
+			want string
+		}{
+			"empty source": {func(t *Trigger) { t.Source = "" }, "source is required"},
+			"long source":  {func(t *Trigger) { t.Source = long }, "source"},
+			"long type":    {func(t *Trigger) { t.EventType = long }, "event type"},
+			"too many": {func(t *Trigger) {
+				t.Matches = make([]string, MaxMatches+1)
+				for i := range t.Matches {
+					t.Matches[i] = "a=b"
+				}
+			}, "at most 8 matches"},
+			"no equals":       {func(t *Trigger) { t.Matches = []string{"action"} }, "field=value"},
+			"empty field":     {func(t *Trigger) { t.Matches = []string{"=x"} }, "field=value"},
+			"empty segment":   {func(t *Trigger) { t.Matches = []string{"a..b=x"} }, "dot path"},
+			"leading dot":     {func(t *Trigger) { t.Matches = []string{".a=x"} }, "dot path"},
+			"trailing dot":    {func(t *Trigger) { t.Matches = []string{"a.=x"} }, "dot path"},
+			"proto segment":   {func(t *Trigger) { t.Matches = []string{"a.__proto__.b=x"} }, "dot path"},
+			"ctor segment":    {func(t *Trigger) { t.Matches = []string{"constructor.prototype=x"} }, "dot path"},
+			"long match":      {func(t *Trigger) { t.Matches = []string{"a=" + long} }, "match"},
+			"control in type": {func(t *Trigger) { t.EventType = "a\nb" }, "event type"},
+		} {
+			tr := goodEvent()
+			c.edit(&tr)
+			err := tr.Validate()
+			Expect(err).To(HaveOccurred(), name)
+			Expect(err.Error()).To(ContainSubstring(c.want), name)
+		}
+		for name, edit := range map[string]func(*Trigger){
+			"source": func(t *Trigger) { t.Source = "github" }, "type": func(t *Trigger) { t.EventType = "push" },
+			"matches": func(t *Trigger) { t.Matches = []string{"a=b"} }, "secret": func(t *Trigger) { t.Secret = "s" },
+		} {
+			tr := goodSchedule()
+			edit(&tr)
+			Expect(tr.Validate()).NotTo(Succeed(), "schedule trigger with event field "+name)
+			f := goodFile()
+			edit(&f)
+			Expect(f.Validate()).NotTo(Succeed(), "file trigger with event field "+name)
+		}
+	})
+
+	It("re-arms an event trigger when its source or type changes", func() {
+		now := time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
+		old := goodEvent()
+		old.Since = now.Add(-time.Hour)
+		same := goodEvent()
+		Expect(Arm(&old, same, now).Since).To(Equal(old.Since))
+		src := goodEvent()
+		src.Source = "gitlab"
+		Expect(Arm(&old, src, now).Since).To(Equal(now))
+		typ := goodEvent()
+		typ.EventType = "push"
+		Expect(Arm(&old, typ, now).Since).To(Equal(now))
+	})
+
+	It("limits the secret of an event trigger", func() {
+		tr := goodEvent()
+		tr.Secret = ""
+		Expect(tr.Validate()).To(Succeed(), "an empty secret is for the service to fill")
+		tr.Secret = strings.Repeat("s", MaxEventSecret)
+		Expect(tr.Validate()).To(Succeed(), "a secret at the limit")
+		tr.Secret = strings.Repeat("s", MaxEventSecret+1)
+		Expect(tr.Validate()).To(MatchError(ContainSubstring("secret")), "a secret past the limit")
+		tr.Secret = "abc\ndef"
+		Expect(tr.Validate()).To(MatchError(ContainSubstring("secret")), "a control character")
+	})
+
+	It("keeps the secret out of formatted output", func() {
+		tr := goodEvent()
+		tr.Secret = "hunter2-secret"
+		Expect(fmt.Sprintf("%v %+v %s", tr, tr, tr)).NotTo(ContainSubstring("hunter2-secret"))
+	})
+
 	It("accepts good triggers on validation", func() {
 		for _, tr := range []Trigger{goodSchedule(), goodFile()} {
 			Expect(tr.Validate()).To(Succeed(), "%s trigger", tr.Kind)
@@ -54,6 +139,9 @@ var _ = Describe("Trigger types", func() {
 			{"long prompt", func(t *Trigger) { t.Prompt = strings.Repeat("p", 8001) }, "prompt can have at most 8000 bytes"},
 			{"negative cap", func(t *Trigger) { t.DailyCap = -1 }, "daily limit must be 0 to 1000"},
 			{"big cap", func(t *Trigger) { t.DailyCap = 1001 }, "daily limit must be 0 to 1000"},
+			{"short time limit", func(t *Trigger) { t.RunLimit = 30 * time.Second }, "time limit must be empty or 1m to 24h"},
+			{"negative time limit", func(t *Trigger) { t.RunLimit = -time.Minute }, "time limit must be empty or"},
+			{"long time limit", func(t *Trigger) { t.RunLimit = 25 * time.Hour }, "time limit must be empty or"},
 			{"bad kind", func(t *Trigger) { t.Kind = "webhook" }, "kind must be"},
 			{"bad schedule", func(t *Trigger) { t.Schedule = "daily 25:00" }, "hour must be 0 to 23"},
 			{"bad zone", func(t *Trigger) { t.TZ = "Mars/Base" }, `time zone "Mars/Base" is not known`},
@@ -147,6 +235,18 @@ var _ = Describe("Trigger types", func() {
 		Expect(tr.CapOrDefault()).To(Equal(3), "explicit values were replaced")
 	})
 
+	It("gives the effective run limit as the least of the trigger and the ceiling", func() {
+		ceiling := 15 * time.Minute
+		var tr Trigger
+		Expect(tr.EffectiveRunLimit(ceiling)).To(Equal(ceiling), "zero takes the ceiling")
+		tr.RunLimit = 5 * time.Minute
+		Expect(tr.EffectiveRunLimit(ceiling)).To(Equal(5 * time.Minute))
+		tr.RunLimit = time.Hour
+		Expect(tr.EffectiveRunLimit(ceiling)).To(Equal(ceiling), "a lowered ceiling applies at once")
+		Expect(tr.EffectiveRunLimit(0)).To(Equal(time.Hour), "no ceiling leaves the value")
+		Expect(tr.EffectiveRunLimit(2 * time.Hour)).To(Equal(time.Hour))
+	})
+
 	It("arms a trigger", func() {
 		now := time.Date(2026, 10, 22, 9, 0, 0, 0, time.FixedZone("x", 3600))
 		earlier := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -211,6 +311,25 @@ var _ = Describe("Route", func() {
 		Expect(Route{Target: "elsewhere"}.Validate()).NotTo(Succeed())
 		Expect(Route{Mode: "sometimes"}.Validate()).NotTo(Succeed())
 	})
+	It("lets a run report to a channel of a connection chosen in Studio, without a connector chat", func() {
+		r := Route{Connection: "b1", Channel: "G1", Target: TargetChannel, Mode: ModeOnChange}
+		Expect(r.Validate()).To(Succeed())
+		Expect(r.FromConnector()).To(BeFalse(), "the connection is a destination, not a place the trigger came from")
+		Expect(r.ChannelBinding()).To(Equal("b1"))
+		Expect(Route{Binding: "b2", Connection: "", Channel: "G1", Target: TargetChannel}.ChannelBinding()).To(Equal("b2"))
+	})
+	It("still refuses the origin without a connector chat, even with a connection", func() {
+		Expect(Route{Connection: "b1", Target: TargetOrigin}.Validate()).NotTo(Succeed())
+	})
+	It("refuses a channel that names no connection or no channel", func() {
+		Expect(Route{Target: TargetChannel, Channel: "G1"}.Validate()).NotTo(Succeed())
+		Expect(Route{Target: TargetChannel, Connection: "b1"}.Validate()).NotTo(Succeed())
+	})
+	It("refuses a connection that is not the target channel, or that comes with a connector place", func() {
+		Expect(Route{Connection: "b1", Target: TargetInbox}.Validate()).NotTo(Succeed())
+		Expect(Route{Connection: "b1"}.Validate()).NotTo(Succeed())
+		Expect(Route{Binding: "b2", Connection: "b1", Channel: "G1", Target: TargetChannel}.Validate()).NotTo(Succeed())
+	})
 	It("expires a waiting proposal that has a time, and no other", func() {
 		now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		p := Trigger{Proposed: true, Route: Route{Expires: now.Add(time.Hour)}}
@@ -246,5 +365,28 @@ var _ = Describe("a one-off trigger", func() {
 		Expect(p.Expired(now)).To(BeFalse())
 		Expect(p.Expired(now.Add(30 * time.Minute))).To(BeTrue())
 		Expect(p.Expired(now.Add(31 * time.Minute))).To(BeTrue())
+	})
+})
+
+var _ = Describe("the daily limit that grows with the cadence", func() {
+	It("gives one run per firing in a day, from 24 up to the maximum", func() {
+		Expect(DefaultCapFor(0)).To(Equal(24), "a schedule that runs once")
+		Expect(DefaultCapFor(24 * time.Hour)).To(Equal(24))
+		Expect(DefaultCapFor(time.Hour)).To(Equal(24))
+		Expect(DefaultCapFor(30 * time.Minute)).To(Equal(48))
+		Expect(DefaultCapFor(15 * time.Minute)).To(Equal(96))
+		Expect(DefaultCapFor(5 * time.Minute)).To(Equal(288))
+		Expect(DefaultCapFor(time.Minute)).To(Equal(MaxDailyCap), "never above the maximum")
+	})
+
+	It("follows the schedule of a trigger and keeps a limit that is set", func() {
+		now := time.Date(2026, 10, 22, 7, 0, 0, 0, time.UTC)
+		tr := Trigger{Kind: KindSchedule, Schedule: "*/5 * * * *", TZ: "UTC"}
+		Expect(tr.EffectiveCap(now)).To(Equal(288))
+		tr.Schedule = "daily 08:00"
+		Expect(tr.EffectiveCap(now)).To(Equal(24))
+		tr.Schedule, tr.DailyCap = "*/5 * * * *", 10
+		Expect(tr.EffectiveCap(now)).To(Equal(10), "a limit that is set stays")
+		Expect(Trigger{Kind: KindFile}.EffectiveCap(now)).To(Equal(24), "a file trigger has no cadence")
 	})
 })

@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -172,6 +173,13 @@ var _ = Describe("designated owner lifecycle", func() {
 	})
 
 	It("rejects symlinked package roots without touching external staging", func() {
+		if goruntime.GOOS == "windows" {
+			// The sentinel is a directory whose write bit is cleared; Windows
+			// has no such bit (a read-only attribute does not block creating
+			// files, and the mode reports 0555), so the premise is POSIX-only.
+			// The symlink rejection itself is covered on Linux.
+			Skip("POSIX permission semantics")
+		}
 		cfg, c, i := fixture()
 		m := open(cfg, c, i)
 		external := GinkgoT().TempDir()
@@ -223,6 +231,12 @@ var _ = Describe("designated owner lifecycle", func() {
 		}
 	})
 	It("removes abandoned staging without removing published packages on recovery", func() {
+		if goruntime.GOOS == "windows" {
+			// The abandoned stage is simulated by clearing the directory's
+			// write bit; Windows cannot represent that state (and cannot
+			// remove a read-only tree), so the premise is POSIX-only.
+			Skip("POSIX permission semantics")
+		}
 		cfg, c, i := fixture()
 		m := open(cfg, c, i)
 		abandoned := filepath.Join(i.Root, "stage-abandoned")
@@ -453,6 +467,17 @@ var _ = Describe("read-only lifecycle operation lookup", func() {
 		other.UserID = "other"
 		m.admin = func(context.Context, contract.Actor) error { return nil }
 		_, e = m.OperationStatus(ctx, other, "lookup-install")
+		Expect(e).To(Equal(ErrOperationNotFound))
+		// The owner of an operation is the user: a later session or another key
+		// of the same user reads it, and the same id under another mode does not.
+		later := actor
+		later.CredentialID = "session:later"
+		s, e = m.OperationStatus(ctx, later, "lookup-install")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(s.Phase).To(Equal("completed"))
+		otherMode := actor
+		otherMode.Mode = "local-owner"
+		_, e = m.OperationStatus(ctx, otherMode, "lookup-install")
 		Expect(e).To(Equal(ErrOperationNotFound))
 		op := m.journal.Operations["lookup-install"]
 		op.Actor = contract.Actor{}

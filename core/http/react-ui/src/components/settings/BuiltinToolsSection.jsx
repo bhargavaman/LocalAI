@@ -2,8 +2,8 @@
 import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { formatWhen } from '../addons/updateState'
-import { Link } from 'react-router-dom'
-import { Callout, LoadError, SkeletonRows, Switch } from '../ui'
+import { Link, useLocation } from 'react-router-dom'
+import { Callout, LoadError, SearchField, SkeletonRows, Switch } from '../ui'
 import { chatBuiltinToolsApi } from '../../utils/api'
 import { FIELD_BY_KEY, getValue, setValue } from '../../utils/settingsSchema'
 import { addonSettingsAddress } from '../../utils/addonSettings'
@@ -103,9 +103,8 @@ function WebSearchTest() {
     <div className="st-tools__choice" data-testid="settings-tools-web-test">
       <p className="st-row__desc">{t('settingsTools.webTest.intro')}</p>
       <div className="st-tools__switch">
-        <label htmlFor={inputId} className="dk-sr-only">{t('settingsTools.webTest.queryLabel')}</label>
-        <input id={inputId} className="dk-input" type="search" value={query} disabled={state.busy} onChange={e => setQuery(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') run() }} data-testid="settings-tools-web-test-query" />
+        <SearchField id={inputId} label={t('settingsTools.webTest.queryLabel')} value={query} disabled={state.busy} onChange={setQuery}
+          onKeyDown={e => { if (e.key === 'Enter') run() }} testId="settings-tools-web-test-query" />
         <button type="button" className="dk-btn dk-btn--secondary dk-btn--sm" onClick={run} disabled={state.busy} aria-busy={state.busy || undefined} data-testid="settings-tools-web-test-run">
           {state.busy ? t('settingsTools.webTest.running') : t('settingsTools.webTest.run')}
         </button>
@@ -176,6 +175,16 @@ export default function BuiltinToolsSection({ settings, onChange, only, addonLin
   const { t } = useTranslation('admin')
   const [state, setState] = useState({ loading: true, tools: [], skills: [], error: '' })
   const [reload, setReload] = useState(0)
+  const location = useLocation()
+
+  // A link to one row (#settings-tools-row-bash, from the notice of a chat that
+  // cannot run commands) lands on it once the list is drawn: the list loads
+  // after the page, so the page's own scroll to a hash finds nothing yet.
+  const hashRow = location.hash.startsWith('#settings-tools-row-') ? decodeURIComponent(location.hash.slice(1)) : ''
+  useEffect(() => {
+    if (!hashRow || state.loading) return
+    requestAnimationFrame(() => document.getElementById(hashRow)?.scrollIntoView({ block: 'center' }))
+  }, [hashRow, state.loading])
 
   useEffect(() => {
     let live = true
@@ -199,7 +208,7 @@ export default function BuiltinToolsSection({ settings, onChange, only, addonLin
           ? t('settingsTools.byBuiltin')
           : tool.provider ? t('settingsTools.byAddon', { name: tool.titles?.[tool.provider] || tool.provider }) : t('settingsTools.byNone')
         return (
-          <div key={tool.id} className="st-row st-tools__row" data-wide data-tool={tool.id} data-testid={`settings-tools-row-${tool.id}`}>
+          <div key={tool.id} id={only ? undefined : `settings-tools-row-${tool.id}`} className="st-row st-tools__row" data-wide data-tool={tool.id} data-testid={`settings-tools-row-${tool.id}`}>
             <div className="st-row__main">
               <div className="st-row__title">
                 <span className="st-row__label">{t(`settingsTools.labels.${tool.id}`, { defaultValue: tool.label })}</span>

@@ -3,15 +3,17 @@ package connectors
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/mudler/LocalAI/pkg/atomicfile"
+	"github.com/mudler/LocalAI/pkg/fsperm"
+	"github.com/mudler/xlog"
 )
 
 // jsonStore keeps everything in memory and, with a directory, in connectors.json
@@ -34,6 +36,11 @@ type jsonData struct {
 	Pairings map[string]Pairing  `json:"pairings,omitempty"`
 	// Migrations are the one-time migrations that ran or are running.
 	Migrations map[string]migrationRecord `json:"migrations,omitempty"`
+	// Grants, OAuthClients and LoginStates are the OAuth records (by binding,
+	// add-on and state hash). A file written before them has none.
+	Grants       map[string]Grant       `json:"grants,omitempty"`
+	OAuthClients map[string]OAuthClient `json:"oauthClients,omitempty"`
+	LoginStates  map[string]LoginState  `json:"loginStates,omitempty"`
 }
 
 type migrationRecord struct {
@@ -43,7 +50,8 @@ type migrationRecord struct {
 }
 
 func newData() jsonData {
-	return jsonData{Bindings: map[string]Binding{}, Offsets: map[string]int64{}, Senders: map[string][]Sender{}, Chats: map[string]string{}, Pairings: map[string]Pairing{}, Migrations: map[string]migrationRecord{}}
+	return jsonData{Bindings: map[string]Binding{}, Offsets: map[string]int64{}, Senders: map[string][]Sender{}, Chats: map[string]string{}, Pairings: map[string]Pairing{}, Migrations: map[string]migrationRecord{},
+		Grants: map[string]Grant{}, OAuthClients: map[string]OAuthClient{}, LoginStates: map[string]LoginState{}}
 }
 
 // NewJSON returns a Store. With an empty dir it keeps everything in memory.
@@ -74,6 +82,15 @@ func NewJSON(dir string) (Store, error) {
 	}
 	if s.d.Migrations == nil {
 		s.d.Migrations = map[string]migrationRecord{}
+	}
+	if s.d.Grants == nil {
+		s.d.Grants = map[string]Grant{}
+	}
+	if s.d.OAuthClients == nil {
+		s.d.OAuthClients = map[string]OAuthClient{}
+	}
+	if s.d.LoginStates == nil {
+		s.d.LoginStates = map[string]LoginState{}
 	}
 	return s, nil
 }
@@ -148,6 +165,12 @@ func (s *jsonStore) DeleteBinding(_ context.Context, id string) error {
 	delete(s.d.Offsets, id)
 	delete(s.d.Senders, id)
 	delete(s.d.Pairings, id)
+	delete(s.d.Grants, id)
+	for h, st := range s.d.LoginStates {
+		if st.Binding == id {
+			delete(s.d.LoginStates, h)
+		}
+	}
 	for k := range s.d.Chats {
 		if len(k) > len(id) && k[:len(id)+1] == id+"\x00" {
 			delete(s.d.Chats, k)
@@ -193,6 +216,21 @@ func (s *jsonStore) RecordSender(_ context.Context, binding, senderID, name stri
 	return s.save()
 }
 
+// NoteSender keeps the chat of the last message of a sender and the reason it
+// was ignored, on the entry that RecordSender made.
+func (s *jsonStore) NoteSender(_ context.Context, binding, senderID string, n SenderNote) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.d.Senders[binding]
+	for i := range list {
+		if list[i].ID == senderID {
+			list[i].Chat, list[i].ChatName, list[i].Reason = n.Chat, n.ChatName, n.Reason
+			return s.save()
+		}
+	}
+	return nil
+}
+
 func (s *jsonStore) Senders(_ context.Context, binding string, limit int) ([]Sender, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,6 +255,17 @@ func (s *jsonStore) SetChat(_ context.Context, binding, senderID, chatID string)
 	return s.save()
 }
 
+func (s *jsonStore) ClearChat(_ context.Context, binding, senderID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := binding + "\x00" + senderID
+	if _, ok := s.d.Chats[k]; !ok {
+		return nil
+	}
+	delete(s.d.Chats, k)
+	return s.save()
+}
+
 func (s *jsonStore) EnsureKey(_ context.Context, generate func() ([]byte, error)) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,11 +273,17 @@ func (s *jsonStore) EnsureKey(_ context.Context, generate func() ([]byte, error)
 		return append([]byte(nil), s.key...), nil
 	}
 	if s.keyPath != "" {
-		st, err := os.Stat(s.keyPath)
+		_, err := os.Stat(s.keyPath)
 		switch {
 		case err == nil:
-			if st.Mode().Perm()&0o077 != 0 {
-				return nil, errors.New("connectors: the key file can be read by others; run chmod 600 on it")
+			// On Windows a key file written before LocalAI set access
+			// control lists is made private instead of refused.
+			restricted, err := fsperm.CheckOrRestrict(s.keyPath)
+			if err != nil {
+				return nil, fmt.Errorf("connectors: the key file: %w", err)
+			}
+			if restricted {
+				xlog.Warn("Other users could open the connectors key file; it is now private", "path", s.keyPath)
 			}
 			k, err := os.ReadFile(s.keyPath)
 			if err != nil || len(k) != KeySize {
@@ -245,7 +300,7 @@ func (s *jsonStore) EnsureKey(_ context.Context, generate func() ([]byte, error)
 		return nil, err
 	}
 	if s.keyPath != "" {
-		if err := os.WriteFile(s.keyPath, k, 0o600); err != nil {
+		if err := fsperm.WriteFile(s.keyPath, k, 0o600); err != nil {
 			return nil, err
 		}
 	}
@@ -293,6 +348,40 @@ func (s *jsonStore) SetCapsIfEmpty(_ context.Context, id string, caps []string) 
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *jsonStore) AddCapIfAbsent(_ context.Context, id, capability string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.d.Bindings[id]
+	if !ok || len(b.Caps) == 0 || slices.Contains(b.Caps, capability) {
+		return false, nil
+	}
+	old := b
+	b.Caps = append(slices.Clone(b.Caps), capability)
+	s.d.Bindings[id] = b
+	if err := s.save(); err != nil {
+		s.d.Bindings[id] = old
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *jsonStore) SetAccountID(_ context.Context, id, accountID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.d.Bindings[id]
+	if !ok || b.AccountID == accountID {
+		return nil
+	}
+	old := b
+	b.AccountID = accountID
+	s.d.Bindings[id] = b
+	if err := s.save(); err != nil {
+		s.d.Bindings[id] = old
+		return err
+	}
+	return nil
 }
 
 func (s *jsonStore) ClaimMigration(_ context.Context, name string, now time.Time, lease time.Duration) (bool, error) {

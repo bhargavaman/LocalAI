@@ -60,7 +60,7 @@ run_go() {
     shift
     report="$cache/logs/updates-$name.json"
     rm -f "$report"
-    go test -count=1 -p 2 -tags auth "$@" -ginkgo.json-report="$report" >"$cache/logs/updates-$name.log" 2>&1 || { tail -40 "$cache/logs/updates-$name.log" >&2; exit 1; }
+    go test -count=1 -p 2 -tags auth,nosqlite,purego_utp "$@" -ginkgo.json-report="$report" >"$cache/logs/updates-$name.log" 2>&1 || { tail -40 "$cache/logs/updates-$name.log" >&2; exit 1; }
     go_cases "$report"
 }
 run_go checker ./core/services/addons/updates
@@ -74,7 +74,7 @@ run_go routes ./core/http/endpoints/addons -ginkgo.focus='update routes'
 # for a host this one is not.
 node "$pkg/build.mjs" >"$cache/logs/updates-build.log" 2>&1 || { cat "$cache/logs/updates-build.log" >&2; exit 1; }
 tables_exe="$cache/tmp/updates-exe"
-CGO_ENABLED=1 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
+CGO_ENABLED=0 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
 fixture_dir="$cache/tmp/updates-fixture"
 rm -rf "$fixture_dir"
 mkdir -p "$fixture_dir"

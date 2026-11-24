@@ -42,6 +42,10 @@ type FileStagingClient struct {
 	remoteModelPath string // set during LoadModel from staged ModelPath
 }
 
+// Unwrap returns the client that this one decorates, so that a caller can ask it
+// why a dial failed. See grpc.BackendUnwrapper.
+func (c *FileStagingClient) Unwrap() grpc.Backend { return c.Backend }
+
 type ttsReference struct {
 	Audio string `json:"audio"`
 	Text  string `json:"text"`
@@ -182,7 +186,7 @@ func (f *FileStagingClient) translateModelPath(frontendPath string) string {
 		return frontendPath
 	}
 	// Use the basename of the frontend path joined with the remote ModelPath
-	return filepath.Join(rmp, filepath.Base(frontendPath))
+	return remoteJoin(rmp, filepath.Base(frontendPath))
 }
 
 func (f *FileStagingClient) Predict(ctx context.Context, in *pb.PredictOptions, opts ...ggrpc.CallOption) (*pb.Reply, error) {
@@ -286,6 +290,9 @@ func (f *FileStagingClient) GenerateVideo(ctx context.Context, in *pb.GenerateVi
 		}
 		in.Audio = backendPath
 	}
+	if err := f.stageVideoReferences(ctx, lifecycle, in); err != nil {
+		return nil, err
+	}
 
 	// Handle output destination
 	frontendDst := in.Dst
@@ -309,6 +316,95 @@ func (f *FileStagingClient) GenerateVideo(ctx context.Context, in *pb.GenerateVi
 	}
 
 	return result, nil
+}
+
+// stageVideoReferences stages the reference conditioning inputs of a video
+// request (ref_images, ref_audios and ref_videos) and rewrites the request to
+// the worker-side paths. A reference video is a directory of frames: every
+// frame goes to the same worker directory, in file-name order, because the
+// backend reads that directory in lexicographic order. The request must be a
+// private copy; it is modified in place.
+func (f *FileStagingClient) stageVideoReferences(ctx context.Context, lifecycle *stagedInputLifecycle, in *pb.GenerateVideoRequest) error {
+	// The same local file listed twice is uploaded once.
+	staged := map[string]string{}
+	stage := func(localPath string) (string, error) {
+		if remote, ok := staged[localPath]; ok {
+			return remote, nil
+		}
+		remote, err := f.stageInputFile(ctx, lifecycle, localPath, "inputs")
+		if err != nil {
+			return "", err
+		}
+		staged[localPath] = remote
+		return remote, nil
+	}
+
+	for i, img := range in.RefImages {
+		if !isFilePath(img) {
+			continue
+		}
+		remote, err := stage(img)
+		if err != nil {
+			return fmt.Errorf("staging video reference image %d: %w", i+1, err)
+		}
+		in.RefImages[i] = remote
+	}
+	for i, audio := range in.RefAudios {
+		if !isFilePath(audio) {
+			continue
+		}
+		remote, err := stage(audio)
+		if err != nil {
+			return fmt.Errorf("staging video reference audio %d: %w", i+1, err)
+		}
+		in.RefAudios[i] = remote
+	}
+	for i, video := range in.RefVideos {
+		if video == nil {
+			continue
+		}
+		if video.FramesDir != "" {
+			remoteDir, err := f.stageFramesDirectory(ctx, lifecycle, video.FramesDir, fmt.Sprintf("video-ref-frames-%d", i))
+			if err != nil {
+				return fmt.Errorf("staging video reference %d frames: %w", i+1, err)
+			}
+			video.FramesDir = remoteDir
+		}
+		if isFilePath(video.Audio) {
+			remote, err := stage(video.Audio)
+			if err != nil {
+				return fmt.Errorf("staging video reference %d audio: %w", i+1, err)
+			}
+			video.Audio = remote
+		}
+	}
+	return nil
+}
+
+// stageFramesDirectory uploads the files of a local directory under one
+// category, so they land together in one directory on the worker, and returns
+// that worker directory. Ephemeral keys have no nesting, so the directory is
+// flat; subdirectories are not part of a frame set and are skipped.
+func (f *FileStagingClient) stageFramesDirectory(ctx context.Context, lifecycle *stagedInputLifecycle, localDir, category string) (string, error) {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return "", fmt.Errorf("reading frames directory: %w", err)
+	}
+	remoteDir := ""
+	for _, entry := range entries { // os.ReadDir sorts by file name
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		remote, err := f.stageInputFile(ctx, lifecycle, filepath.Join(localDir, entry.Name()), category)
+		if err != nil {
+			return "", err
+		}
+		remoteDir = remoteDirOf(remote)
+	}
+	if remoteDir == "" {
+		return "", fmt.Errorf("frames directory has no files")
+	}
+	return remoteDir, nil
 }
 
 func (f *FileStagingClient) Animate3D(ctx context.Context, in *pb.Animate3DRequest, opts ...ggrpc.CallOption) (*pb.Result, error) {
@@ -523,6 +619,82 @@ func (f *FileStagingClient) Diarize(ctx context.Context, in *pb.DiarizeRequest, 
 	return f.Backend.Diarize(ctx, in, opts...)
 }
 
+// AudioTransform stages the input and reference audio on the worker, runs the
+// transform into a worker-side temp file and brings every output back to the
+// frontend paths the caller asked for.
+//
+// A multi-output transform (source separation) writes one file per stem next
+// to dst on the worker and reports their worker paths in the result. Each one
+// is retrieved beside the frontend dst, named like the backend names
+// siblings, and the result is rewritten to frontend paths. Any retrieval failure is
+// an error: a caller that gets a result naming a missing file cannot tell it
+// from a backend bug.
+func (f *FileStagingClient) AudioTransform(ctx context.Context, in *pb.AudioTransformRequest, opts ...ggrpc.CallOption) (*pb.AudioTransformResult, error) {
+	lifecycle := f.newStagedInputLifecycle()
+	defer lifecycle.release()
+	in = proto.Clone(in).(*pb.AudioTransformRequest)
+
+	if in.AudioPath != "" && isFilePath(in.AudioPath) {
+		backendPath, err := f.stageInputFile(ctx, lifecycle, in.AudioPath, "inputs")
+		if err != nil {
+			return nil, fmt.Errorf("staging audio for transform: %w", err)
+		}
+		in.AudioPath = backendPath
+	}
+	if in.ReferencePath != "" && isFilePath(in.ReferencePath) {
+		backendPath, err := f.stageInputFile(ctx, lifecycle, in.ReferencePath, "inputs")
+		if err != nil {
+			return nil, fmt.Errorf("staging reference audio for transform: %w", err)
+		}
+		in.ReferencePath = backendPath
+	}
+
+	frontendDst := in.Dst
+	if frontendDst != "" {
+		tmpPath, err := f.stager.AllocRemoteTemp(ctx, f.nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("allocating temp for transform output: %w", err)
+		}
+		in.Dst = tmpPath
+	}
+
+	result, err := f.Backend.AudioTransform(ctx, in, opts...)
+	if err != nil || frontendDst == "" || in.Dst == frontendDst {
+		return result, err
+	}
+
+	if err := f.retrieveOutputFile(ctx, in.Dst, frontendDst); err != nil {
+		return nil, fmt.Errorf("retrieving transform output: %w", err)
+	}
+	if result == nil {
+		return result, nil
+	}
+	result.Dst = frontendDst
+
+	// The backend writes each stem beside its dst as "<stem of dst>.<name><ext>".
+	// The worker dst is a temp name, so the frontend names are built the same
+	// way from the frontend dst: that is where the caller looks for them.
+	ext := filepath.Ext(frontendDst)
+	localPrefix := strings.TrimSuffix(frontendDst, ext)
+	if ext == "" {
+		ext = ".wav"
+	}
+	for _, stem := range result.Stems {
+		if stem.Dst == "" {
+			continue
+		}
+		if stem.Name == "" {
+			return nil, fmt.Errorf("transform stem %q has no name", stem.Dst)
+		}
+		localStem := localPrefix + "." + stem.Name + ext
+		if err := f.retrieveOutputFile(ctx, stem.Dst, localStem); err != nil {
+			return nil, fmt.Errorf("retrieving transform stem %q: %w", stem.Name, err)
+		}
+		stem.Dst = localStem
+	}
+	return result, nil
+}
+
 func (f *FileStagingClient) AudioTranscription(ctx context.Context, in *pb.TranscriptRequest, opts ...ggrpc.CallOption) (*pb.TranscriptResult, error) {
 	lifecycle := f.newStagedInputLifecycle()
 	defer lifecycle.release()
@@ -560,7 +732,9 @@ func (f *FileStagingClient) AudioTranscriptionStream(ctx context.Context, in *pb
 func (f *FileStagingClient) ExportModel(ctx context.Context, in *pb.ExportModelRequest, opts ...ggrpc.CallOption) (*pb.Result, error) {
 	frontendOutputPath := in.OutputPath
 	if frontendOutputPath != "" {
-		os.MkdirAll(frontendOutputPath, 0750)
+		if err := os.MkdirAll(frontendOutputPath, 0750); err != nil {
+			xlog.Warn("Failed to create export output directory", "path", frontendOutputPath, "error", err)
+		}
 	}
 
 	result, err := f.Backend.ExportModel(ctx, in, opts...)
@@ -587,7 +761,9 @@ func (f *FileStagingClient) ExportModel(ctx context.Context, in *pb.ExportModelR
 		for _, relPath := range files {
 			key := keyPrefix + "/" + relPath
 			localDst := filepath.Join(frontendOutputPath, relPath)
-			os.MkdirAll(filepath.Dir(localDst), 0750)
+			if err := os.MkdirAll(filepath.Dir(localDst), 0750); err != nil {
+				xlog.Warn("Failed to create directory for export file", "path", filepath.Dir(localDst), "error", err)
+			}
 
 			if err := f.stager.FetchRemoteByKey(ctx, f.nodeID, key, localDst); err != nil {
 				return &pb.Result{Success: false, Message: fmt.Sprintf("fetching export file %s: %v", relPath, err)}, nil
@@ -602,7 +778,9 @@ func (f *FileStagingClient) ExportModel(ctx context.Context, in *pb.ExportModelR
 func (f *FileStagingClient) StartQuantization(ctx context.Context, in *pb.QuantizationRequest, opts ...ggrpc.CallOption) (*pb.QuantizationJobResult, error) {
 	// Ensure the local output directory exists so the fetched file can be written
 	if in.OutputDir != "" {
-		os.MkdirAll(in.OutputDir, 0750)
+		if err := os.MkdirAll(in.OutputDir, 0750); err != nil {
+			xlog.Warn("Failed to create quantization output directory", "path", in.OutputDir, "error", err)
+		}
 	}
 	return f.Backend.StartQuantization(ctx, in, opts...)
 }
@@ -710,12 +888,12 @@ func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
 		return err
 	}
-	in, err := os.Open(src)
+	in, err := os.Open(src) // #nosec G304 -- src is a path the staging client built itself from a model or output directory, never a request value
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.Create(dst) // #nosec G304 -- dst is a path the staging client built itself from a model or output directory, never a request value
 	if err != nil {
 		return err
 	}

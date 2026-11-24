@@ -39,7 +39,7 @@ test('add-on settings: the host draws the controls the apps list gives an add-on
   const sandbox = { id: 'sandbox', enabled: true, state: 'running', ui: ui([NETWORK_POLICY, TOOL_PROVIDERS]) }
   const devbox = { id: 'devbox', enabled: true, state: 'running', ui: ui([NETWORK_POLICY, 'from-a-newer-server']) }
   const plain = { id: 'notes', enabled: true, state: 'running', ui: ui(undefined) }
-  assert.deepEqual(HOST_CONTROL_IDS, ['network-policy', 'tool-providers'])
+  assert.deepEqual(HOST_CONTROL_IDS, ['network-policy', 'tool-providers', 'sandbox-profiles'])
   assert.deepEqual(controlsOf(sandbox), ['network-policy', 'tool-providers'])
   // An ID this page does not know is not drawn.
   assert.deepEqual(controlsOf(devbox), ['network-policy'])
@@ -107,8 +107,8 @@ test('add-on settings: the SDK settings kit is the host\'s, registered for every
     assert.ok(shell.includes(`.${cls}`), cls)
   }
   // Every token an add-on gets is a custom property the theme defines.
-  const css = ['theme.css', 'vendor/ui-kit/tokens.css', 'vendor/ui-kit/components.css', 'vendor/ui-kit/themes/sample-ink.css']
-    .map(f => { try { return readFileSync(join(src, f), 'utf8') } catch { return '' } }).join('\n')
+  const css = ['theme.css', '../packages/ui-kit/vendor/tokens.css', '../packages/ui-kit/vendor/components.css', '../packages/ui-kit/vendor/themes/sample-ink.css']
+    .map(f => readFileSync(join(src, f), 'utf8')).join('\n')
   for (const [name, value] of Object.entries(THEME_TOKENS)) {
     const prop = /var\((--[a-z0-9-]+)/.exec(value)[1]
     assert.ok(css.includes(`${prop}:`), `${name}: ${prop} is defined`)

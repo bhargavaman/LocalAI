@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 
 	"github.com/google/uuid"
@@ -85,6 +86,7 @@ type BackendEndpointService struct {
 	backendSystemPath string
 	backendApplier    *galleryop.GalleryService
 	upgradeChecker    UpgradeInfoProvider
+	upgradeGuard      *BackendUpgradeGuard
 }
 
 type GalleryBackend struct {
@@ -102,6 +104,7 @@ func CreateBackendEndpointService(galleries []config.Gallery, systemState *syste
 		backendSystemPath: systemState.Backend.BackendsSystemPath,
 		backendApplier:    backendApplier,
 		upgradeChecker:    upgradeChecker,
+		upgradeGuard:      NewBackendUpgradeGuard(backendApplier, upgradeChecker),
 	}
 }
 
@@ -327,16 +330,34 @@ func (mgs *BackendEndpointService) CheckUpgradesEndpoint() echo.HandlerFunc {
 	}
 }
 
+// UpgradeGuard is the guard of the backend upgrade routes, for a wrapper that
+// must refuse before it starts anything (see BackendUpgradeViaRun).
+func (mgs *BackendEndpointService) UpgradeGuard() *BackendUpgradeGuard {
+	return mgs.upgradeGuard
+}
+
 // UpgradeBackendEndpoint triggers an upgrade for a specific backend
 // @Summary Upgrade a backend
 // @Tags backends
+// @Description Refused before anything is queued when the backend is not installed (404, code not_installed), has no pending upgrade (409, code no_update), or when the optional expected_to (the available version or digest, as a query parameter or a JSON field) is no longer the available build (409, code stale).
 // @Param name path string true "Backend name"
+// @Param expected_to query string false "The version or digest the caller wants; refused with code stale when it is no longer the available one"
 // @Success 200 {object} schema.BackendResponse "Response"
 // @Failure 403 {object} map[string]interface{} "Backend installation is disabled on this server (code backend_install_disabled)"
+// @Failure 404 {object} map[string]interface{} "The backend is not installed (code not_installed)"
+// @Failure 409 {object} map[string]interface{} "The backend has no pending upgrade (code no_update) or the requested build is no longer the available one (code stale)"
 // @Router /backends/upgrade/{name} [post]
 func (mgs *BackendEndpointService) UpgradeBackendEndpoint() echo.HandlerFunc {
 	return func(c echo.Context) error {
 		backendName := c.Param("name")
+
+		expectedTo, err := ExpectedToOf(c)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+		}
+		if refusal := mgs.upgradeGuard.Check(c.Request().Context(), backendName, "", expectedTo); refusal != nil {
+			return refusal.Write(c)
+		}
 
 		uuid, err := uuid.NewUUID()
 		if err != nil {
@@ -450,7 +471,7 @@ func (mgs *BackendEndpointService) ListAvailableBackendsEndpoint(systemState *sy
 // @Tags backends
 // @Success 200 {object} []schema.KnownBackend "Response"
 // @Router /backends/known [get]
-func (mgs *BackendEndpointService) ListKnownBackendsEndpoint(systemState *system.SystemState) echo.HandlerFunc {
+func (mgs *BackendEndpointService) ListKnownBackendsEndpoint(systemState *system.SystemState, clusterInstalled ClusterInstalledProvider) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		// byName dedupes entries while preserving "importer wins over
 		// pref-only" priority. Insertion order: importers → drop-ins →
@@ -486,30 +507,37 @@ func (mgs *BackendEndpointService) ListKnownBackendsEndpoint(systemState *system
 			byName[pref.Name] = pref
 		}
 
-		// Surface backends installed on this host and flag them as such.
-		// Importer/pref-only entries that are also on disk get Installed=true
-		// while keeping their metadata. System-only backends join the map
-		// with empty Modality (we can't classify them) and AutoDetect=false
-		// because they require an explicit preference.
+		// Surface backends installed on this host, or on any node of the
+		// cluster, and flag them as such. Importer/pref-only entries that are
+		// also installed get Installed=true while keeping their metadata.
+		// System-only backends join the map with empty Modality (we can't
+		// classify them) and AutoDetect=false because they require an
+		// explicit preference.
+		markInstalled := func(name string) {
+			if entry, exists := byName[name]; exists {
+				entry.Installed = true
+				byName[name] = entry
+				return
+			}
+			byName[name] = schema.KnownBackend{
+				Name:       name,
+				Modality:   "",
+				AutoDetect: false,
+				Installed:  true,
+			}
+		}
 		if systemState != nil {
 			installed, err := gallery.ListSystemBackends(systemState)
 			if err != nil {
 				xlog.Debug("ListKnownBackendsEndpoint: failed to list installed backends", "error", err)
 			} else {
 				for name := range installed {
-					if entry, exists := byName[name]; exists {
-						entry.Installed = true
-						byName[name] = entry
-						continue
-					}
-					byName[name] = schema.KnownBackend{
-						Name:       name,
-						Modality:   "",
-						AutoDetect: false,
-						Installed:  true,
-					}
+					markInstalled(name)
 				}
 			}
+		}
+		for name := range resolveClusterInstalled(c.Request().Context(), clusterInstalled) {
+			markInstalled(name)
 		}
 
 		out := make([]schema.KnownBackend, 0, len(byName))

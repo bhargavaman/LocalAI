@@ -1,7 +1,9 @@
 /* eslint-disable no-unused-vars -- components used only inside JSX look unused to this config, which has no eslint-plugin-react */
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import Icon from '../Icon'
 import ActionMenu from '../ActionMenu'
+import { SharedByBadge } from '../share/ShareBadges'
 import { filesApi } from '../../utils/api'
 import { fileSize } from '../../utils/fileInfo'
 import { KIND_ICON, extOf, findByPrefix, hasThumb, kindOf, nameProblem, nextIndex, relativeDate } from '../../utils/fileBrowser'
@@ -11,6 +13,15 @@ import { KIND_ICON, extOf, findByPrefix, hasThumb, kindOf, nameProblem, nextInde
 export function EntryIcon({ entry, big = false }) {
   const [broken, setBroken] = useState(false)
   const kind = kindOf(entry)
+  // A folder LocalAI manages has its own icon and a quiet look, so it does not
+  // read as one of the person's folders.
+  if (kind === 'folder' && entry.managed) {
+    return (
+      <span className={`ws-glyph ws-glyph--managed${big ? ' ws-glyph--big' : ''}`} aria-hidden="true" data-testid="ws-managed-glyph">
+        <Icon name="settings" />
+      </span>
+    )
+  }
   if (hasThumb(entry) && !broken) {
     return (
       <span className={`ws-thumb${big ? ' ws-thumb--big' : ''}`} aria-hidden="true">
@@ -78,11 +89,13 @@ export function NameField({ initial, label, taken, current = '', onCommit, onCan
 function Row({ entry, view, selected, cursor, dropping, previewing, renaming, ctx }) {
   const { t, locale, now, taken, anySelected } = ctx
   const isDir = entry.kind === 'dir'
-  const about = isDir && entry.managed ? t(`managed.about.${entry.managed}`, { defaultValue: '' }) : ''
+  const about = isDir && entry.managed ? t(`managed.about.${entry.managed}`, { defaultValue: t('managed.about.other') }) : ''
   const when = relativeDate(entry.modified, { now, locale })
   const kind = kindOf(entry)
   const menu = ctx.menuItems(entry)
   const mark = isDir ? ctx.agentMark?.(entry.path) : null
+  const shared = isDir ? ctx.shareMark?.(entry.path) : null
+  const project = isDir ? ctx.projectMark?.(entry.path) : null
   const nameEl = renaming ? (
     <NameField
       initial={entry.name} current={entry.name} label={t('rename')} taken={taken} t={t}
@@ -114,7 +127,7 @@ function Row({ entry, view, selected, cursor, dropping, previewing, renaming, ct
     >
       <span role="gridcell" className="ws-cell ws-cell--check">
         <input
-          type="checkbox" className="ws-check" tabIndex={-1} checked={selected} data-visible={anySelected || undefined}
+          type="checkbox" className="dk-check ws-check" tabIndex={-1} checked={selected} data-visible={anySelected || undefined}
           aria-label={t('select.one', { name: entry.name })}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => ctx.onToggle(entry, e.nativeEvent?.shiftKey)}
@@ -126,6 +139,15 @@ function Row({ entry, view, selected, cursor, dropping, previewing, renaming, ct
           <span className="ws-row__line">
             {nameEl}
             {isDir && entry.managed && <span className="ws-managed-tag" data-testid="ws-managed-tag">{t('managed.marker')}</span>}
+            {shared && <SharedByBadge entry={{ role: 'owner', sharedWith: shared.sharedWith }} hideRole testId="ws-shared-mark" />}
+            {project && (
+              <Link
+                to={project.to} className="ws-project-link" data-testid="ws-project-link" title={t('projectMark.open', { name: project.name })}
+                aria-label={t('projectMark.open', { name: project.name })} tabIndex={-1} onClick={(e) => e.stopPropagation()}
+              >
+                <Icon name="folder" />{project.name}
+              </Link>
+            )}
             {isDir && mark && <span className="ws-agent-tag" data-testid="ws-agent-tag" title={mark.title} aria-label={mark.title}><Icon name="robot" />{mark.label}</span>}
           </span>
           {about && <span className="ws-row__about">{about}</span>}
@@ -224,7 +246,7 @@ export default function FileList({
     <div role="row" className="ws-head-row">
       <span role="columnheader" className="ws-cell ws-cell--check">
         <input
-          type="checkbox" className="ws-check" data-visible={selected.size > 0 || undefined} checked={allSelected}
+          type="checkbox" className="dk-check ws-check" data-visible={selected.size > 0 || undefined} checked={allSelected}
           ref={(el) => { if (el) el.indeterminate = someSelected }}
           aria-label={t('select.all')} onChange={() => (allSelected ? ctx.onClear() : ctx.onSelectAll())}
         />

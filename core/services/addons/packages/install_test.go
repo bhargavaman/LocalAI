@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -127,6 +128,27 @@ var _ = Describe("immutable packages", func() {
 		_, e = i.Commit(context.Background(), s)
 		Expect(e).To(HaveOccurred())
 		Expect(filepath.Join(receipt.Directory, "bin/sample")).To(BeAnExistingFile())
+	})
+	It("refuses a package that needs a newer feature level, from the entry and from the manifest", func() {
+		i, r := fixture(archive(nil, m), func(r *catalog.Release, _ *catalog.Source) { r.Requires.FeatureLevel = 2 })
+		_, e := i.Stage(context.Background(), r, nil)
+		var refusal *contract.FeatureLevelRefusal
+		Expect(errors.As(e, &refusal)).To(BeTrue())
+		Expect(e).To(MatchError("needs a newer LocalAI"))
+		// The same entry installs on a host that has the level.
+		i.Host.FeatureLevel = 2
+		_, e = i.Stage(context.Background(), r, nil)
+		Expect(errors.As(e, &refusal)).To(BeFalse())
+
+		// The manifest decides when the entry says nothing.
+		needy := bytes.Replace(m, []byte("{"), []byte(`{"featureLevel": 2,`), 1)
+		i, r = fixture(archive(nil, needy))
+		_, e = i.Stage(context.Background(), r, nil)
+		Expect(errors.As(e, &refusal)).To(BeTrue())
+		i.Host.FeatureLevel = 2
+		s, e := i.Stage(context.Background(), r, nil)
+		Expect(e).NotTo(HaveOccurred())
+		Expect(i.Discard(s)).To(Succeed())
 	})
 	It("rejects untrusted integrity forged releases and digest mismatches", func() {
 		i, r := fixture(archive(nil, m))
@@ -397,7 +419,9 @@ var _ = Describe("package asset boundaries", func() {
 		Expect(e).NotTo(HaveOccurred())
 		i, r = fixture(archive([]*tar.Header{{Name: "ui/main.js", Mode: 0644}, {Name: "ui/style.css", Mode: 0644}}, b))
 		_, e = i.Stage(context.Background(), r, nil)
-		Expect(e).To(HaveOccurred())
+		if runtime.GOOS != "windows" { // Windows cannot read the execute bit of a Linux package back from disk
+			Expect(e).To(HaveOccurred())
+		}
 	})
 	It("does not allow remote verification policy to replace owner trust", func() {
 		m, e := os.ReadFile("../../../../tests/addons/fixtures/packages/manifest.json")
@@ -630,6 +654,7 @@ var _ = Describe("trusted signed staging", func() {
 				receipt, e := i.Commit(context.Background(), staged)
 				Expect(e).NotTo(HaveOccurred())
 				Expect(receipt.Verification).To(Equal("sha256+sigstore"))
+				Expect(receipt.Signer).To(Equal("builder@example.invalid"))
 				Expect(receipt.Digest).To(Equal(digest))
 			} else {
 				Expect(e).To(MatchError(ErrPackage))
@@ -645,16 +670,96 @@ var _ = Describe("trusted signed staging", func() {
 	})
 })
 
+// signedOCI publishes the package data as an image in a local registry with a
+// Sigstore bundle that the authority made for the identity and the source
+// repository given. calls counts the registry requests made after that.
+func signedOCI(authority *signing.Authority, data []byte, identity, sourceRepository string) (string, string, *atomic.Int64) {
+	GinkgoHelper()
+	artifact, digest, calls := localOCI(data)
+	ref, e := name.ParseReference(strings.TrimPrefix(artifact, "oci://"))
+	Expect(e).NotTo(HaveOccurred())
+	blob, e := authority.BundleFor(digest[7:], identity, "https://issuer.invalid", sourceRepository)
+	Expect(e).NotTo(HaveOccurred())
+	img, e := mutate.AppendLayers(empty.Image, static.NewLayer(blob, types.MediaType("application/vnd.dev.sigstore.bundle.v0.3+json")))
+	Expect(e).NotTo(HaveOccurred())
+	hash, e := img.Digest()
+	Expect(e).NotTo(HaveOccurred())
+	size, e := img.Size()
+	Expect(e).NotTo(HaveOccurred())
+	Expect(remote.Write(ref.Context().Tag("signature"), img)).To(Succeed())
+	index := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{Add: img, Descriptor: v1.Descriptor{Digest: hash, Size: size, MediaType: types.DockerManifestSchema2, ArtifactType: "application/vnd.dev.sigstore.bundle.v0.3+json"}})
+	Expect(remote.WriteIndex(ref.Context().Tag(strings.Replace(digest, ":", "-", 1)), index)).To(Succeed())
+	calls.Store(0)
+	return artifact, digest, calls
+}
+
 var _ = Describe("signer identity pattern", func() {
-	It("is for backend sources only: an add-on install refuses it", func() {
-		i, r := fixture([]byte("x"), func(_ *catalog.Release, s *catalog.Source) {
-			s.Policy = catalog.VerificationPolicy{RequireSignature: true, Issuer: "https://issuer.invalid", IdentityRegex: `^builder@example\.invalid$`}
+	const (
+		pattern  = `^builder@example\.invalid$`
+		repo     = "https://github.com/example-org/example-repo"
+		elsewise = "https://github.com/example-org/other-repo"
+	)
+	pinned := catalog.VerificationPolicy{RequireSignature: true, Issuer: "https://issuer.invalid", IdentityRegex: pattern, SourceRepository: repo}
+	var (
+		authority *signing.Authority
+		data      []byte
+	)
+	BeforeEach(func() {
+		original := http.DefaultTransport
+		http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Hostname() != "127.0.0.1" {
+				return nil, fmt.Errorf("external network forbidden")
+			}
+			return original.RoundTrip(r)
 		})
+		DeferCleanup(func() { http.DefaultTransport = original })
+		var e error
+		authority, e = signing.New()
+		Expect(e).NotTo(HaveOccurred())
+		m, e := os.ReadFile("../../../../tests/addons/fixtures/packages/manifest.json")
+		Expect(e).NotTo(HaveOccurred())
+		data = archive(nil, m)
+	})
+
+	It("refuses a library pattern without a source repository before any registry request", func() {
+		// An https add-on library may keep a pattern alone, because it can
+		// also list backends. The entry, its policy and its signature are all
+		// what the library serves, and the signature matches the pattern, so
+		// only the add-on rule for a pattern stands between it and an install.
+		artifact, digest, calls := signedOCI(authority, data, "builder@example.invalid", "")
+		i, r := fixture(data, func(r *catalog.Release, s *catalog.Source) {
+			r.Artifact, r.Digest = artifact, digest
+			s.Policy = catalog.VerificationPolicy{RequireSignature: true, Issuer: "https://issuer.invalid", IdentityRegex: pattern}
+		})
+		i.SignatureTrust = authority
+		Expect(r.Policy.IdentityRegex).To(Equal(pattern), "the library stamps its own policy on the entry")
 		_, e := i.Stage(context.Background(), r, nil)
 		Expect(e).To(MatchError(ErrPackage))
+		Expect(calls.Load()).To(BeZero(), "the registry was asked for the package")
 		entries, e := os.ReadDir(i.Root)
 		Expect(e).NotTo(HaveOccurred())
 		Expect(entries).To(BeEmpty())
+	})
+
+	It("verifies a pattern and a source repository, and records the repository as the signer", func() {
+		for _, signedFor := range []string{repo, elsewise, ""} {
+			artifact, digest, _ := signedOCI(authority, data, "builder@example.invalid", signedFor)
+			i, r := fixture(data, func(r *catalog.Release, s *catalog.Source) {
+				r.Artifact, r.Digest = artifact, digest
+				s.Policy = pinned
+			})
+			i.SignatureTrust = authority
+			staged, e := i.Stage(context.Background(), r, nil)
+			if signedFor != repo {
+				Expect(e).To(MatchError(ErrPackage), "signed for %q", signedFor)
+				continue
+			}
+			Expect(e).NotTo(HaveOccurred())
+			receipt, e := i.Commit(context.Background(), staged)
+			Expect(e).NotTo(HaveOccurred())
+			Expect(receipt.Verification).To(Equal("sha256+sigstore"))
+			Expect(receipt.Signer).To(Equal(repo))
+		}
 	})
 })
 

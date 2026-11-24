@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	_ "time/tzdata" // zone data in the binary: the image and a plain host may have none
@@ -19,25 +20,30 @@ type Kind string
 const (
 	KindSchedule Kind = "schedule"
 	KindFile     Kind = "file"
+	// KindEvent is a trigger that a device client starts by sending an event
+	// to the hook of the trigger.
+	KindEvent Kind = "event"
 )
 
 // Status is the state of a run.
 type Status string
 
 // Run states. A run is queued when it waits for a free slot, running while the
-// host works on it, and done, failed or skipped at the end. A skipped run never
-// started; its Reason says why.
+// host works on it, and done, failed, blocked or skipped at the end. A skipped
+// run never started; its Reason says why. A blocked run ended, but an action it
+// tried was refused because nobody had granted it; its Reason names the grant.
 const (
 	StatusQueued  Status = "queued"
 	StatusRunning Status = "running"
 	StatusDone    Status = "done"
 	StatusFailed  Status = "failed"
 	StatusSkipped Status = "skipped"
+	StatusBlocked Status = "blocked"
 )
 
 // Final tells whether the status is an end state.
 func (s Status) Final() bool {
-	return s == StatusDone || s == StatusFailed || s == StatusSkipped
+	return s == StatusDone || s == StatusFailed || s == StatusSkipped || s == StatusBlocked
 }
 
 // Defaults and limits.
@@ -46,8 +52,12 @@ const (
 	MaxQuiet        = 24 * time.Hour
 	DefaultDailyCap = 24
 	MaxDailyCap     = 1000
-	MaxNameLen      = 80
-	MaxPromptBytes  = 8000
+	// MinRunLimit and MaxRunLimit bound a trigger's RunLimit. They are the
+	// bounds of the administrator's run limit too.
+	MinRunLimit    = time.Minute
+	MaxRunLimit    = 24 * time.Hour
+	MaxNameLen     = 80
+	MaxPromptBytes = 8000
 	// MaxRefLen is the longest AgentID, Model or SourceChatID, in characters.
 	MaxRefLen = 200
 	// ReasonLen is the longest Reason, in characters.
@@ -65,6 +75,18 @@ const (
 	MaxPlanPath = 256
 	// MaxEstTokens bounds EstTokens.
 	MaxEstTokens = 10_000_000
+	// MaxPayloadBytes is the longest payload text kept in a run and shown in
+	// its prompt, in bytes.
+	MaxPayloadBytes = 8000
+	// MaxEventSecret is the longest secret of an event trigger, in bytes. The
+	// size tag of the Secret column in gorm.go is the same number.
+	MaxEventSecret = 255
+	// MaxEventBody is the largest request body the hook reads, in bytes.
+	MaxEventBody = 262144
+	// MaxMatches is the most matches an event trigger has.
+	MaxMatches = 8
+	// MaxEventField is the longest Source, EventType or match, in bytes.
+	MaxEventField = 120
 )
 
 // widgetRE is the id of a Home widget, as home.json allows it.
@@ -90,9 +112,13 @@ type Trigger struct {
 	Folder string
 	Quiet  time.Duration
 	// DailyCap is the number of runs one day may admit, by due day (zero means
-	// DefaultDailyCap). A day is a day of TZ; a file trigger
+	// the default of EffectiveCap, which grows with the cadence of a schedule).
+	// A day is a day of TZ; a file trigger
 	// without TZ uses the location of the Runner's clock.
 	DailyCap int
+	// RunLimit is the longest one run may take. Zero means the administrator's
+	// run limit, which is also the ceiling: see EffectiveRunLimit.
+	RunLimit time.Duration
 	// AgentID is the saved agent whose tools and instructions the runs get. Empty:
 	// the runs use the tool set of SourceChatID's chat as it was when the trigger
 	// was made (see Model), or the default one.
@@ -119,7 +145,7 @@ type Trigger struct {
 	// Since is when the trigger began to watch. Times and changes before it
 	// start no run. Arm sets it.
 	Since time.Time
-	// MinGap is the shortest time between two runs of a file trigger (zero
+	// MinGap is the shortest time between two runs of a file or event trigger (zero
 	// means DefaultFileGap). A file that settles sooner waits for it.
 	MinGap time.Duration
 	// The plan of a run, shown to the person before they confirm and on the
@@ -144,7 +170,28 @@ type Trigger struct {
 	// trigger. A run with none only reads. The host checks them at each tool
 	// call; the package only stores them.
 	Acts []string
+	// Source and EventType say which events an event trigger takes: the name
+	// of the sender (for example "github") and the type of the event (empty:
+	// any type). Matches narrows them: each is "field=value", where field is a
+	// dot path into the JSON payload such as pull_request.base.ref. Secret is
+	// the key that the sender signs with. It is stored as it is, because
+	// verifying a signature needs the key, and it never appears in the output
+	// of String. All four are set only on an event trigger.
+	Source    string
+	EventType string
+	Matches   []string
+	Secret    string
 }
+
+// String describes the trigger without its prompt and without its Secret, so
+// that a log line or a %v of a trigger cannot leak the key.
+func (t Trigger) String() string {
+	return fmt.Sprintf("trigger{id=%q owner=%q kind=%q name=%q enabled=%t source=%q type=%q}",
+		t.ID, t.Owner, t.Kind, t.Name, t.Enabled, t.Source, t.EventType)
+}
+
+// GoString is String for %#v.
+func (t Trigger) GoString() string { return t.String() }
 
 // Where the runs of a trigger report. Inbox is the default: the owner's Inbox
 // and the chat the owner chose for notices. Origin is the chat and thread
@@ -195,6 +242,12 @@ type Route struct {
 	Mode   string `json:",omitempty"`
 	// Channel is the channel of TargetChannel, as the owner listed it.
 	Channel string `json:",omitempty"`
+	// Connection is the binding that a trigger proposed in Studio reports to
+	// with TargetChannel. It is not a place the trigger came from: Binding
+	// stays empty, so the trigger is not a connector trigger and none of the
+	// rules of one (code, hourly limit, run gate) apply to it. A route has
+	// Binding or Connection, never both.
+	Connection string `json:",omitempty"`
 	// Auto says that the trigger was made without asking, under the approval
 	// mode of its binding; Until is when such a recurring trigger is removed
 	// (zero: never). ReadOnly says that the proposal declared that its runs
@@ -207,6 +260,16 @@ type Route struct {
 
 // FromConnector says whether a connector chat proposed the trigger.
 func (r Route) FromConnector() bool { return r.Binding != "" }
+
+// ChannelBinding is the binding whose channel TargetChannel writes in: the
+// binding of the connector chat that proposed the trigger, or else the
+// connection that the owner chose in Studio.
+func (r Route) ChannelBinding() string {
+	if r.Binding != "" {
+		return r.Binding
+	}
+	return r.Connection
+}
 
 // TargetOrDefault gives Target, or TargetInbox when it is empty.
 func (r Route) TargetOrDefault() string {
@@ -233,8 +296,8 @@ func (r Route) Validate() error {
 			return errors.New("a run can report to the chat of the proposal only when a connector chat proposed it")
 		}
 	case TargetChannel:
-		if r.Binding == "" || r.Channel == "" {
-			return errors.New("a run can report to a channel only when a connector chat proposed it and names the channel")
+		if r.ChannelBinding() == "" || r.Channel == "" {
+			return errors.New("a run can report to a channel only when it names the connection and the channel")
 		}
 	default:
 		return fmt.Errorf("delivery target must be %q, %q or %q", TargetInbox, TargetOrigin, TargetChannel)
@@ -244,7 +307,13 @@ func (r Route) Validate() error {
 	default:
 		return fmt.Errorf("delivery mode must be %q, %q or %q", ModeAlways, ModeOnChange, ModeOnProblem)
 	}
-	for _, v := range []string{r.Binding, r.Chat, r.Thread, r.Code, r.Channel} {
+	if r.Binding != "" && r.Connection != "" {
+		return errors.New("a trigger reports to the connection that proposed it or to one the owner chose, not both")
+	}
+	if r.Connection != "" && r.Target != TargetChannel {
+		return errors.New("a connection goes with the delivery target channel")
+	}
+	for _, v := range []string{r.Binding, r.Chat, r.Thread, r.Code, r.Channel, r.Connection} {
 		if len(v) > MaxRefBytes || hasControl(v, false) {
 			return errors.New("the connector place of a trigger is too long or has control characters")
 		}
@@ -309,7 +378,21 @@ type Change struct {
 	On bool `json:",omitempty"`
 	// Chat is the chat that asked for the change.
 	Chat string `json:",omitempty"`
+	// Binding, Place, Thread and Code are set on a change that a chat of a
+	// messaging app asked for and that waits for the owner's answer there: the
+	// connection, the platform chat and thread where it was written, and the
+	// code that answers it ("confirm CODE"). Expires is when it lapses, in Unix
+	// seconds.
+	Binding string `json:",omitempty"`
+	Place   string `json:",omitempty"`
+	Thread  string `json:",omitempty"`
+	Code    string `json:",omitempty"`
+	Expires int64  `json:",omitempty"`
 }
+
+// FromConnector says whether the change waits for an answer in a chat of a
+// messaging app.
+func (c Change) FromConnector() bool { return c.Binding != "" && c.Code != "" }
 
 // The kinds of change.
 const (
@@ -356,12 +439,55 @@ func (t Trigger) QuietOrDefault() time.Duration {
 	return t.Quiet
 }
 
-// CapOrDefault gives DailyCap, or DefaultDailyCap when it is zero.
+// CapOrDefault gives DailyCap, or DefaultDailyCap when it is zero. It does not
+// know the schedule: EffectiveCap does.
 func (t Trigger) CapOrDefault() int {
 	if t.DailyCap <= 0 {
 		return DefaultDailyCap
 	}
 	return t.DailyCap
+}
+
+// DefaultCapFor is the daily limit of a schedule trigger that sets none: one
+// run for each time the schedule can fire in a day, so a cap does not cut a
+// fast schedule short, and never less than DefaultDailyCap or more than
+// MaxDailyCap. gap is the shortest time between two runs (Schedule.MinGap);
+// zero, a schedule that runs once, gives DefaultDailyCap.
+func DefaultCapFor(gap time.Duration) int {
+	if gap <= 0 {
+		return DefaultDailyCap
+	}
+	per := int((24*time.Hour + gap - 1) / gap)
+	return min(max(per, DefaultDailyCap), MaxDailyCap)
+}
+
+// EffectiveCap is the daily limit of the trigger at now, before the
+// administrator's ceiling: DailyCap when it is set, else a default that grows
+// with the cadence of a schedule (DefaultCapFor) and is DefaultDailyCap for
+// the other kinds.
+func (t Trigger) EffectiveCap(now time.Time) int {
+	if t.DailyCap > 0 || t.Kind != KindSchedule {
+		return t.CapOrDefault()
+	}
+	sch, err := ParseSchedule(t.Schedule)
+	if err != nil {
+		return DefaultDailyCap
+	}
+	loc, err := t.Location()
+	if err != nil {
+		return DefaultDailyCap
+	}
+	return DefaultCapFor(sch.MinGap(now, loc))
+}
+
+// EffectiveRunLimit is the time one run of the trigger may take: RunLimit, but
+// never more than ceiling, the administrator's limit that applies now. A zero
+// RunLimit gives ceiling.
+func (t Trigger) EffectiveRunLimit(ceiling time.Duration) time.Duration {
+	if t.RunLimit <= 0 || (ceiling > 0 && t.RunLimit > ceiling) {
+		return ceiling
+	}
+	return t.RunLimit
 }
 
 // Location loads the time zone of a schedule trigger. An empty TZ is UTC.
@@ -405,6 +531,8 @@ func (t Trigger) Validate() error {
 		return fmt.Errorf("source chat can have at most %d characters", MaxRefLen)
 	case t.DailyCap < 0 || t.DailyCap > MaxDailyCap:
 		return fmt.Errorf("daily limit must be 0 to %d", MaxDailyCap)
+	case t.RunLimit != 0 && (t.RunLimit < MinRunLimit || t.RunLimit > MaxRunLimit):
+		return fmt.Errorf("time limit must be empty or %s to %s", ShortDuration(MinRunLimit), ShortDuration(MaxRunLimit))
 	case t.MinGap < 0 || t.MinGap > MaxFileGap:
 		return fmt.Errorf("the time between runs must be 0 to %s", MaxFileGap)
 	case hasControl(t.Reads, false) || utf8.RuneCountInString(t.Reads) > MaxPlanText:
@@ -445,8 +573,47 @@ func (t Trigger) Validate() error {
 		if t.Quiet < 0 || t.Quiet > MaxQuiet {
 			return fmt.Errorf("quiet period must be 0 to %s", MaxQuiet)
 		}
+	case KindEvent:
+		return t.validateEvent()
 	default:
-		return fmt.Errorf("kind must be %q or %q", KindSchedule, KindFile)
+		return fmt.Errorf("kind must be %q, %q or %q", KindSchedule, KindFile, KindEvent)
+	}
+	if t.Source != "" || t.EventType != "" || len(t.Matches) > 0 || t.Secret != "" {
+		return errors.New("source, event type, matches and secret belong to an event trigger")
+	}
+	return nil
+}
+
+// validateEvent checks the fields of an event trigger. It asks nothing of
+// Folder, Schedule or Quiet.
+func (t Trigger) validateEvent() error {
+	if t.Source == "" {
+		return errors.New("source is required for an event trigger")
+	}
+	if len(t.Source) > MaxEventField || hasControl(t.Source, false) {
+		return fmt.Errorf("source is one line of at most %d bytes", MaxEventField)
+	}
+	if len(t.EventType) > MaxEventField || hasControl(t.EventType, false) {
+		return fmt.Errorf("event type is one line of at most %d bytes", MaxEventField)
+	}
+	if len(t.Matches) > MaxMatches {
+		return fmt.Errorf("an event trigger has at most %d matches", MaxMatches)
+	}
+	for _, m := range t.Matches {
+		field, _, ok := strings.Cut(m, "=")
+		if !ok || field == "" {
+			return errors.New("a match is field=value, such as action=opened")
+		}
+		segs := strings.Split(field, ".")
+		if slices.Contains(segs, "") || slices.Contains(segs, "__proto__") || slices.Contains(segs, "constructor") || slices.Contains(segs, "prototype") {
+			return errors.New("a match field is a dot path, such as pull_request.state")
+		}
+		if len(m) > MaxEventField || hasControl(m, false) {
+			return fmt.Errorf("a match is one line of at most %d bytes", MaxEventField)
+		}
+	}
+	if len(t.Secret) > MaxEventSecret || hasControl(t.Secret, false) {
+		return fmt.Errorf("secret is one line of at most %d bytes", MaxEventSecret)
 	}
 	return nil
 }
@@ -466,14 +633,15 @@ func hasControl(s string, newline bool) bool {
 }
 
 // Arm returns t with Since set: now when the trigger is new, is switched on,
-// or has another kind, schedule, time zone or folder than old; otherwise the
+// or has another kind, schedule, time zone, folder, source or event type than old; otherwise the
 // Since of old. A host calls it before PutTrigger, so that a changed or newly
 // enabled trigger does not run for the time before the change. The host must
 // store Schedule.Text() (the canonical text) as Trigger.Schedule: Arm compares
 // the texts, so a saved spelling that differs only in form would re-arm.
 func Arm(old *Trigger, t Trigger, now time.Time) Trigger {
 	if old == nil || (!old.Enabled && t.Enabled) || old.Kind != t.Kind ||
-		old.Schedule != t.Schedule || old.TZ != t.TZ || old.Folder != t.Folder {
+		old.Schedule != t.Schedule || old.TZ != t.TZ || old.Folder != t.Folder ||
+		old.Source != t.Source || old.EventType != t.EventType {
 		t.Since = now.UTC()
 		return t
 	}
@@ -502,6 +670,9 @@ type Run struct {
 	// Tokens is what the run's model requests used, prompt and completion,
 	// when the host counted it; 0 is unknown.
 	Tokens int
+	// Payload is the text of the event that started an event run, cut to
+	// MaxPayloadBytes. It is data from outside; empty on other runs.
+	Payload string
 }
 
 // Reasons that the Runner writes, and one that a host writes.
@@ -531,3 +702,15 @@ func CutReason(s string) string {
 type SkipError struct{ Reason string }
 
 func (e *SkipError) Error() string { return e.Reason }
+
+// ShortDuration writes a duration the short way: 15m, not 15m0s.
+func ShortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}

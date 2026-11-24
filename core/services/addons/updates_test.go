@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,15 +45,25 @@ type updateLibrary struct {
 	sources  *catalog.Sources
 	// transform lets lifecycle specs publish real typed executable packages.
 	transform func(map[string]any) map[string][]byte
+	// archiveDelay slows every package download, as a large package on a slow link does.
+	archiveDelay time.Duration
 }
 
 func (l *updateLibrary) publish(version, channel, content string, requires catalog.Requirements) catalog.Release {
+	GinkgoHelper()
+	return l.publishAs("sample", version, channel, content, requires)
+}
+
+// publishAs publishes a release of the add-on id, so a spec can hold several
+// add-ons in one library.
+func (l *updateLibrary) publishAs(id, version, channel, content string, requires catalog.Requirements) catalog.Release {
 	GinkgoHelper()
 	manifest, e := os.ReadFile("../../../tests/addons/fixtures/packages/manifest.json")
 	Expect(e).NotTo(HaveOccurred())
 	var m map[string]any
 	Expect(json.Unmarshal(manifest, &m)).To(Succeed())
 	m["version"] = version
+	m["id"] = id
 	files := map[string][]byte{"bin/sample": []byte(content)}
 	if l.transform != nil {
 		for name, data := range l.transform(m) {
@@ -76,16 +87,16 @@ func (l *updateLibrary) publish(version, channel, content string, requires catal
 		Expect(e).NotTo(HaveOccurred())
 	}
 	Expect(tw.Close()).To(Succeed())
-	name := fmt.Sprintf("/%s-%s-%x.tar", version, channel, sha256.Sum256([]byte(content)))
+	name := fmt.Sprintf("/%s-%s-%s-%x.tar", id, version, channel, sha256.Sum256([]byte(content)))
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.archives[name] = b.Bytes()
-	r := catalog.Release{ID: "sample", Name: "Sample", Version: version, Channel: channel, Artifact: l.server.URL + name,
+	r := catalog.Release{ID: id, Name: "Sample", Version: version, Channel: channel, Artifact: l.server.URL + name,
 		Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(b.Bytes())), OS: "linux", Arch: "amd64", Requires: requires}
 	// One entry per version and channel: a moving channel is replaced.
 	kept := l.releases[:0]
 	for _, o := range l.releases {
-		if o.Version != version || o.Channel != channel {
+		if o.ID != id || o.Version != version || o.Channel != channel {
 			kept = append(kept, o)
 		}
 	}
@@ -119,6 +130,7 @@ func newUpdateRig(withUpdates bool) *updateRig {
 			return
 		}
 		if data, ok := lib.archives[r.URL.Path]; ok {
+			time.Sleep(lib.archiveDelay)
 			_, _ = w.Write(data)
 			return
 		}
@@ -382,6 +394,19 @@ var _ = Describe("explicit upgrade from an authoritative update check", func() {
 		Expect(s.Generation).To(Equal(uint64(1)))
 	})
 
+	It("refuses a candidate that needs a newer feature level, and offers one the host has", func() {
+		r := newUpdateRig(true)
+		s := r.installChannel()
+		installed := s.Generations[0].Receipt
+		next := r.lib.publish("1.2.3-dev", "development", "build-2", catalog.Requirements{FeatureLevel: contract.HostFeatureLevel + 1})
+		st, e := r.m.CheckUpdates(ctx, actor, "sample")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(st.State).To(Equal(updates.Incompatible))
+		Expect(st.Reasons).To(ConsistOf(updates.ReasonFeatureLevel))
+		_, e = r.m.Submit(ctx, actor, upgrade("lvl", installed.Digest, next.Digest))
+		Expect(e).To(MatchError(ErrIncompatible))
+	})
+
 	It("selects a newer immutable version and treats a rewritten version as an integrity error", func() {
 		r := newUpdateRig(true)
 		s := r.installVersion()
@@ -529,6 +554,70 @@ var _ = Describe("explicit upgrade from an authoritative update check", func() {
 		Expect(installed[0].Update).NotTo(BeNil())
 		Expect(installed[0].Update.Available).To(BeFalse())
 		Expect(installed[0].Update.State).To(Equal("check-failed"))
+	})
+
+	It("reports the pending update of an installed add-on that is turned off, and keeps the desired state through an upgrade", func() {
+		r := newUpdateRig(true)
+		installed := r.installChannel().Generations[0].Receipt
+		// Never enabled: the owner's desired state is off.
+		next := r.lib.publish("1.2.3-dev", "development", "build-2", catalog.Requirements{})
+		st, e := r.m.CheckUpdates(ctx, actor, "sample")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(st.State).To(Equal(updates.UpdateAvailable), "a disabled add-on is still checked")
+		list, e := r.m.Apps(ctx, actor)
+		Expect(e).NotTo(HaveOccurred())
+		Expect(list).To(HaveLen(1))
+		Expect(list[0].Enabled).To(BeFalse())
+		Expect(list[0].Update).To(Equal("update-pending"))
+		inst, e := r.m.Installed(ctx, actor)
+		Expect(e).NotTo(HaveOccurred())
+		Expect(inst[0].Update).NotTo(BeNil())
+		Expect(inst[0].Update.Available).To(BeTrue())
+		// Upgrading it does not turn it on.
+		_, e = r.m.Submit(ctx, actor, upgrade("up-off", installed.Digest, next.Digest))
+		Expect(e).NotTo(HaveOccurred())
+		after, _ := r.m.Status(ctx, "sample")
+		Expect(after.DesiredEnabled).To(BeFalse())
+		// Turning it on is durable, and a later upgrade keeps it on.
+		_, e = r.m.Submit(ctx, actor, LifecycleCommand{OperationID: "enable-1", AddonID: "sample", Action: "enable", Generation: after.Generation})
+		Expect(e).NotTo(HaveOccurred())
+		again := r.lib.publish("1.2.3-dev", "development", "build-3", catalog.Requirements{})
+		r.tick(time.Minute)
+		st, _ = r.m.CheckUpdates(ctx, actor, "sample")
+		Expect(st.State).To(Equal(updates.UpdateAvailable))
+		_, e = r.m.Submit(ctx, actor, upgrade("up-on", next.Digest, again.Digest))
+		Expect(e).NotTo(HaveOccurred())
+		final, _ := r.m.Status(ctx, "sample")
+		Expect(final.DesiredEnabled).To(BeTrue(), "an upgrade must not flip the desired state")
+	})
+
+	It("refuses to turn on an installed package the host cannot run with a typed cause, and an upgrade makes it startable", func() {
+		r := newUpdateRig(true)
+		installed := r.installChannel().Generations[0].Receipt
+		// The installed package was built for an API range this host refuses.
+		r.m.mu.Lock()
+		st := r.m.journal.Addons["sample"]
+		for i := range st.Generations {
+			st.Generations[i].Receipt.Manifest.API = contract.VersionRange{Min: 1, Max: 1}
+		}
+		r.m.journal.Addons["sample"] = st
+		r.m.mu.Unlock()
+		_, e := r.m.Submit(ctx, actor, LifecycleCommand{OperationID: "enable-old", AddonID: "sample", Action: "enable", Generation: 1})
+		Expect(e).To(HaveOccurred())
+		var cause *FailureCause
+		Expect(errors.As(e, &cause)).To(BeTrue(), "the refusal is typed, not a generic outage")
+		Expect(cause.Code).To(Equal(CauseInstalledIncompatible))
+		after, _ := r.m.Status(ctx, "sample")
+		Expect(after.DesiredEnabled).To(BeFalse())
+		// The check still runs for it and offers the upgrade.
+		next := r.lib.publish("1.2.3-dev", "development", "build-2", catalog.Requirements{})
+		check, e := r.m.CheckUpdates(ctx, actor, "sample")
+		Expect(e).NotTo(HaveOccurred())
+		Expect(check.State).To(Equal(updates.UpdateAvailable))
+		_, e = r.m.Submit(ctx, actor, upgrade("up-old", installed.Digest, next.Digest))
+		Expect(e).NotTo(HaveOccurred(), "an incompatible installed package can be upgraded")
+		_, e = r.m.Submit(ctx, actor, LifecycleCommand{OperationID: "enable-new", AddonID: "sample", Action: "enable", Generation: 2})
+		Expect(e).NotTo(HaveOccurred())
 	})
 
 	It("does not accept pins without an update checker or on another action", func() {

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ADMIN, MEMBER, app, installedAddon, release, sessionFor, mockAddons } from './addons-fixtures.js'
+import { ADMIN, MEMBER, app, installedAddon, release, sessionFor, mockAddons, stubInstallQueue } from './addons-fixtures.js'
 import { buildAddonBundles, installStudioAddons, packagedApp } from './studio-addon.js'
 import { mockSettings } from './settings-fixtures.js'
 import { FACE_MODEL, clipFile, faces, match, mockIdentity, people, photoFile } from './identity-fixtures.js'
@@ -292,14 +292,19 @@ test.describe('Add-on navigation', () => {
     await expect(page.getByTestId('addons-first-run')).toHaveCount(0)
   })
 
-  test('Install and turn on asks once, installs, then turns the add-on on', async ({ page }) => {
+  test('Install asks once and queues the add-on without turning it on', async ({ page }) => {
     const state = await setup(page, { user: ADMIN, studio: false, pins: [], releases: [release('notes', { name: 'Notes' })] })
+    const sent = await stubInstallQueue(page, state.mocked())
     await page.goto('/app/addons')
     await page.getByRole('button', { name: 'Install Notes' }).click()
     const dialog = page.getByRole('alertdialog').or(page.getByRole('dialog'))
-    await expect(dialog).toContainText('Install and turn on Notes?')
-    await dialog.getByRole('button', { name: 'Install and turn on' }).click()
-    await expect.poll(() => state.dispatchLog().filter(d => ['install', 'enable'].includes(d.action)).map(d => d.action)).toEqual(['install', 'enable'])
+    await expect(dialog).toContainText('Install Notes?')
+    await dialog.getByRole('button', { name: 'Add to queue' }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].confirm).toBe('queue')
+    expect(sent[0].body.items.map(i => i.addonId)).toEqual(['notes'])
+    // Enabling stays a separate click: nothing turned it on.
+    expect(state.dispatchLog().filter(d => ['install', 'enable'].includes(d.action))).toEqual([])
   })
 
   test('a search with no result says no add-on matches, not that none are installed', async ({ page }) => {
@@ -382,7 +387,7 @@ test.describe('Add-on navigation', () => {
     expect(Math.abs(offsets.dx)).toBeLessThan(1)
     expect(Math.abs(offsets.dy)).toBeLessThan(1)
     expect(offsets.width).toBeGreaterThan(16)
-    expect(offsets.box).toBe(36)
+    expect(offsets.box).toBe(44)
   })
 
   test('member without the add-ons feature and with no built-in tile goes home, and Studio and Talk are not built in', async ({ page }) => {
@@ -715,7 +720,7 @@ test.describe('Add-on navigation: the Voice recognition page', () => {
     await expectOneVoiceTitle(page, 'Voices')
   })
 
-  test('a viewer who is not an administrator gets no Library tab', async ({ page }) => {
+  test('a viewer without the speech feature gets no Library tab', async ({ page }) => {
     await setup(page, { apps: [voiceApp()] })
     await page.route('**/api/auth/status', route => route.fulfill({ json: sessionFor(MEMBER, { addons: true, voice_recognition: true }) }))
     await serveVoice(page)
@@ -726,7 +731,7 @@ test.describe('Add-on navigation: the Voice recognition page', () => {
     await expect(tabs.getByRole('tab', { name: /^Text to speech$/ })).toBeVisible()
     await expect(tabs.getByRole('tab', { name: /^Library/ })).toHaveCount(0)
     await page.goto('/app/addons/voice/voice/library')
-    await expect(page.getByTestId('voice-admin-only')).toBeVisible()
+    await expect(page.getByTestId('voice-no-speech')).toBeVisible()
     await expect(page.getByTestId('voice-library')).toHaveCount(0)
   })
 

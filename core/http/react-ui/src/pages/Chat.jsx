@@ -3,17 +3,27 @@ import { useParams, useOutletContext, useNavigate, useLocation, useSearchParams,
 import { useTranslation } from 'react-i18next'
 import { fromState } from '../utils/editorNav'
 import { useServerChat } from '../hooks/useServerChat'
+import { useAutoReadAloud } from '../hooks/useAutoReadAloud'
 import { useChatComposer } from '../hooks/useChatComposer'
 import { useComposerArrival } from '../hooks/useComposerTransition'
 import { useChatEgress } from '../hooks/useChatEgress'
+import { useChatSandboxProfile } from '../hooks/useChatSandboxProfile'
+import { useLive } from '../hooks/useLive'
+import { useModels } from '../hooks/useModels'
+import { CAP_TRANSCRIPT, CAP_TTS } from '../utils/capabilities'
+import { pickLiveModels } from '../utils/liveModels'
 import { cardsByTool } from '../utils/chatEgress'
-import { useInbox } from '../hooks/useInbox'
+import { useInboxEntry } from '../contexts/InboxContext'
 import { useOriginContext } from '../hooks/useOriginContext'
 import { isAutomated, knownKind, resolveOrigin } from '../utils/originChats'
+import { foldNotes, isConnectorChat } from '../utils/connectorChat'
+// eslint-disable-next-line no-unused-vars
+import { ConnectorHeader, HostNote, ThreadContext } from '../components/chat/ConnectorChat'
 import { highlightAll, enhanceCodeBlocks } from '../utils/markdown'
 import {
   threadRows, placeProposals, streamingParts, lastUserText, chatMarkdown, menuChats, downloadFrom, chatFromExport,
 } from '../utils/chatThread'
+import { withOptimistic } from '../utils/optimisticSend'
 import { chatFootState, showHint } from '../utils/chatFoot'
 import { BROWSER_IMPORT_DISMISSED, browserChatStores, importBrowserChats } from '../utils/browserChats'
 // eslint-disable-next-line no-unused-vars
@@ -27,6 +37,12 @@ import { chatsApi, modelsApi } from '../utils/api'
 import { apiUrl } from '../utils/basePath'
 // eslint-disable-next-line no-unused-vars
 import ChatComposer from '../components/chat/ChatComposer'
+// eslint-disable-next-line no-unused-vars -- used only inside JSX
+import LiveButton from '../components/chat/LiveButton'
+// eslint-disable-next-line no-unused-vars -- used only inside JSX
+import LiveSetupSheet from '../components/chat/LiveSetupSheet'
+// eslint-disable-next-line no-unused-vars -- used only inside JSX
+import LiveDock from '../components/chat/LiveDock'
 import { OPEN_CHAT_FILE_EVENT } from '../components/chat/chatActions'
 import { contextSinceClear, parseGoalCommand, parseInvocation } from '../utils/slashCommands'
 import { findLoop, parseLoopCommand } from '../utils/chatLoops'
@@ -35,16 +51,29 @@ import { ChatAboutCard, ContextMarker, GoalCard, SlashHelpCard } from '../compon
 import { isTyping } from '../components/chat/chatText'
 // eslint-disable-next-line no-unused-vars
 import ChatHeader from '../components/chat/ChatHeader'
+import WorkspaceSlot from '../components/slots/WorkspaceSlot'
+import PageDock from '../components/dock/PageDock'
+import DockButton from '../components/dock/DockButton'
+import FilesButton from '../components/chat/FilesButton'
+import { usePageDock } from '../hooks/useChatDock'
+import { setDockOpen } from '../utils/dock'
 // eslint-disable-next-line no-unused-vars
 import ShortcutsDialog from '../components/chat/ShortcutsDialog'
 // eslint-disable-next-line no-unused-vars
 import ChatSettingsSheet from '../components/chat/ChatSettingsSheet'
+import { MoreChip, ProjectChip, PulledChip } from '../components/projects/ProjectChip'
+import PulledProjects from '../components/projects/PulledProjects'
+import { useProjectList } from '../hooks/useProjectList'
+import { homeProject, pulledProjects } from '../utils/projects'
+import ReasoningChips from '../components/chat/ReasoningChips'
+import { settingsWithEffort } from '../utils/chatSettings'
 // eslint-disable-next-line no-unused-vars
 import FindBar from '../components/chat/FindBar'
 // eslint-disable-next-line no-unused-vars
 import LoadCard from '../components/chat/LoadCard'
 // eslint-disable-next-line no-unused-vars
 import ChatFoot from '../components/chat/ChatFoot'
+import HarnessBanner from '../components/chat/HarnessBanner'
 import GoalBar from '../components/chat/GoalBar'
 import GoalMarker from '../components/chat/GoalMarker'
 // eslint-disable-next-line no-unused-vars
@@ -52,9 +81,14 @@ import SubAgentsMenu from '../components/chat/SubAgentsMenu'
 // eslint-disable-next-line no-unused-vars
 import { EmptyHead, EmptyUnder } from '../components/chat/EmptyChat'
 // eslint-disable-next-line no-unused-vars
+import { AgentNeedsNotice } from '../components/agents/AgentShare'
+import { isSharedWithMe } from '../utils/agentShare'
+// eslint-disable-next-line no-unused-vars
 import ShortcutsRow from '../components/wellknown/ShortcutsRow'
-import { isStaleFailure } from '../utils/chatFailure'
+import { isStaleFailure, keptAbove } from '../utils/chatFailure'
+import { useAutoResume } from '../hooks/useAutoResume'
 import { isFolderMissingError } from '../utils/chatAgents'
+import { startRefusal } from '../utils/projectAgents'
 // eslint-disable-next-line no-unused-vars
 import CommandsConsentCard from '../components/chat/CommandsConsentCard'
 import NetworkConsentCard from '../components/chat/NetworkConsentCard'
@@ -72,22 +106,28 @@ import HomeUndoToast from '../components/home/HomeUndoToast'
 import ConfirmDialog from '../components/ConfirmDialog'
 // eslint-disable-next-line no-unused-vars
 import ChatsMenu from '../components/ChatsMenu'
-// eslint-disable-next-line no-unused-vars
-import ChatInbox from '../components/ChatInbox'
 import { ChatSendContext } from '../components/chat/chatSendContext'
 import { useAuth } from '../context/AuthContext'
 import { useOperations } from '../hooks/useOperations'
 import { useLoadedModels } from '../hooks/useLoadedModels'
 import { copyToClipboard } from '../utils/clipboard'
+import { chatAddress, seqOfSearch } from '../utils/chatSearch'
 import Icon from '../components/Icon'
+// eslint-disable-next-line no-unused-vars
+import BackgroundLayer from '../components/wellknown/BackgroundLayer'
+import { useIdentity, useUiString } from '../components/wellknown/Identity'
 // eslint-disable-next-line no-unused-vars
 import WorkspaceChangeNote from '../components/wellknown/WorkspaceChangeNote'
 import { turnChanges, describeChanges, liveTurns } from '../utils/changeNotes'
 import { usePages } from '../hooks/usePages'
 import { CHAT_UNDO_MS, useChatDelete } from '../hooks/useChatDelete'
 import { announceChats } from '../hooks/useRecentChats'
+import { readSidebarCollapsed } from '../utils/sidebarState'
 import './chat.css'
 import './chats.css'
+
+// The most pulled projects the header draws as chips; the rest are one "+N".
+const HEADER_PULLED = 2
 
 const FOCUS_MODE_KEY = 'localai_chat_focus_mode'
 
@@ -95,6 +135,8 @@ const FOCUS_MODE_KEY = 'localai_chat_focus_mode'
 // address and goes to Home (see ChatsRoute in router.jsx); the page keeps a
 // state so that clearing a hand-off (a start message, a draft) does not.
 const NEW_CHAT = Object.freeze({ newChat: true })
+// The failure card of a turn that a restart interrupted (utils/chatFailure.js).
+const INTERRUPTED = Object.freeze({ code: 'interrupted', model: '', retry: 0, detail: '', text: '' })
 
 function browserStorage() {
   try { return window.localStorage } catch { return null }
@@ -121,6 +163,12 @@ function ChatPage() {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('chats')
   const { t: tw } = useTranslation('workspace')
+  const { t: tp } = useTranslation('pages')
+  const { t: tpj } = useTranslation('projects')
+  // How the assistant shows itself (persona.json) and the text overrides of
+  // ui.json: shared copies of the files, live through the change feed.
+  const identity = useIdentity()
+  const uiString = useUiString()
   const { user, isAdmin, hasFeature } = useAuth()
   const canAgents = hasFeature('agents')
   const { operations } = useOperations()
@@ -130,7 +178,9 @@ function ChatPage() {
   // (useComposerTransition): no empty page while the transcript is read.
   const arrival = useComposerArrival(routeId, { textareaRef, pageRef })
   const chat = useServerChat({ seed: arrival.seed })
-  const inbox = useInbox()
+  useAutoReadAloud({ running: chat.running, messages: chat.messages, activeId: chat.activeId, failed: chat.lastTurn === 'failed' })
+  // Opening a chat marks its notifications read on the server; the shell's inbox reads again.
+  const inbox = useInboxEntry()
   const { select, activeId } = chat
 
   // An old chat link or the Home page names a model with ?model=; it is a hint
@@ -146,6 +196,80 @@ function ChatPage() {
   const { drafts, draftModel, agentId, pickedAgent, effectiveModel, switches } = composer
   const { models: chatModels, modelsLoading: chatModelsLoading } = composer
   const { text: input, setText: setInput, files } = drafts
+
+  // The dock: pages beside the chat, kept with the chat (usePageDock). There
+  // is none until something opens it.
+  const dockOn = hasFeature('pages')
+  const pageDock = usePageDock({
+    chatId: activeId, server: chat.detail?.dock, serverFor: chat.detail?.id, enabled: dockOn,
+    onError: (e) => addToast?.(tp('dock.saveFailed', { message: e?.message || '' }), 'error'),
+  })
+  // A page the Pages list sent to the dock opens in this (new) chat.
+  const dockAsk = location.state?.dock
+  useEffect(() => {
+    if (!dockAsk || !dockOn) return
+    pageDock.open(dockAsk)
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: { ...location.state, dock: undefined } })
+  }, [dockAsk, dockOn]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live: hands-free voice with the open chat. It needs a chat that has an id,
+  // so a new chat does not offer it; Home creates the chat first and opens it
+  // with state.live (below). useLive ends Live when the chat changes.
+  const { models: sttModels, loading: sttLoading, refetch: refetchStt } = useModels(CAP_TRANSCRIPT)
+  const { models: ttsModels, loading: ttsLoading, refetch: refetchTts } = useModels(CAP_TTS)
+  const refetchLiveModels = useCallback(() => { refetchStt(); refetchTts() }, [refetchStt, refetchTts])
+  const liveModel = useMemo(() => pickLiveModels({ stt: sttModels, tts: ttsModels }), [sttModels, ttsModels])
+  const liveVoice = useLive({
+    chatId: activeId,
+    running: chat.running,
+    failure: chat.failure,
+    send: (text) => chat.send(activeId, text),
+    stop: () => chat.stop(activeId),
+    model: liveModel,
+  })
+  const liveOn = liveVoice.state.name !== 'off'
+  // The setup sheet opens when the Live button finds a model missing.
+  const [liveSetupOpen, setLiveSetupOpen] = useState(false)
+  const openLiveSetup = useCallback(() => setLiveSetupOpen(true), [])
+  // Home's Live button opens this chat with state.live. The state is cleared
+  // first, so Back and a reload do not start Live again. Once the speech
+  // models are known, Live starts, or the setup sheet opens when one is
+  // missing. The browser lets the voice play because the click on Home and
+  // this navigation are one page session.
+  const [liveWanted, setLiveWanted] = useState(false)
+  const liveIntent = !!location.state?.live
+  useEffect(() => {
+    if (!liveIntent || !activeId || activeId !== routeId) return
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null })
+    setLiveWanted(true)
+  }, [liveIntent, activeId, routeId, navigate, location.pathname, location.search])
+  useEffect(() => {
+    if (!liveWanted || sttLoading || ttsLoading) return
+    setLiveWanted(false)
+    if (liveModel.stt && liveModel.tts) liveVoice.start()
+    else openLiveSetup()
+  }, [liveWanted, sttLoading, ttsLoading, liveModel, liveVoice, openLiveSetup])
+  // After Live ends, focus goes back: Type instead to the message box (back in
+  // place), End Live to the Live button.
+  const liveButtonRef = useRef(null)
+  const [focusAfterLive, setFocusAfterLive] = useState(null)
+  useEffect(() => {
+    if (!focusAfterLive || liveOn) return
+    setFocusAfterLive(null)
+    if (focusAfterLive === 'input') textareaRef.current?.focus()
+    else liveButtonRef.current?.focus()
+  }, [focusAfterLive, liveOn])
+  const typeInsteadOfLive = useCallback(() => {
+    liveVoice.end()
+    setFocusAfterLive('input')
+  }, [liveVoice])
+  const endLive = useCallback(() => {
+    liveVoice.end()
+    setFocusAfterLive('button')
+  }, [liveVoice])
+  // Stop and Esc during a voice turn go through Live, so the cut-off partial
+  // reply is not spoken. Any other turn is stopped as before.
+  const stopTurn = () => (liveVoice.state.name === 'thinking' ? liveVoice.stopVoice() : chat.stop(activeId))
   const [busy, setBusy] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [modelInfo, setModelInfo] = useState(null)
@@ -170,6 +294,13 @@ function ChatPage() {
   // error then offers to edit that agent.
   const [folderAgent, setFolderAgent] = useState('')
   const sayError = useCallback((e, fallback) => {
+    // The project of the agent is archived, deleted or has changed folders.
+    const paused = startRefusal(e)
+    if (paused) {
+      setFolderAgent('')
+      setLocalError(t(paused === 'changed' ? 'agentFolder.projectChanged' : 'agentFolder.projectPaused'))
+      return
+    }
     if (isFolderMissingError(e)) {
       setFolderAgent((activeId && activeChat?.agent_id) || agentId || '')
       setLocalError(t('agentFolder.startError'))
@@ -192,6 +323,10 @@ function ChatPage() {
   const [scrolledUp, setScrolledUp] = useState(false)
   const chatsMenuRef = useRef(null)
   const pickerRef = useRef(null)
+  const effortRef = useRef(null)
+  // The reasoning effort picked before the chat exists. It is written to the
+  // chat's settings right after the chat is created.
+  const [draftEffort, setDraftEffort] = useState('')
 
   // The address names the open chat. Opening one by id selects it, unless it is
   // already open (creating a chat selects it before the address changes).
@@ -212,8 +347,12 @@ function ChatPage() {
   }, [])
 
   const model = activeChat ? activeChat.model : draftModel
-  // The network of the chat's isolated commands, read again on its events.
-  const egress = useChatEgress(activeId, chat.ticks.egress)
+  // The network of the chat's isolated commands, read again on its events, and
+  // the sandbox profile of the commands, with the progress of its image.
+  // A new chat has the same two rows from the draft endpoints; its choices are
+  // saved with the chat when it is created (createWithDraft).
+  const sandboxProfile = useChatSandboxProfile(activeId, chat.ticks.egress)
+  const egress = useChatEgress(activeId, chat.ticks.egress, { model: draftModel, agentId, profilesApply: Boolean(sandboxProfile.applies) })
   // Switching an add-on or a tool group on or off changes who runs the commands
   // and whether the network controls apply, so the network view is read again.
   const { refresh: refreshEgress } = egress
@@ -231,12 +370,31 @@ function ChatPage() {
   const pane = useChatPreviewPane({
     chatId: activeId, userId: user?.id, files: chatFiles.files, loaded: chat.files.on ? chatFiles.loaded : true,
     messages: chat.messages, ready: !!activeId && !chat.loading && chat.detail?.id === activeId, running: chat.running,
+    blocked: pageDock.dock.open, madeHere: chat.madeHere || arrival.handoff?.chat?.id || null, startedTurn: chat.startedTurn,
   })
+  // The dock and the files pane share the right side, one at a time: the one
+  // the person opens last takes it, and the other hides without being closed
+  // for good. A result that arrives never takes the side from an open dock.
+  const dockIsOpen = pageDock.dock.open
+  const hidePane = pane.hide
+  // Only a change of the pane or of the dock acts, never a change of chat.
+  const dockUpdateRef = useRef(pageDock.update)
+  dockUpdateRef.current = pageDock.update
+  useEffect(() => { if (dockIsOpen) hidePane() }, [dockIsOpen, hidePane])
+  useEffect(() => {
+    if (pane.open) dockUpdateRef.current((d) => (d.open ? setDockOpen(d, false) : d))
+  }, [pane.open])
   const withArrival = arrival.messages
-  const messages = useMemo(() => withArrival(chat.messages, activeId), [withArrival, chat.messages, activeId])
+  const messages = useMemo(() => withOptimistic(withArrival(chat.messages, activeId), chat.sending, activeId), [withArrival, chat.messages, chat.sending, activeId])
   const hasThread = messages.some(m => m.role === 'user' || m.role === 'assistant')
   const modelWarm = !!model && loadedIds.has(model)
   const title = activeChat?.title || tc('list.untitled')
+  // The project chips of the header: only a chat that has a project (or an open
+  // settings sheet) reads the list, so other chats cost no request.
+  const hasProjects = Boolean(activeChat?.project_id || activeChat?.pulled_projects?.length)
+  const projectList = useProjectList(Boolean(activeId) && (hasProjects || showSettings))
+  const homeProj = hasProjects ? homeProject(activeChat, projectList.projects) : null
+  const pulledProj = hasProjects ? pulledProjects(activeChat, projectList.projects, projectList.shared) : []
 
   // What the slash menu needs from this page (see utils/slashCommands.js); the
   // composer adds the skills, the agents, the models and the staged files.
@@ -324,10 +482,25 @@ function ChatPage() {
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
+  // A new message scrolls down smoothly. What grows under a pinned thread (the
+  // card of a model that loads and its progress, the streamed answer, a message
+  // that settles) is followed at once, from the size of the thread itself, so
+  // nothing waits for a change of data to scroll.
   useEffect(() => {
     if (!stickToBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, chat.live, chat.pending.length])
+  }, [messages.length, chat.pending.length])
+  useEffect(() => {
+    const el = messagesRef.current
+    const thread = el?.querySelector('.cx-thread')
+    if (!el || !thread || typeof ResizeObserver === 'undefined') return undefined
+    const follow = () => {
+      if (stickToBottomRef.current) el.scrollTop = el.scrollHeight
+    }
+    const ro = new ResizeObserver(follow)
+    ro.observe(thread)
+    return () => ro.disconnect()
+  }, [])
 
   // Switching chats snaps to the bottom and resets the focus-mode override.
   useEffect(() => {
@@ -346,9 +519,7 @@ function ChatPage() {
   useLayoutEffect(() => {
     if (focusActive) {
       if (prevAppCollapseRef.current === null) {
-        try {
-          prevAppCollapseRef.current = localStorage.getItem('localai_sidebar_collapsed') === 'true'
-        } catch { prevAppCollapseRef.current = false }
+        prevAppCollapseRef.current = readSidebarCollapsed()
       }
       window.dispatchEvent(new CustomEvent('sidebar-collapse', { detail: { collapsed: true } }))
     } else if (prevAppCollapseRef.current !== null) {
@@ -362,7 +533,7 @@ function ChatPage() {
   // the preview pane; it also exits focus mode. None of that fires while a menu or
   // dialog is open: those take their own Esc first.
   const escapeRef = useRef({})
-  escapeRef.current = { running: chat.running, stop: () => chat.stop(activeId), findOpen: find.open, paneOpen: pane.open, closePane: pane.close }
+  escapeRef.current = { running: chat.running, stop: stopTurn, findOpen: find.open, paneOpen: pane.open, closePane: pane.close }
   useEffect(() => {
     const onKey = (e) => {
       const isMod = e.metaKey || e.ctrlKey
@@ -386,7 +557,7 @@ function ChatPage() {
         }
         return
       }
-      const overlay = document.querySelector('.home-menu, .cx-menu, .dk-cmdlist, .chat-mcp-dropdown-menu, [role="dialog"], [role="alertdialog"]')
+      const overlay = document.querySelector('.home-menu, .cx-menu, .dk-cmdlist, [role="dialog"], [role="alertdialog"]')
       // An Escape that a popover or a sheet already used to close itself must
       // not also stop the turn.
       if (e.key === 'Escape' && !overlay && !e.defaultPrevented) {
@@ -420,12 +591,38 @@ function ChatPage() {
     root.querySelectorAll('mark.cx-hit').forEach((mark, i) => {
       if (i === find.index) {
         mark.setAttribute('data-cur', '')
+        // The reader chose where to look: the thread stops following the bottom.
+        stickToBottomRef.current = false
         mark.scrollIntoView({ block: 'center' })
       } else {
         mark.removeAttribute('data-cur')
       }
     })
   }, [find.index, find.count, find.query])
+
+  // A link from the chat search names a message (?seq=14): scroll to it once
+  // the transcript has it, and flash it so the eye finds it. location.key
+  // makes a second click on the same hit jump again.
+  const wantSeq = seqOfSearch(location.search)
+  const jumpedRef = useRef('')
+  useEffect(() => {
+    if (!wantSeq || !activeId || routeId !== activeId) return undefined
+    const mark = `${location.key}:${activeId}:${wantSeq}`
+    if (jumpedRef.current === mark) return undefined
+    const el = messagesRef.current?.querySelector(`[data-testid="chat-message"][data-index="${wantSeq}"]`)
+    if (!el) return undefined
+    jumpedRef.current = mark
+    stickToBottomRef.current = false
+    el.scrollIntoView({ block: 'center' })
+    el.focus({ preventScroll: true })
+    // on, then off (the colour fades by a transition), then gone. Not cleared
+    // by the cleanup: a new message in the transcript re-runs this effect and
+    // must not cut the flash short.
+    el.setAttribute('data-flash', 'on')
+    setTimeout(() => el.setAttribute('data-flash', 'off'), 1400)
+    setTimeout(() => el.removeAttribute('data-flash'), 2800)
+    return undefined
+  }, [wantSeq, activeId, routeId, messages, location.key])
 
   // Highlight code blocks and add per-block Copy and Download buttons, and
   // Open preview on a block that is a result (a page, an SVG, a long block, a
@@ -530,11 +727,14 @@ function ChatPage() {
     if (typeof override !== 'string') drafts.clear(activeId)
     setLocalError('')
     let target = activeId
+    // The message shows now; the chat that a first message needs is created
+    // behind it (a message of an open chat is drawn by chat.send).
+    if (!target) chat.showSending(null, text, sending)
     try {
       if (!target) {
         setBusy(true)
         // The chat is created with the switches drafted in its menus.
-        target = await chat.createChat(draftModel, agentId, switches.draftSwitches())
+        target = await createWithDraft()
         switches.resetDraft()
         await select(target)
         navigate(`/app/chats/${target}`)
@@ -544,9 +744,10 @@ function ChatPage() {
     } catch (e) {
       // Give the text and files back to the chat they were written in, unless
       // the user typed something else there. Another chat may be open by now.
+      chat.dropSending()
       if (typeof override !== 'string') drafts.restore(target, input.trim(), sending)
       if (drafts.isOpen(target)) sayError(e, tc('errors.send'))
-      else addToast(isFolderMissingError(e) ? t('agentFolder.startError') : (e.message || tc('errors.send')), 'error')
+      else addToast(isFolderMissingError(e) ? t('agentFolder.startError') : startRefusal(e) ? t(startRefusal(e) === 'changed' ? 'agentFolder.projectChanged' : 'agentFolder.projectPaused') : (e.message || tc('errors.send')), 'error')
     } finally {
       setBusy(false)
     }
@@ -578,6 +779,13 @@ function ChatPage() {
     handleSend()
   }, [input, activeId, busy, effectiveModel, handleSend, navigate, location.pathname, location.search])
 
+  // A command item of a slot fills the composer with the command's text, as
+  // choosing it in the slash menu does; the person sends it.
+  const fillComposer = useCallback((text) => {
+    setInput(text)
+    textareaRef.current?.focus()
+  }, [setInput])
+
   // A shortcut fills the composer, as the starters did; one marked send goes
   // at once when the chat can take a message.
   const pickShortcut = useCallback((s) => {
@@ -593,6 +801,12 @@ function ChatPage() {
   // model said after it and starts a new turn.
   const handleRegenerate = useCallback(() => {
     if (activeId) chat.regenerate(activeId)
+  }, [activeId, chat])
+
+  // Retry of the failure card goes on from where the turn stopped: the
+  // messages, tool calls and results stay.
+  const handleRetry = useCallback(() => {
+    if (activeId) chat.resume(activeId)
   }, [activeId, chat])
 
   // Branch copies the chat up to and including the line into a new chat, which opens.
@@ -730,6 +944,30 @@ function ChatPage() {
     },
   })
 
+  // The window of the chat's model is too small for the chat agent (the
+  // server's harness block). An administrator raises the window of the model;
+  // anyone else moves the chat to another model, or resets the chat's own
+  // context size setting.
+  const harnessModel = activeChat?.model || ''
+  const setModelWindow = async (value) => {
+    try {
+      await modelsApi.patchConfig(harnessModel, { context_size: value })
+      addToast(t('toasts.windowSet', { model: harnessModel, window: value }), 'success', 3000)
+      await chat.refreshChat(activeId)
+    } catch (e) {
+      addToast(e.message, 'error')
+    }
+  }
+  const resetChatWindow = async () => {
+    const rest = { ...(activeChat?.settings || {}) }
+    delete rest.context_size
+    try {
+      await chat.update(activeId, { settings: rest })
+    } catch (e) {
+      addToast(e.message, 'error')
+    }
+  }
+
   const promptDelete = () => activeChat && requestDelete({ id: activeChat.id, name: title })
 
   // Picking another model in a chat moves the chat to it from the next turn.
@@ -772,7 +1010,7 @@ function ChatPage() {
     },
   }), [])
 
-  const rows = useMemo(() => placeProposals(threadRows(messages, chat.live), { streaming: chat.running }), [messages, chat.live, chat.running])
+  const rows = useMemo(() => foldNotes(placeProposals(threadRows(messages, chat.live), { streaming: chat.running })), [messages, chat.live, chat.running])
   // The cards of a turn that is still running go after the streaming text.
   const tailProposals = rows.length > 0 && rows[rows.length - 1].kind === 'proposals' ? rows[rows.length - 1] : null
   // Only the last answer can be answered again (the server cuts after the last
@@ -824,7 +1062,7 @@ function ChatPage() {
     if (!filesOn || row.kind !== 'msg' || row.msg.role !== 'assistant' || noteKeyByTurn.get(row.msg.turn) !== row.key) return null
     const list = turnFiles(chatFiles.files, row.msg.turn)
     if (list.length === 0) return null
-    return <FileChipRow key={`fc-${row.msg.turn}`} files={list} onOpen={openFile} />
+    return <FileChipRow key={`fc-${row.msg.turn}`} files={list} onOpen={openFile} text={row.msg.text} />
   }
 
   const streaming = streamingParts(chat.live)
@@ -838,37 +1076,65 @@ function ChatPage() {
   }
   const stepFind = (delta) => setFind(f => (f.count === 0 ? f : { ...f, index: (f.index + delta + f.count) % f.count }))
 
-  const isEmpty = !activeId || (messages.length === 0 && !chat.running && !chat.loading)
+  // The first message of a new chat is drawn before the chat exists.
+  const isEmpty = messages.length === 0 && (!activeId || (!chat.running && !chat.loading))
+  // An agent shared with you runs with your own access: before the first
+  // message the chat says what of it you lack.
+  const emptyAgentId = isEmpty ? ((activeId ? activeChat?.agent_id : agentId) || '') : ''
+  const emptyAgent = emptyAgentId ? (composer.agents || []).find(a => a.id === emptyAgentId) : null
+  const needsAgent = emptyAgent && isSharedWithMe(emptyAgent) ? emptyAgent.id : ''
   const noModel = !activeId && !chatModelsLoading && chatModels.length === 0 && !pickedAgent?.model
   const conversations = isEmpty ? resumeItems(chat.chats.filter(c => c.id !== activeId && c.id !== pendingDelete?.id)).slice(0, 8) : []
   const manage = Boolean(activeChat?.assistant)
+  // The identity of persona.json is the user's own assistant. An agent and
+  // the LocalAI assistant of Manage keep their own name.
+  const ownAssistant = !manage && !(activeId ? activeChat?.agent_id : pickedAgent)
+  const shownIdentity = useMemo(
+    () => (ownAssistant && (identity.name || identity.avatar) ? { name: identity.name, avatar: identity.avatar } : null),
+    [ownAssistant, identity.name, identity.avatar],
+  )
 
   // The sub-agents of a chat: a chip after Skills.
   const subAgents = activeId && <SubAgentsMenu chatId={activeId} tick={chat.ticks.subAgents} />
 
+  // Creates the chat with the drafted switches, then gives it the reasoning
+  // effort picked before it existed.
+  const createWithDraft = async () => {
+    const id = await chat.createChat(draftModel, agentId, switches.draftSwitches(), composer.projectId)
+    // The shared projects picked in the composer are pulled into the new chat.
+    if (composer.pulledDraft?.length) {
+      try { await chat.setPulled(id, composer.pulledDraft) } catch (e) { addToast(tpj('toasts.pullFailed', { message: e.message }), 'warning') }
+      composer.setPulledDraft([])
+    }
+    // The sandbox profile and the network picked before the chat existed.
+    const profileError = await sandboxProfile.saveDraft(id)
+    if (profileError) addToast(tc(`sandboxProfile.${profileError}`), 'error')
+    const networkError = await egress.saveDraft(id)
+    if (networkError) addToast(networkError, 'error')
+    if (draftEffort) {
+      try { await chat.update(id, { settings: settingsWithEffort(null, draftEffort) }) } catch (e) { addToast(e.message || t('settings.saveFailed'), 'error') }
+      setDraftEffort('')
+    }
+    return id
+  }
+  const effortNow = activeId ? (activeChat?.settings?.reasoning_effort || '') : draftEffort
+  const setEffort = async (value) => {
+    if (!activeId) { setDraftEffort(value); return }
+    try {
+      await chat.update(activeId, { settings: settingsWithEffort(activeChat?.settings, value) })
+    } catch (e) {
+      addToast(e.message || t('settings.saveFailed'), 'error')
+    }
+  }
+
   const composerChips = (
     <>
-      {activeId && chat.files.on && (
-        <button
-          type="button"
-          className="home-chip cx-chip-toggle"
-          aria-pressed={pane.open}
-          aria-controls={pane.open ? 'chat-files-pane' : undefined}
-          onClick={pane.toggle}
-          title={t('files.chipTitle')}
-          data-testid="chat-files-chip"
-        >
-          <Icon name="paperclip" />
-          <span className="home-chip__text">{t('files.chip')}</span>
-          {/* Keyed by the number, so a new count rises into place. */}
-          {chatFiles.files.length > 0 && <span key={chatFiles.files.length} className="cx-files__count" data-testid="chat-files-count">{chatFiles.files.length}</span>}
-        </button>
-      )}
+      {activeChat?.kind !== 'subagent' && <ReasoningChips effort={effortNow} onEffort={setEffort} openRef={effortRef} />}
     </>
   )
 
   const moreItems = [
-    { key: 'new', icon: 'plus', label: t('menu.newChat'), onClick: () => navigate('/app') },
+    { key: 'new', icon: 'plus', label: uiString('nav.newChat', t('menu.newChat')), onClick: () => navigate('/app') },
     { key: 'rename', icon: 'pencil', label: t('menu.rename'), hidden: !activeId, onClick: () => setRenaming(true) },
     { key: 'copy', icon: 'clipboard', label: t('menu.copyChat'), hidden: !hasThread, onClick: () => copyChat(activeId) },
     { key: 'export', icon: 'export', label: t('menu.exportMarkdown'), hidden: !hasThread, onClick: () => exportChat(activeId) },
@@ -914,7 +1180,7 @@ function ChatPage() {
       if (!target) {
         if (!effectiveModel) { addToast(t('toasts.selectModel'), 'warning'); return }
         setBusy(true)
-        target = await chat.createChat(draftModel, agentId, switches.draftSwitches())
+        target = await createWithDraft()
         switches.resetDraft()
         await select(target)
         navigate(`/app/chats/${target}`)
@@ -996,6 +1262,7 @@ function ChatPage() {
       case 'chats': chatsMenuRef.current?.open(); break
       case 'assistant': openAssistant(); break
       case 'settings': setShowSettings(true); break
+      case 'effort': effortRef.current?.open(); break
       case 'find': openFind(); break
       case 'skills': navigate('/app/skills'); break
       case 'export': if (activeId) exportChat(activeId); break
@@ -1014,6 +1281,19 @@ function ChatPage() {
   // page was reloaded) fades after a day, so an old failure does not look new.
   const showFailure = Boolean(activeId) && !chat.running && chat.lastTurn === 'failed'
     && (Boolean(chat.failure) || !isStaleFailure(chat.detail?.updated))
+  // A turn a restart interrupted shows the same card. The page resumes it by
+  // itself a few times; the person can stop that or retry at once.
+  const showInterrupted = Boolean(activeId) && !chat.running && chat.lastTurn === 'interrupted'
+    && !isStaleFailure(chat.detail?.updated)
+  const autoResume = useAutoResume({
+    id: activeId, lastTurn: chat.lastTurn, running: chat.running, resuming: chat.resuming,
+    updated: chat.detail?.updated, resume: chat.resume,
+    willResume: chat.willResume, resumeAttempts: chat.resumeAttempts, refresh: chat.refreshChat,
+  })
+  // Once the page has given up resuming, the card says what to do; the notice
+  // that the stream reconnects would only repeat a problem the card covers.
+  const gaveUp = showInterrupted && autoResume.phase === 'exhausted'
+  const failureShown = showInterrupted ? INTERRUPTED : (chat.failure || chat.failureSaved)
   // The one state of the status line, and whether the keyboard hint shows:
   // only while the composer has focus, is empty and the chat is idle.
   const footState = chatFootState({
@@ -1024,26 +1304,27 @@ function ChatPage() {
   const footModel = chat.usage?.model || model
   const footBackend = loadedModels.find(m => m.id === footModel)?.backend || ''
   const placeholder = effectiveModel
-    ? (chat.running ? t('input.placeholderQueue') : t('input.placeholderModel', { model: effectiveModel }))
+    ? (chat.running ? t('input.placeholderQueue') : uiString('composer.placeholder', t('input.placeholderModel', { model: effectiveModel }), { model: effectiveModel }))
     : (noModel ? t('input.placeholderNoModel') : t('input.placeholderPick'))
 
   return (
     <div className="cx-page" data-testid="chats-page" ref={pageRef}>
       <div className="cx-conv" data-empty={isEmpty || undefined}>
+        <BackgroundLayer bgKey="chatBackground" testId="chat-bg" />
         <ChatHeader
           historyMenu={(
             <ChatsMenu
               ref={chatsMenuRef}
               chats={visibleChats}
               activeChatId={activeId}
-              onSelect={(id) => navigate(`/app/chats/${id}`)}
+              onSelect={(id, opts) => navigate(chatAddress(id, opts))}
               onNew={() => navigate('/app')}
               onDelete={requestDelete}
               onDeleteAll={promptDeleteAll}
               onRename={(id, name) => chat.rename(id, name)}
               onExport={(c) => exportChat(c.id)}
               onCopyChat={(c) => copyChat(c.id)}
-              onSearch={(text) => chatsApi.search(text, 50)}
+              onSearch={(text, params) => chatsApi.search(text, 50, params)}
               originTitle={originTitle}
             />
           )}
@@ -1058,8 +1339,29 @@ function ChatPage() {
           onSettings={() => setShowSettings(v => !v)}
           settingsOpen={showSettings}
           moreItems={moreItems}
-          extra={<ChatInbox inbox={inbox} />}
+          chips={(homeProj || pulledProj.length > 0) && (
+            <div className="pjc-chips pjc-chips--head" data-testid="chat-project-chips">
+              {homeProj && <ProjectChip project={homeProj} />}
+              {pulledProj.slice(0, HEADER_PULLED).map(p => <PulledChip key={p.id} project={p} />)}
+              {pulledProj.length > HEADER_PULLED && <MoreChip count={pulledProj.length - HEADER_PULLED} onClick={() => setShowSettings(true)} />}
+            </div>
+          )}
+          extra={(
+            <>
+              {activeId && chat.files.on && <FilesButton open={pane.open} count={chatFiles.files.length} onToggle={pane.toggle} />}
+              {dockOn && <DockButton open={pageDock.dock.open} onToggle={pageDock.toggle} />}
+              <WorkspaceSlot name="chatHeader" onTool={handleSend} onCommand={fillComposer} />
+            </>
+          )}
         />
+
+        {(homeProj || pulledProj.length > 0) && (
+          <div className="pjc-chips pjc-strip">
+            {homeProj && <ProjectChip project={homeProj} testId={undefined} />}
+            {pulledProj.map(p => <PulledChip key={p.id} project={p} testId={undefined} />)}
+          </div>
+        )}
+        {pulledProj.length > 0 && <PulledProjects projects={pulledProj} onManage={() => setShowSettings(true)} onRetry={() => projectList.reload()} onRemove={(ids) => chat.setPulled(activeId, (activeChat.pulled_projects || []).filter(x => !ids.includes(x))).then(() => projectList.reload()).catch((e) => addToast(e.message, 'error'))} />}
 
         {find.open && (
           <FindBar
@@ -1077,6 +1379,19 @@ function ChatPage() {
           const o = resolveOrigin({ origin: activeChat.origin, originId: activeChat.origin_id }, originCtx)
           const kind = knownKind(o.kind)
           const name = o.title || t(`origin.kindFallback.${kind}`)
+          if (isConnectorChat(activeChat)) {
+            const kindTitle = (originCtx.connectorKinds || []).find((k) => k.kind === (originCtx.connectors || []).find((x) => x.id === o.id)?.kind)?.title || ''
+            return (
+              <ConnectorHeader
+                title={name}
+                kindTitle={kindTitle}
+                place={chat.detail?.id === activeId ? chat.detail?.place : null}
+                messages={messages}
+                href={o.href}
+                hrefLabel={t('origin.open', { title: name })}
+              />
+            )
+          }
           return (
             <p className="cx-notice cx-origin-banner" role="note" data-testid="chat-origin-banner">
               <span>{t('origin.banner', { title: name })}</span>
@@ -1087,7 +1402,15 @@ function ChatPage() {
 
         <div className="cx-stage">
           <div className="cx-body" ref={messagesRef}>
-            {isEmpty && <EmptyHead name={activeId ? title : (pickedAgent?.name || '')} manage={manage} />}
+            {isEmpty && (
+              <EmptyHead
+                name={activeId ? title : (pickedAgent?.name || '')}
+                manage={manage}
+                identity={ownAssistant ? identity : null}
+                fallbackTitle={uiString('chat.empty.title', '')}
+              />
+            )}
+            {needsAgent && <div className="cx-agent-needs"><AgentNeedsNotice agentId={needsAgent} /></div>}
             <div className="cx-thread" data-testid="chat-thread" role="region" aria-label={tc('transcript')} hidden={isEmpty}>
               <EgressCardsContext.Provider value={egressCards}>
               <ChatSendContext.Provider value={sendLive}>
@@ -1097,6 +1420,8 @@ function ChatPage() {
                 if (row.kind === 'app') return <AppRow key={row.key} chatId={activeId} row={row} onSend={sendLive} />
                 if (row.kind === 'marker') return <ContextMarker key={row.key} marker={row.marker} before={row.before} after={row.after} />
                 if (row.kind === 'goal') return <GoalMarker key={row.key} msg={row.msg} />
+                if (row.kind === 'thread') return <ThreadContext key={row.key} msg={row.msg} />
+                if (row.kind === 'hostnote') return <HostNote key={row.key} msg={row.msg} count={row.count} />
                 return [
                   <ChatMessage
                     key={row.key}
@@ -1108,9 +1433,12 @@ function ChatPage() {
                     activityItems={row.activity}
                     proposalItems={row.proposals}
                     actions={messageActions}
+                    files={chatFiles.files}
+                    onOpenFile={filesOn ? openFile : undefined}
                     conversationId={activeId}
                     canRegenerate={!chat.running && row.key === lastAnswerKey}
                     proposalTick={chat.ticks.proposals}
+                    identity={shownIdentity}
                   />,
                   changeNoteFor(row),
                   fileChipsFor(row),
@@ -1121,6 +1449,9 @@ function ChatPage() {
 
               {(chat.running || streaming.text || streaming.reasoning || streaming.tools.length > 0) && (
                 <StreamingTurn
+                  files={chatFiles.files}
+                  onOpenFile={filesOn ? openFile : undefined}
+                  identity={shownIdentity}
                   model={model}
                   warm={modelWarm}
                   content={streaming.text}
@@ -1139,13 +1470,15 @@ function ChatPage() {
               )}
               {waitingCards.map(c => <NetworkConsentCard key={c.id} card={c} chatId={activeId} egress={egress} />)}
 
-              {showFailure && (
+              {(showFailure || showInterrupted) && (
                 <ErrorCard
-                  failure={chat.failure}
+                  failure={failureShown}
                   isAdmin={isAdmin}
-                  kept={false}
-                  canRetry={!!lastUserText(messages)}
-                  onRetry={handleRegenerate}
+                  kept={keptAbove(messages)}
+                  canRetry={!chat.resuming}
+                  onRetry={() => { autoResume.reset(); handleRetry() }}
+                  auto={autoResume}
+                  onStopTrying={autoResume.stop}
                 />
               )}
 
@@ -1181,6 +1514,16 @@ function ChatPage() {
           {/* The toast stack stays above the whole dock, so a toast never
               covers the shortcut row it talks about. */}
           <div className="cx-dock__in" data-toast-anchor="">
+            {activeId && (
+              <HarnessBanner
+                harness={chat.detail?.harness}
+                model={harnessModel}
+                models={chatModels}
+                onSetModelWindow={setModelWindow}
+                onSwitchModel={pickModel}
+                onResetChatWindow={resetChatWindow}
+              />
+            )}
             {!chat.persistent && <p className="cx-notice" role="note">{tc('memoryNotice')}</p>}
             {!chat.files.on && <p className="cx-notice" role="note">{chat.files.reason || tc('attach.off')}</p>}
             {browserStores.length > 0 && (
@@ -1219,8 +1562,13 @@ function ChatPage() {
               />
             )}
             {activeId && loopListFor === activeId && <LoopList loops={chat.loops} onClose={() => setLoopListFor('')} />}
-            <LoopBar loops={chat.loops} chatId={activeId} chat={chat} />
-            {!noModel && (
+            <LoopBar loops={chat.loops} jobs={chat.jobs} chatId={activeId} chat={chat} />
+            {activeId && chat.reconnecting && !gaveUp && (
+              <p className="cx-reconnect" role="status" data-testid="chat-reconnecting">
+                <Icon name="alert-circle" /> {t('connection.lost')}
+              </p>
+            )}
+            {!noModel && !(isEmpty && ownAssistant && !identity.showShortcuts) && (
               <ShortcutsRow
                 starters={manage ? t('empty.suggestionsManage', { returnObjects: true }) : undefined}
                 filesOn={chat.files.on && !manage}
@@ -1237,11 +1585,15 @@ function ChatPage() {
               imageModel={chat.imageModel}
               onPickModel={pickModel}
               pickerRef={pickerRef}
-              egress={activeId ? egress : null}
+              egress={egress}
+              sandboxProfile={sandboxProfile}
               toolsExtra={subAgents}
               chips={composerChips}
               slotContext={composerSlotContext}
+              toolbarSlot={<WorkspaceSlot name="composerToolbar" onTool={handleSend} onCommand={fillComposer} />}
               onDictateError={(m) => addToast(m, 'error')}
+              live={activeId && !liveOn ? <LiveButton live={liveVoice} onNeedSetup={openLiveSetup} buttonRef={liveButtonRef} /> : null}
+              dock={activeId && liveOn ? <LiveDock live={liveVoice} waiting={chat.running} onTypeInstead={typeInsteadOfLive} onEnd={endLive} /> : null}
               onSubmit={handleSend}
               canSend={!!effectiveModel && !(!activeId && busy) && (input.trim().length > 0 || files.length > 0)}
               sending={busy}
@@ -1254,7 +1606,7 @@ function ChatPage() {
               onRunAction={runSlash}
               streaming={chat.running}
               queueWhileStreaming
-              onStop={() => chat.stop(activeId)}
+              onStop={stopTurn}
               stopTitle={t('input.stopGenerating')}
               onKeyDownExtra={onComposerKey}
               rows={1}
@@ -1294,6 +1646,17 @@ function ChatPage() {
           </div>
         )}
       </div>
+      {dockOn && (
+        <PageDock
+          dock={pageDock.dock}
+          update={pageDock.update}
+          onOpen={pageDock.open}
+          chatId={activeId}
+          fresh={pageDock.fresh}
+          phone={pageDock.phone}
+          onAsk={fillComposer}
+        />
+      )}
       {pane.open && activeId && (
         <ChatFilesPane
           state={chatFiles}
@@ -1302,11 +1665,20 @@ function ChatPage() {
           blocks={pane.blocks}
           onClose={pane.close}
           onDropFiles={(list) => composer.attach('file', list)}
+          addToast={addToast}
         />
       )}
       <p className="sr-only" role="status" data-testid="chat-preview-status">
         {pane.announcement ? t('preview.opened', { name: pane.announcement }) : ''}
       </p>
+      {liveSetupOpen && activeId && (
+        <LiveSetupSheet
+          models={liveModel}
+          onClose={() => setLiveSetupOpen(false)}
+          onInstalled={refetchLiveModels}
+          onStart={() => { setLiveSetupOpen(false); liveVoice.start() }}
+        />
+      )}
       {showSettings && (
         <ChatSettingsSheet
           chat={activeChat ? { ...activeChat, model } : { model }}
@@ -1319,6 +1691,11 @@ function ChatPage() {
           onEditAgent={() => navigate(`/app/agents/${encodeURIComponent(pickedAgent.id)}/edit`)}
           onDelete={activeId ? () => { setShowSettings(false); promptDelete() } : undefined}
           onSaveSettings={activeId && activeChat?.kind !== 'subagent' ? (settings) => chat.update(activeId, { settings }) : undefined}
+          onEffort={activeId && activeChat?.kind !== 'subagent' ? setEffort : undefined}
+          projectList={activeId && activeChat?.kind !== 'subagent' ? projectList : undefined}
+          running={chat.running}
+          onProject={async (projectId) => { const out = await chat.setProject(activeId, projectId); projectList.reload(); return out }}
+          onPulled={async (ids) => { const out = await chat.setPulled(activeId, ids); projectList.reload(); return out }}
           onClose={() => setShowSettings(false)}
         />
       )}

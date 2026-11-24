@@ -21,12 +21,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/http/auth"
 	managerpkg "github.com/mudler/LocalAI/core/services/addons"
 	"github.com/mudler/LocalAI/core/services/addons/catalog"
 	"github.com/mudler/LocalAI/core/services/addons/gateway"
 	"github.com/mudler/LocalAI/core/services/addons/packages"
 	"github.com/mudler/LocalAI/core/services/addons/updates"
+	"github.com/mudler/LocalAI/core/services/galleryop"
 	"github.com/mudler/LocalAI/pkg/addons/contract"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -269,6 +272,23 @@ var _ = Describe("update routes", Label("updates"), func() {
 		replay := send(s.frontends["front-b"], "POST", path, upgradeBody("up-1", before, next.Digest), alice("up-1"))
 		Expect(replay.code).To(Equal(200))
 		Expect(replay.body["payload"]).To(Equal(terminal))
+		// A later session of the same administrator reads the operation that an
+		// earlier session started, through every frontend.
+		laterCookie, err := auth.CreateSession(s.db, "alice", "secret")
+		Expect(err).NotTo(HaveOccurred())
+		s.each(func(name string, e http.Handler) {
+			later := send(e, "POST", "/api/addons/dispatch", dispatchBody("up-1", "notes", "operation-status", 0, `{}`), humanTab(laterCookie, "poll"))
+			Expect(later.code).To(Equal(200), name+fmt.Sprint(later.body))
+			Expect(payloadOf(later)).To(HaveKeyWithValue("Phase", "completed"), name)
+			// An unknown operation has its own typed answer, not a refusal.
+			missing := send(e, "POST", "/api/addons/dispatch", dispatchBody("never-started", "notes", "operation-status", 0, `{}`), humanTab(laterCookie, "poll"))
+			Expect(missing.code).To(Equal(404), name)
+			Expect(missing.errType()).To(Equal("operation_not_found"), name)
+			// A caller who is not an administrator is still refused as before.
+			refused := send(e, "POST", "/api/addons/dispatch", dispatchBody("up-1", "notes", "operation-status", 0, `{}`), humanTab(s.cookies["carol"], "poll"))
+			Expect(refused.code).To(Equal(403), name)
+			Expect(refused.errType()).NotTo(Equal("operation_not_found"), name)
+		})
 		// Another operation ID for the same transition is a conflict.
 		other := send(s.frontends["owner"], "POST", path, upgradeBody("up-2", before, next.Digest), alice("up-2"))
 		Expect(other.code).To(Equal(409))
@@ -277,6 +297,48 @@ var _ = Describe("update routes", Label("updates"), func() {
 		// The status of what runs now is up to date.
 		now := send(s.frontends["front-a"], "GET", "/api/addons/notes/update", "", bearerOf(s.tokens["carol"]))
 		Expect(now.body["state"]).To(Equal("up-to-date"))
+	})
+
+	It("queues the upgrade on the operation queue, answers its job at once and runs it in the background", func() {
+		gs := galleryop.NewGalleryService(&config.ApplicationConfig{}, nil)
+		qctx, stop := context.WithCancel(context.Background())
+		DeferCleanup(stop)
+		Expect(gs.Start(qctx, nil, nil)).To(Succeed())
+		oc := galleryop.NewOpCache(gs)
+		e := echo.New()
+		e.Use(auth.Middleware(s.db, s.cfg))
+		group := e.Group("/api/addons", auth.RequireFeature(s.db, auth.FeatureAddons), auth.CSRFMiddleware(), BrowserProtection())
+		mode := WithOwnership(s.mode)
+		group.POST("/dispatch", Dispatch(s.gateway, s.db, mode))
+		group.POST("/:id/upgrade", UpgradeAddon(s.gateway, s.db, mode, WithOperationQueue(gs, oc)))
+
+		before := s.installedDigest()
+		next := s.publish("build-2", catalog.Requirements{})
+		Expect(send(s.frontends["owner"], "POST", "/api/addons/notes/update/check", checkBody("c"), alice("c")).code).To(Equal(200))
+		path := "/api/addons/notes/upgrade"
+		// The refusals are the same as without the queue, and record nothing.
+		Expect(send(e, "POST", path, upgradeBody("q", before, next.Digest), bearerOf(s.tokens["alice"])).code).To(Equal(403))
+		changed := send(e, "POST", path, upgradeBody("q", before, "sha256:"+fmt.Sprintf("%064x", 2)), alice("q"))
+		Expect(changed.code).To(Equal(409))
+		Expect(changed.errType()).To(Equal("candidate_changed"))
+
+		done := send(e, "POST", path, upgradeBody("qu-1", before, next.Digest), alice("qu-1"))
+		Expect(done.code).To(Equal(200), fmt.Sprint(done.body))
+		payload := done.body["payload"].(map[string]any)
+		Expect(payload).To(HaveKeyWithValue("Phase", "accepted"))
+		job, _ := payload["jobId"].(string)
+		Expect(job).NotTo(BeEmpty())
+		Expect(oc.Get(galleryop.AddonOpKey("notes"))).To(Equal(job))
+		Eventually(func() bool {
+			st := gs.GetStatus(job)
+			return st != nil && st.Processed && st.Error == nil && st.Upgrade
+		}, 10*time.Second).Should(BeTrue())
+		Expect(awaitLifecycle(e, "notes", "qu-1", alice("qu-1"))).To(HaveKeyWithValue("Phase", "completed"))
+		Expect(s.generation()).To(Equal(uint64(2)))
+		// The same request again answers the recorded operation and queues nothing.
+		replay := send(e, "POST", path, upgradeBody("qu-1", before, next.Digest), alice("qu-1"))
+		Expect(replay.code).To(Equal(200))
+		Expect(replay.body["payload"]).NotTo(HaveKey("jobId"))
 	})
 
 	It("runs two concurrent upgrades from two frontends once: the same ID shares the answer, another ID is a conflict", func() {

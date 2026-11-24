@@ -1,6 +1,8 @@
+import { readFileSync, readdirSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { approvalForm, approvalPayload, approvalProblem, bytesToMib, canSave, connectorForm, connectorPayload, emptyConnector, fileDirection, fileLimitProblem, formatBytes, mibToBytes, modeText, previewLimit, senderLine } from '../../../internal/connector-ui/src/connector.js'
+import { DUPLICATE_CONFIRMATION, duplicateOther, duplicateRefusalName, isDuplicateRefusal, localizeAccess, localizeCapabilities, approvalForm, approvalPayload, approvalProblem, bytesToMib, canSave, connectorForm, connectorPayload, emptyConnector, REPLY_LANGUAGES, REPLY_MODES, fileDirection, fileLimitProblem, formatBytes, mibToBytes, previewLimit, senderLine, listeningChannels, offeredPlaces, placeFor, withPlace } from '../../../internal/connector-ui/src/connector.js'
+import { changedParts, droppedActs, removedActs } from '../../../internal/connector-ui/src/access.js'
 
 test('chat connectors: the token goes only when it was typed', () => {
   const create = connectorPayload({ ...emptyConnector(), name: ' Bot ', token: ' 1:abc ', agent_id: 'a1', allow: ['11', ' 11', '@ada_l', ''] }, 'telegram')
@@ -16,13 +18,6 @@ test('chat connectors: accept any drops the allowlist from the request', () => {
   const body = connectorPayload({ ...emptyConnector(), name: 'B', agent_id: 'a', accept_any: true, allow: ['11'] }, 'telegram')
   assert.equal(body.accept_any, true)
   assert.deepEqual(body.allow, [])
-})
-
-test('chat connectors: who a binding accepts, in words', () => {
-  assert.equal(modeText({ accept_any: true }), 'anyone')
-  assert.equal(modeText({ allow: [] }), 'nobody yet')
-  assert.equal(modeText({ allow: ['1'] }), '1 listed sender')
-  assert.equal(modeText({ allow: ['1', '2'] }), '2 listed senders')
 })
 
 test('chat connectors: a sender line names the person, the count and the id', () => {
@@ -46,6 +41,21 @@ test('chat connectors: a new binding shows progress, one chat per person and sen
   assert.equal(c.reply_mode, 'progress')
   assert.equal(c.conversation, 'sender')
   assert.equal(c.send_files, true)
+})
+
+test('chat connectors: the reasoning reply mode is offered, saved and explained, with a warning', () => {
+  assert.deepEqual(REPLY_MODES, ['off', 'progress', 'stream', 'reasoning'])
+  const base = { ...emptyConnector(), name: 'B', agent_id: 'a' }
+  assert.equal(base.reply_mode, 'progress', 'it is never the default')
+  assert.equal(connectorPayload({ ...base, reply_mode: 'reasoning' }, 'telegram').reply_mode, 'reasoning')
+  assert.equal(connectorForm({ id: 'b1', name: 'B', agent_id: 'a', reply_mode: 'reasoning' }).reply_mode, 'reasoning')
+  const en = JSON.parse(readFileSync(new URL('../../../internal/connector-ui/src/i18n/connector.en.json', import.meta.url), 'utf8'))
+  for (const k of ['answer.reply.reasoning', 'answer.short.reasoning', 'answer.replyReasoningHelp']) assert.ok(en[k], `no text for ${k}`)
+  assert.match(en['answer.replyReasoningHelp'], /every sender/)
+  for (const f of readdirSync(new URL('../../../internal/connector-ui/src/i18n/', import.meta.url)).filter((x) => x.endsWith('.json'))) {
+    const t = JSON.parse(readFileSync(new URL(`../../../internal/connector-ui/src/i18n/${f}`, import.meta.url), 'utf8'))
+    for (const k of ['answer.reply.reasoning', 'answer.short.reasoning', 'answer.replyReasoningHelp']) assert.ok(t[k], `${f} has no ${k}`)
+  }
 })
 
 test('chat connectors: the request carries the reply mode, the conversation mode and the file switch', () => {
@@ -142,14 +152,14 @@ test('chat connectors: a saved limit reads back to the same number of bytes', ()
 
 test('chat connectors: the approval of chat triggers asks by default and sends its limits as numbers', () => {
   const base = { ...emptyConnector(), name: 'B', agent_id: 'a' }
-  assert.deepEqual(connectorPayload(base, 'telegram').approval, { mode: 'ask', max_pending: 0, min_gap_minutes: 0, max_runs_per_day: 0, max_lifetime_days: 0 })
+  assert.deepEqual(connectorPayload(base, 'telegram').approval, { mode: 'ask', acts: [], max_pending: 0, min_gap_minutes: 0, max_runs_per_day: 0, max_lifetime_days: 0 })
   const auto = connectorPayload({ ...base, approval: { mode: 'auto', max_pending: '3', min_gap_minutes: '', max_runs_per_day: ' 8 ', max_lifetime_days: '14' } }, 'telegram')
-  assert.deepEqual(auto.approval, { mode: 'auto', max_pending: 3, min_gap_minutes: 0, max_runs_per_day: 8, max_lifetime_days: 14 })
+  assert.deepEqual(auto.approval, { mode: 'auto', acts: [], max_pending: 3, min_gap_minutes: 0, max_runs_per_day: 8, max_lifetime_days: 14 })
   assert.equal(connectorPayload({ ...base, approval: { mode: 'sometimes' } }, 'telegram').approval.mode, 'ask', 'an unknown mode falls back to ask')
 })
 
 test('chat connectors: a saved approval reads back, with a zero limit shown as empty', () => {
-  assert.deepEqual(approvalForm({ mode: 'auto_readonly', max_pending: 4, min_gap_minutes: 0 }), { mode: 'auto_readonly', max_pending: '4', min_gap_minutes: '', max_runs_per_day: '', max_lifetime_days: '' })
+  assert.deepEqual(approvalForm({ mode: 'auto_readonly', max_pending: 4, min_gap_minutes: 0 }), { mode: 'auto_readonly', acts: [], max_pending: '4', min_gap_minutes: '', max_runs_per_day: '', max_lifetime_days: '' })
   assert.equal(connectorForm({ id: 'b' }).approval.mode, 'ask')
 })
 
@@ -162,4 +172,139 @@ test('chat connectors: an approval limit is a whole number within its bound, or 
   const ok = { ...emptyConnector(), name: 'B', agent_id: 'a', token: '1:x' }
   assert.equal(canSave({ ...ok, approval: { mode: 'auto', max_pending: '500' } }, false), false)
   assert.equal(canSave(ok, false), true)
+})
+
+test('chat connectors: approval acts round trip, are sent with the mode and limits, and an empty list is sent as []', () => {
+  const saved = { mode: 'auto', acts: ['act.spend', 'act.files'], max_pending: 3 }
+  const form = approvalForm(saved)
+  assert.deepEqual(form.acts, ['act.spend', 'act.files'])
+  const out = approvalPayload(form)
+  assert.deepEqual(out, { mode: 'auto', acts: ['act.files', 'act.spend'], max_pending: 3, min_gap_minutes: 0, max_runs_per_day: 0, max_lifetime_days: 0 })
+  assert.deepEqual(approvalPayload({ ...form, acts: [] }).acts, [])
+  assert.deepEqual(approvalPayload({ mode: 'ask' }).acts, [])
+  assert.deepEqual(approvalForm({ mode: 'ask' }).acts, [])
+})
+
+test('chat connectors: approval acts replace the whole object, so a mode change keeps them, and only the four names are valid', () => {
+  const base = { ...connectorForm({ id: 'b', approval: { mode: 'ask', acts: ['act.addons'] } }) }
+  const changed = connectorPayload({ ...base, approval: { ...base.approval, mode: 'auto' } }, 'telegram')
+  assert.equal(changed.approval.mode, 'auto')
+  assert.deepEqual(changed.approval.acts, ['act.addons'])
+  assert.deepEqual(approvalPayload({ mode: 'ask', acts: ['act.files', 'act.bogus'] }).acts, ['act.files'])
+  assert.equal(approvalProblem({ mode: 'ask', acts: ['act.send'] }), '')
+  assert.equal(approvalProblem({ mode: 'ask', acts: ['act.bogus'] }), 'acts')
+})
+
+test('chat connectors: a new binding follows the language of the sender', () => {
+  assert.equal(emptyConnector().reply_language, 'auto')
+  assert.deepEqual(REPLY_LANGUAGES, ['auto', 'en', 'it', 'de', 'es', 'fr', 'pt-BR'])
+})
+
+test('chat connectors: the request carries the reply language, and an unknown one becomes auto', () => {
+  const base = { ...emptyConnector(), name: 'B', agent_id: 'a' }
+  assert.equal(connectorPayload(base, 'telegram').reply_language, 'auto')
+  for (const l of REPLY_LANGUAGES) assert.equal(connectorPayload({ ...base, reply_language: l }, 'telegram').reply_language, l)
+  assert.equal(connectorPayload({ ...base, reply_language: 'klingon' }, 'telegram').reply_language, 'auto')
+  assert.equal(connectorPayload({ ...base, reply_language: undefined }, 'telegram').reply_language, 'auto')
+})
+
+test('chat connectors: the form of a saved binding keeps its reply language, and an older one reads as auto', () => {
+  assert.equal(connectorForm({ id: 'b1', name: 'B', agent_id: 'a', reply_language: 'de' }).reply_language, 'de')
+  assert.equal(connectorForm({ id: 'b1', name: 'B', agent_id: 'a' }).reply_language, 'auto')
+})
+
+test('chat connectors: the shared words label every reply language and say what the setting changes', () => {
+  const en = JSON.parse(readFileSync(new URL('../../../internal/connector-ui/src/i18n/connector.en.json', import.meta.url), 'utf8'))
+  for (const l of REPLY_LANGUAGES) assert.ok(en[`answer.language.${l}`], `no label for ${l}`)
+  assert.equal(en['answer.languageLabel'], 'Reply language')
+  assert.equal(en['answer.languageHelp'], 'The notes the bot writes itself, like confirmations and refusals. The answers of the model follow the language of the conversation.')
+  const src = readFileSync(new URL('../../../internal/connector-ui/src/AnswerFields.jsx', import.meta.url), 'utf8')
+  assert.ok(src.includes('data-testid="connector-reply-language"'))
+})
+
+test('chat connectors: the host text in the page language replaces the English one, field by field', () => {
+  const caps = localizeCapabilities([
+    { name: 'a', title: 'Save', description: 'D', language: 'it', localized_title: 'Salva' },
+    { name: 'b', title: 'Files', description: 'F' },
+  ])
+  assert.deepEqual(caps.map((c) => [c.title, c.description]), [['Salva', 'D'], ['Files', 'F']])
+  const view = { binding: 'b', subjects: [{ id: 'listed', decisions: [
+    { capability: 'a', code: 'x', message: 'English', localized_message: 'Italiano' },
+    { capability: 'b', code: 'y', message: 'English only' },
+    { capability: 'c', allowed: true },
+  ] }] }
+  const out = localizeAccess(view)
+  assert.deepEqual(out.subjects[0].decisions.map((d) => d.message), ['Italiano', 'English only', undefined])
+  assert.equal(out.subjects[0].decisions[0].code, 'x')
+  assert.equal(view.subjects[0].decisions[0].message, 'English', 'the input is not changed')
+  assert.equal(localizeAccess(null), null)
+  assert.deepEqual(localizeCapabilities(undefined), [])
+})
+
+test('chat connectors: the host names the other connection of a bot that is connected twice', () => {
+  assert.equal(duplicateOther({ id: 'a' }), null)
+  assert.equal(duplicateOther({ id: 'a', duplicate: { others: [] } }), null)
+  assert.deepEqual(duplicateOther({ id: 'a', duplicate: { code: 'duplicate_connection', others: [{ id: 'b', name: 'Team app' }] } }), { id: 'b', name: 'Team app' })
+})
+
+test('chat connectors: only a 409 of the type duplicate_connection is the question about a twin', () => {
+  const refusal = (status, type, param) => Object.assign(new Error('x'), { status, body: { error: { type, param } } })
+  assert.equal(isDuplicateRefusal(refusal(409, 'duplicate_connection', 'Team app')), true)
+  assert.equal(isDuplicateRefusal(refusal(409, 'connectors_off')), false)
+  assert.equal(isDuplicateRefusal(refusal(400, 'duplicate_connection')), false)
+  assert.equal(isDuplicateRefusal(new Error('network')), false)
+  assert.equal(duplicateRefusalName(refusal(409, 'duplicate_connection', 'Team app')), 'Team app')
+  assert.equal(duplicateRefusalName(refusal(409, 'duplicate_connection')), '')
+})
+
+test('chat connectors: the confirmation of a twin is the text the host expects, and goes with the save only when given', () => {
+  assert.equal(DUPLICATE_CONFIRMATION, 'answer twice')
+  const body = connectorPayload({ ...emptyConnector(), name: 'B', agent_id: 'a', token: '1:x' }, 'telegram', '1:x', { confirm_duplicate: DUPLICATE_CONFIRMATION })
+  assert.equal(body.confirm_duplicate, 'answer twice')
+  assert.equal('confirm_duplicate' in connectorPayload({ ...emptyConnector(), name: 'B', agent_id: 'a', token: '1:x' }, 'telegram', '1:x', {}), false)
+})
+
+test('chat connectors: the listening channels are the channel entries of the list, none for anyone or a mixed list', () => {
+  const isChannel = (x) => x.startsWith('C')
+  const form = { allow: ['U1', 'C1', 'C2'], accept_any: false }
+  assert.deepEqual(listeningChannels(form, isChannel, false), ['C1', 'C2'])
+  assert.deepEqual(listeningChannels({ ...form, accept_any: true }, isChannel, false), [])
+  assert.deepEqual(listeningChannels(form, isChannel, true), [])
+  assert.deepEqual(listeningChannels({}, isChannel, false), [])
+})
+
+test('chat connectors: a channel that is a place is not offered again, and a new place is verified-only', () => {
+  const form = { allow: ['C1', 'C2'], channels: [{ id: 'C1', label: 'ops', approved: true }] }
+  assert.deepEqual(offeredPlaces(form, ['C1', 'C2']), ['C2'])
+  assert.equal(placeFor(form, 'C1').label, 'ops')
+  assert.equal(placeFor(form, 'C2'), null)
+  const next = withPlace(form, 'C2', 'alerts')
+  assert.deepEqual(next.channels, [{ id: 'C1', label: 'ops', approved: true }, { id: 'C2', label: 'alerts', approved: false }])
+  assert.equal(withPlace(next, 'C1', 'x'), next, 'a place that exists stays as it is')
+  assert.equal(withPlace(form, '', ''), form)
+  assert.deepEqual(form.channels, [{ id: 'C1', label: 'ops', approved: true }], 'the form is not changed')
+})
+
+test('chat connectors: a save names the parts that changed, in a fixed order', () => {
+  const saved = connectorForm({ id: 'b', name: 'Bot', agent_id: 'a1', allow: ['1'], caps: ['memory.write'], approval: { mode: 'ask' } })
+  assert.deepEqual(changedParts(saved, saved), [])
+  assert.deepEqual(changedParts({ ...saved, caps: ['memory.write', 'files.upload'], name: ' Bot 2 ', allow: ['1', '2'] }, saved), ['name', 'who', 'permissions'])
+  assert.deepEqual(changedParts({ ...saved, approval: { ...saved.approval, acts: ['act.files'] } }, saved), ['approval'])
+  assert.deepEqual(changedParts(saved, null), [], 'a new connection has no earlier state to compare')
+})
+
+test('chat connectors: the acts a save removes, and the triggers that lose them', () => {
+  const saved = connectorForm({ id: 'b', approval: { mode: 'auto', acts: ['act.files', 'act.addons'] } })
+  const form = { ...saved, approval: { ...saved.approval, acts: ['act.files', 'act.send'] } }
+  assert.deepEqual(removedActs(saved, form), ['act.addons'])
+  assert.deepEqual(removedActs(null, form), [])
+  const triggers = [
+    { id: 't1', name: 'Digest', binding: 'b', acts: ['act.files', 'act.addons'] },
+    { id: 't2', name: 'Sweep', binding: 'b', acts: ['act.files'] },
+    { id: 't3', name: 'Elsewhere', binding: 'c', acts: ['act.addons'] },
+    { id: 't4', acts: ['act.addons'] },
+  ]
+  assert.deepEqual(droppedActs(triggers, 'b', ['act.addons']), [{ id: 't1', name: 'Digest', acts: ['act.addons'] }])
+  assert.deepEqual(droppedActs(triggers, 'b', []), [])
+  assert.deepEqual(droppedActs(null, 'b', ['act.addons']), [])
 })

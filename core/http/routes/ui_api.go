@@ -5,7 +5,6 @@ import "os"
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -19,12 +18,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/mudler/LocalAI/core/application"
+	corebackend "github.com/mudler/LocalAI/core/backend"
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/http/auth"
 	"github.com/mudler/LocalAI/core/http/endpoints/localai"
 	"github.com/mudler/LocalAI/core/http/middleware"
-	"github.com/mudler/LocalAI/core/p2p"
 	"github.com/mudler/LocalAI/core/schema"
 	"github.com/mudler/LocalAI/core/services/galleryop"
 	"github.com/mudler/LocalAI/core/services/nodes"
@@ -70,10 +69,10 @@ var usecaseFilters = map[string]config.ModelConfigUsecase{
 }
 
 // parseContextSizes parses a comma-separated list of context sizes from a query param.
-// Returns a default of [8192] if the param is empty or unparseable.
+// Returns a default of [config.DefaultEstimateContextSize] if the param is empty or unparseable.
 func parseContextSizes(raw string) []uint32 {
 	if raw == "" {
-		return []uint32{8192}
+		return []uint32{config.DefaultEstimateContextSize}
 	}
 	var sizes []uint32
 	for _, s := range strings.Split(raw, ",") {
@@ -83,7 +82,7 @@ func parseContextSizes(raw string) []uint32 {
 		}
 	}
 	if len(sizes) == 0 {
-		return []uint32{8192}
+		return []uint32{config.DefaultEstimateContextSize}
 	}
 	return sizes
 }
@@ -170,6 +169,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 
 				progress = int(status.Progress)
 				isDeletion = status.Deletion
+				if status.Upgrade {
+					taskType = galleryop.TaskUpgrade
+				}
 				// Admission publishes a "queued" status before the op reaches
 				// the worker, so a queued op HAS a status: the phase is the
 				// only truthful signal. Reading "queued" off a missing status
@@ -194,6 +196,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 				message = "Operation queued"
 			}
 
+			// An add-on install of the install queue: its key names the add-on.
+			addonID, isAddon := galleryop.ParseAddonOpKey(galleryID)
+
 			// Determine if it's a model or backend
 			// First check if it was explicitly marked as a backend operation
 			isBackend := opcache.IsBackendOp(galleryID)
@@ -202,7 +207,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			// backend-vs-model, and a GPU-only backend installed on a worker is
 			// still a backend op even when this host cannot run it. The
 			// capability-filtered listing misclassified those as model ops.
-			if !isBackend {
+			if !isBackend && !isAddon {
 				backends, _ := gallery.AvailableBackendsUnfiltered(appConfig.BackendGalleries, appConfig.SystemState)
 				for _, b := range backends {
 					backendID := fmt.Sprintf("%s@%s", b.Gallery.Name, b.Name)
@@ -226,7 +231,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 
 			// Extract display name (remove repo prefix if exists)
 			displayName := galleryID
-			if strings.Contains(galleryID, "@") {
+			if isAddon {
+				displayName = addonID
+			} else if strings.Contains(galleryID, "@") {
 				parts := strings.Split(galleryID, "@")
 				if len(parts) > 1 {
 					displayName = parts[1]
@@ -247,6 +254,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 				"taskType":    taskType,
 				"isDeletion":  isDeletion,
 				"isBackend":   isBackend,
+				"isAddon":     isAddon,
 				"isQueued":    isQueued,
 				"cancellable": isCancellable,
 				"message":     message,
@@ -268,6 +276,19 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			}
 			if status != nil && status.Error != nil {
 				opData["error"] = status.Error.Error()
+				if isAddon && galleryop.IsAddonAttention(status.Error) {
+					// The install waits for a new review of its host access.
+					opData["needsApproval"] = true
+				}
+				// A backend upgrade that put the previous build back, with
+				// its code: the Updates page says "Rolled back", as the row
+				// of the run that ran it does.
+				if status.RolledBack {
+					opData["rolledBack"] = true
+				}
+				if status.ErrorKey != "" {
+					opData["errorKey"] = status.ErrorKey
+				}
 			}
 			// Expose the per-node breakdown when the Phase 4 progress sink
 			// has populated OpStatus.Nodes (distributed backend installs).
@@ -826,14 +847,19 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			NodeStatus string `json:"node_status"`
 		}
 		type modelCapability struct {
-			UpscaleScale     int                            `json:"upscaleScale,omitempty"`
-			ThreeDOperations []schema.ThreeDOperation       `json:"three_d_operations,omitempty"`
-			ID               string                         `json:"id"`
-			Capabilities     []string                       `json:"capabilities"`
-			Backend          string                         `json:"backend"`
-			Disabled         bool                           `json:"disabled"`
-			Pinned           bool                           `json:"pinned"`
-			VoiceCloning     *config.VoiceCloningCapability `json:"voice_cloning,omitempty"`
+			UpscaleScale     int                      `json:"upscaleScale,omitempty"`
+			ThreeDOperations []schema.ThreeDOperation `json:"three_d_operations,omitempty"`
+			ID               string                   `json:"id"`
+			Capabilities     []string                 `json:"capabilities"`
+			Backend          string                   `json:"backend"`
+			// ContextSize is the window one request can use, in tokens. The
+			// chat page reads it to offer a model whose window is large
+			// enough for the chat agent. Absent when the model has no
+			// config here (a remote or loose model).
+			ContextSize  int                            `json:"context_size,omitempty"`
+			Disabled     bool                           `json:"disabled"`
+			Pinned       bool                           `json:"pinned"`
+			VoiceCloning *config.VoiceCloningCapability `json:"voice_cloning,omitempty"`
 			// LoadedOn is populated only when the node registry is active
 			// (distributed mode). Lets the UI show "loaded on worker-1" without
 			// the operator having to expand every node manually. An empty slice
@@ -856,6 +882,36 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			// as broken rather than hiding it.
 			AliasOf    string `json:"alias_of,omitempty"`
 			AliasError string `json:"alias_error,omitempty"`
+			// Remote is true when a remote backend serves the model: a
+			// proxy to another LocalAI or to a cloud endpoint. RemoteID
+			// is the id of the remote that owns the entry, when
+			// there is one, and only for an admin. UpstreamState is "unavailable" when the remote
+			// no longer lists the model, "ok" for any other remote entry,
+			// and absent for a local model.
+			Remote        bool   `json:"remote"`
+			RemoteID      string `json:"remote_id,omitempty"`
+			UpstreamState string `json:"upstream_state,omitempty"`
+		}
+
+		// One lookup per request, and none when no model is remote. Without the service (its store could not
+		// be opened) there is no remote state to report.
+		unavailable := map[string]bool{}
+		anyRemote := slices.ContainsFunc(modelConfigs, func(m config.ModelConfig) bool { return config.IsRemoteBackend(m.Backend) })
+		// Any signed-in user reads this route; the id of a remote is for
+		// admins, who manage remotes. With authentication off every caller
+		// is an admin.
+		user := auth.GetUser(c)
+		showRemoteID := user == nil || user.Role == auth.RoleAdmin
+		if svc := applicationInstance.Remotes(); anyRemote && svc != nil {
+			if conns, err := svc.List(c.Request().Context()); err == nil {
+				for _, conn := range conns {
+					for _, name := range conn.Unavailable {
+						unavailable[name] = true
+					}
+				}
+			} else {
+				xlog.Warn("Remotes could not be listed for the capabilities payload", "error", err)
+			}
 		}
 
 		// Join with the node registry when we have one (distributed mode). A
@@ -906,6 +962,20 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			entry.UpscaleScale = config.UpscaleScaleFromOptions(*effective)
 			entry.ThreeDOperations = effective.ThreeDOperations()
 			entry.Backend = effective.Backend
+			if entry.Remote = config.IsRemoteBackend(effective.Backend); entry.Remote {
+				if showRemoteID {
+					entry.RemoteID = effective.Proxy.Remote
+				}
+				entry.UpstreamState = "ok"
+				if unavailable[effective.Name] {
+					entry.UpstreamState = "unavailable"
+				}
+			}
+			sized := *effective
+			if sized.ContextSize == nil && appConfig.ContextSize > 0 {
+				sized.ContextSize = &appConfig.ContextSize
+			}
+			entry.ContextSize = corebackend.EffectiveRequestContextSize(sized)
 			entry.VoiceCloning = config.VoiceCloningForModel(effective)
 			entry.LoadedOn = loadedByModel[effective.Name]
 			entry.MCP = !appConfig.DisableMCP && effective.MCP.HasMCPServers()
@@ -983,7 +1053,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 	// context sizes. The frontend calls this per-model so the gallery page
 	// can load instantly and fill in estimates asynchronously.
 	// Query params:
-	//   contexts - comma-separated context sizes (default: 8192)
+	//   contexts - comma-separated context sizes (default: config.DefaultEstimateContextSize)
 	app.GET("/api/models/estimate/:id", func(c echo.Context) error {
 		modelID, err := url.QueryUnescape(c.Param("id"))
 		if err != nil {
@@ -1018,6 +1088,25 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 
 		return c.JSON(200, result)
 	}, adminMiddleware)
+
+	// The curated first-run recommendation. Every signed-in user may read it,
+	// so a person who cannot install still sees what to ask an administrator
+	// for; installing stays behind adminMiddleware below.
+	recommended := localai.NewRecommendedModelsService(appConfig, func(ctx context.Context) localai.RecommendedHardware {
+		// In distributed mode the models run on the best single node, the same
+		// reading every other model-sizing surface uses.
+		if reading := resolveClusterMemory(ctx, clusterMemory); reading != nil && reading.TotalMemory > 0 {
+			hw := localai.RecommendedHardware{Scope: "cluster", NodeName: reading.NodeName}
+			if reading.IsGPU {
+				hw.Memory.PerDeviceVRAM = reading.TotalMemory
+			} else {
+				hw.Memory.SystemRAM = reading.TotalMemory
+			}
+			return hw
+		}
+		return localai.LocalRecommendedHardware(ctx)
+	})
+	app.GET("/api/models/recommended", localai.RecommendedModelsEndpoint(recommended))
 
 	// Returns the selectable builds of a single gallery model and which one
 	// auto-selection would install on this host. Companion to estimate/:id and
@@ -1079,7 +1168,15 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		// Absent means auto-select, which is what the listing's auto_variant
 		// already told the client would happen.
 		variant := c.QueryParam("variant")
-		xlog.Debug("API job submitted to install", "galleryID", galleryID, "variant", variant)
+		// Optional: the context window to install with, as the recommendation
+		// reports it. It is written into the installed config as an explicit
+		// context_size, so a model whose gallery entry sets a window the host
+		// cannot hold still loads. Absent means the entry's own config.
+		contextSize, err := parseInstallContextSize(c.QueryParam("context_size"))
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+		}
+		xlog.Debug("API job submitted to install", "galleryID", galleryID, "variant", variant, "context_size", contextSize)
 
 		if refused, err := localai.RefuseModelWithoutBackend(c, appConfig, appConfig.Galleries, galleryID, variant, galleryService.BackendManager().BackendAvailable); refused {
 			return err
@@ -1105,6 +1202,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			Context:            ctx,
 			CancelFunc:         cancelFunc,
 			PauseFunc:          pauseFunc,
+		}
+		if contextSize > 0 {
+			op.Req.Overrides = map[string]any{"context_size": contextSize}
 		}
 		// Store cancellation function immediately so queued operations can be cancelled
 		galleryService.StoreCancellationActions(uid, cancelFunc, pauseFunc)
@@ -1165,57 +1265,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		})
 	}, adminMiddleware)
 
-	app.POST("/api/models/config/:id", func(c echo.Context) error {
-		galleryID := c.Param("id")
-		// URL decode the gallery ID
-		galleryID, err := url.QueryUnescape(galleryID)
-		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"error": "invalid model ID",
-			})
-		}
-		xlog.Debug("API job submitted to get config", "galleryID", galleryID)
-
-		models, err := gallery.AvailableGalleryModelsCached(appConfig.Galleries, appConfig.SystemState)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]any{
-				"error": err.Error(),
-			})
-		}
-
-		model := gallery.FindGalleryElement(models, galleryID)
-		if model == nil {
-			return c.JSON(http.StatusNotFound, map[string]any{
-				"error": "model not found",
-			})
-		}
-
-		config, err := gallery.GetGalleryConfigFromURL[gallery.ModelConfig](model.URL, appConfig.SystemState.Model.ModelsPath)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]any{
-				"error": err.Error(),
-			})
-		}
-
-		_, err = gallery.InstallModel(context.Background(), appConfig.SystemState, model.Name, &config, model.Overrides, nil, false,
-			gallery.WithArtifactMaterializer(appConfig.ModelArtifactMaterializer),
-			gallery.WithBackendAvailability(galleryService.BackendManager().BackendAvailable))
-		if err != nil {
-			if errors.Is(err, gallery.ErrBackendInstallDisabled) {
-				return c.JSON(http.StatusConflict, map[string]any{
-					"error": err.Error(),
-					"code":  "backend_not_installed",
-				})
-			}
-			return c.JSON(http.StatusInternalServerError, map[string]any{
-				"error": err.Error(),
-			})
-		}
-
-		return c.JSON(200, map[string]any{
-			"message": "Configuration file saved",
-		})
-	}, adminMiddleware)
+	// Removed: it rewrote a config synchronously, outside the queue. It
+	// answers 410 Gone for one release, pointing at the upgrade route.
+	app.POST("/api/models/config/:id", localai.RemovedModelConfigEndpoint(), adminMiddleware)
 
 	// Get installed model config as JSON (used by frontend for MCP detection, etc.)
 	app.GET("/api/models/config-json/:name", func(c echo.Context) error {
@@ -1243,7 +1295,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 	app.GET("/api/models/config-metadata/autocomplete/:provider", localai.AutocompleteEndpoint(cl, ml, appConfig), adminMiddleware)
 
 	// PATCH config endpoint - partial update using nested JSON merge
-	app.PATCH("/api/models/config-json/:name", localai.PatchConfigEndpoint(cl, galleryService, appConfig, modelRevisionLifecycleFor(applicationInstance)), adminMiddleware)
+	app.PATCH("/api/models/config-json/:name", localai.PatchConfigEndpoint(cl, galleryService, appConfig, applicationInstance.ModelRevisionLifecycle()), adminMiddleware)
 
 	// VRAM estimation endpoint
 	app.POST("/api/models/vram-estimate", localai.VRAMEstimateEndpoint(cl, appConfig), adminMiddleware)
@@ -1277,7 +1329,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			})
 		}
 
-		configData, err := os.ReadFile(modelConfigFile)
+		configData, err := os.ReadFile(modelConfigFile) // #nosec G304 -- modelConfigFile is resolved under the models directory by the loader
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]any{
 				"error": "failed to read configuration file: " + err.Error(),
@@ -1772,13 +1824,38 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		return c.JSON(200, applicationInstance.UpgradeChecker().GetAvailableUpgrades())
 	}, adminMiddleware)
 
-	app.POST("/api/backends/upgrade/:name", func(c echo.Context) error {
+	// The read model and the check that waits. A nil checker is safe: the
+	// handlers answer with disabled sources.
+	var updates localai.BackendUpdatesProvider
+	if applicationInstance != nil {
+		updates = applicationInstance.UpgradeChecker()
+	}
+	app.GET("/api/backends/updates", localai.BackendUpdatesEndpoint(updates), adminMiddleware)
+	app.POST("/api/backends/updates/check", localai.CheckBackendUpdatesEndpoint(updates), adminMiddleware)
+
+	// Refuses an upgrade that cannot run before it is queued. A nil checker
+	// (no application) leaves only the installed check.
+	var upgradeChecker localai.UpgradeInfoProvider
+	if applicationInstance != nil {
+		upgradeChecker = applicationInstance.UpgradeChecker()
+	}
+	upgradeGuard := localai.NewBackendUpgradeGuard(galleryService, upgradeChecker)
+
+	app.POST("/api/backends/upgrade/:name", localai.BackendUpgradeViaRun(UpgradeRunDepsFor(applicationInstance), upgradeGuard, func(c echo.Context) error {
 		backendName := c.Param("name")
 		backendName, err := url.QueryUnescape(backendName)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]any{
 				"error": "invalid backend name",
 			})
+		}
+
+		expectedTo, err := localai.ExpectedToOf(c)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+		}
+		if refusal := upgradeGuard.Check(c.Request().Context(), backendName, "", expectedTo); refusal != nil {
+			return refusal.Write(c)
 		}
 
 		id, err := uuid.NewUUID()
@@ -1812,110 +1889,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			"statusUrl": fmt.Sprintf("/api/backends/job/%s", uid),
 			"message":   "Backend upgrade started",
 		})
-	}, adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
-
-	// P2P APIs
-	app.GET("/api/p2p/workers", func(c echo.Context) error {
-		llamaNodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.LlamaCPPWorkerID))
-		mlxNodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.MLXWorkerID))
-
-		llamaJSON := make([]map[string]any, 0, len(llamaNodes))
-		for _, n := range llamaNodes {
-			llamaJSON = append(llamaJSON, map[string]any{
-				"name":          n.Name,
-				"id":            n.ID,
-				"tunnelAddress": n.TunnelAddress,
-				"serviceID":     n.ServiceID,
-				"lastSeen":      n.LastSeen,
-				"isOnline":      n.IsOnline(),
-			})
-		}
-
-		mlxJSON := make([]map[string]any, 0, len(mlxNodes))
-		for _, n := range mlxNodes {
-			mlxJSON = append(mlxJSON, map[string]any{
-				"name":          n.Name,
-				"id":            n.ID,
-				"tunnelAddress": n.TunnelAddress,
-				"serviceID":     n.ServiceID,
-				"lastSeen":      n.LastSeen,
-				"isOnline":      n.IsOnline(),
-			})
-		}
-
-		return c.JSON(200, map[string]any{
-			"llama_cpp": map[string]any{
-				"nodes": llamaJSON,
-			},
-			"mlx": map[string]any{
-				"nodes": mlxJSON,
-			},
-			// Keep backward-compatible "nodes" key with llama.cpp workers
-			"nodes": llamaJSON,
-		})
-	}, adminMiddleware)
-
-	app.GET("/api/p2p/federation", func(c echo.Context) error {
-		nodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.FederatedID))
-
-		nodesJSON := make([]map[string]any, 0, len(nodes))
-		for _, n := range nodes {
-			nodesJSON = append(nodesJSON, map[string]any{
-				"name":          n.Name,
-				"id":            n.ID,
-				"tunnelAddress": n.TunnelAddress,
-				"serviceID":     n.ServiceID,
-				"lastSeen":      n.LastSeen,
-				"isOnline":      n.IsOnline(),
-			})
-		}
-
-		return c.JSON(200, map[string]any{
-			"nodes": nodesJSON,
-		})
-	}, adminMiddleware)
-
-	app.GET("/api/p2p/stats", func(c echo.Context) error {
-		llamaCPPNodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.LlamaCPPWorkerID))
-		federatedNodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.FederatedID))
-		mlxWorkerNodes := p2p.GetAvailableNodes(p2p.NetworkID(appConfig.P2PNetworkID, p2p.MLXWorkerID))
-
-		llamaCPPOnline := 0
-		for _, n := range llamaCPPNodes {
-			if n.IsOnline() {
-				llamaCPPOnline++
-			}
-		}
-
-		federatedOnline := 0
-		for _, n := range federatedNodes {
-			if n.IsOnline() {
-				federatedOnline++
-			}
-		}
-
-		mlxWorkersOnline := 0
-		for _, n := range mlxWorkerNodes {
-			if n.IsOnline() {
-				mlxWorkersOnline++
-			}
-		}
-
-		return c.JSON(200, map[string]any{
-			"llama_cpp_workers": map[string]any{
-				"online": llamaCPPOnline,
-				"total":  len(llamaCPPNodes),
-			},
-			"federated": map[string]any{
-				"online": federatedOnline,
-				"total":  len(federatedNodes),
-			},
-			"mlx_workers": map[string]any{
-				"online": mlxWorkersOnline,
-				"total":  len(mlxWorkerNodes),
-			},
-		})
-	}, adminMiddleware)
+	}, localai.UIBackendUpgradeAnswer), adminMiddleware, middleware.RequireBackendInstallEnabled(appConfig))
 
 	// Resources API endpoint - unified memory info (GPU if available, otherwise RAM)
 	app.GET("/api/resources", func(c echo.Context) error {
@@ -1983,3 +1957,22 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 	app.DELETE("/api/branding/asset/:kind", localai.DeleteBrandingAssetEndpoint(appConfig), adminMiddleware)
 
 }
+
+// parseInstallContextSize reads the optional context_size of an install
+// request. Empty means none (0). A value outside what a model can use is
+// refused rather than written into a config that then fails to load.
+func parseInstallContextSize(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < minInstallContextSize || n > maxInstallContextSize {
+		return 0, fmt.Errorf("context_size must be a number of tokens from %d to %d", minInstallContextSize, maxInstallContextSize)
+	}
+	return n, nil
+}
+
+const (
+	minInstallContextSize = 512
+	maxInstallContextSize = 4 << 20
+)

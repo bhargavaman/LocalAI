@@ -42,16 +42,17 @@
     "audioTransform": "Trasforma audio",
     "faceRecognition": "Riconoscimento volti",
     "voiceRecognition": "Riconoscimento vocale",
+    "projects": "Progetti",
     "agents": "Agenti",
     "skills": "Competenze",
-    "memory": "Memoria",
+    "memory": "Conoscenza",
     "mcpJobs": "Job MCP CI",
     "usage": "Utilizzo",
     "users": "Utenti",
     "backends": "Backend",
     "traces": "Tracce",
-    "nodes": "Nodi",
-    "scheduling": "Pianificazione",
+    "nodes": "Worker",
+    "scheduling": "Posizionamento",
     "swarm": "Swarm",
     "system": "Sistema",
     "settings": "Impostazioni",
@@ -61,7 +62,7 @@
     "overview": "Panoramica",
     "thisMachine": "Questa macchina",
     "failover": "Failover",
-    "p2p": "P2P",
+    "p2p": "Condivisione",
     "addons": "Componenti aggiuntivi",
     "voiceLibrary": "Voice Library",
     "logs": "Logs",
@@ -71,10 +72,12 @@
     "chats": "Chats",
     "files": "File",
     "triggers": "Trigger",
-    "mcpConnectors": "Connettori MCP",
+    "connections": "Connessioni",
     "chatsAdmin": "Chat di tutti gli utenti",
     "pages": "Pagine",
-    "allChats": "Tutte le chat"
+    "allChats": "Tutte le chat",
+    "inbox": "Notifiche",
+    "apiKeys": "Chiavi API"
   },
   "footer": {
     "github": "GitHub",
@@ -110,7 +113,8 @@
       "addons": "Installa componenti aggiuntivi e apri le app che offrono.",
       "triggers": "Avvia una chat da sola, a orari prefissati o quando arriva un file."
     },
-    "operateSupporting": "Cosa gira su questo server, come viene usato e come è configurato."
+    "operateSupporting": "Cosa gira su questo server, come viene usato e come è configurato.",
+    "updates": "Aggiornamenti"
   },
   "pinnedPages": "Pagine fissate",
   "new": "Nuovo",
@@ -119,5 +123,57 @@
   "untitledChat": "Chat senza titolo",
   "chatRunning": "In corso",
   "automatedWaiting": "Chat automatiche che ti aspettano: {{count}}",
-  "automatedRunning": "Chat automatiche in corso: {{count}}"
+  "automatedRunning": "Chat automatiche in corso: {{count}}",
+  "inboxUnread_one": "Notifiche, {{count}} da leggere",
+  "inboxUnread_other": "Notifiche, {{count}} da leggere",
+  "inboxArrived": "Nuova notifica: {{title}}",
+  "inboxArrivedMany_one": "{{count}} nuova notifica",
+  "inboxArrivedMany_other": "{{count}} nuove notifiche",
+  "updatesBadge_one": "{{count}} aggiornamento ha bisogno di te",
+  "updatesBadge_other": "{{count}} aggiornamenti hanno bisogno di te",
+  "inboxOps_one": "{{count}} operazione in corso",
+  "inboxOps_other": "{{count}} operazioni in corso",
+  "inboxOpsFailed_one": "{{count}} operazione non riuscita",
+  "inboxOpsFailed_other": "{{count}} operazioni non riuscite",
+  "inboxOpsFailedAnnounce": "Un'operazione non è riuscita. Guarda la scheda Attività nelle notifiche.",
+  "activityEntry": "Attività",
+  "navLinkExternal": "Apre {{site}} in una nuova scheda dopo la conferma",
+  "navLinkAsk": "Aprire questo collegamento?",
+  "startPage": "Pagina iniziale",
+  "admin": {
+    "nav": {
+      "overview": "Panoramica",
+      "apiReference": "Riferimento API",
+      "back": "Torna a {{name}}",
+      "search": "Cerca",
+      "label": "Amministrazione",
+      "crumbs": "Percorso"
+    },
+    "groups": {
+      "machine": "Questa macchina",
+      "cluster": "Cluster",
+      "runtime": "Modelli e runtime",
+      "access": "Accesso"
+    },
+    "palette": {
+      "label": "Cerca nell'amministrazione",
+      "input": "Cerca pagine, persone, worker e impostazioni",
+      "placeholder": "Pagine, persone, worker, impostazioni",
+      "results": "Risultati",
+      "none": "Nessun risultato per \"{{query}}\".",
+      "move": "sposta",
+      "open": "apri",
+      "kinds": {
+        "page": "Pagine",
+        "setting": "Impostazioni",
+        "worker": "Worker",
+        "person": "Persone"
+      }
+    },
+    "filters": {
+      "label": "Filtri",
+      "active": "{{count}} impostati",
+      "sort": "Ordina"
+    }
+  }
 }

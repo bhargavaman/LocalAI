@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { contextReading, settingsBody, settingsChanged, settingsErrors, settingsForm, tokenCount } from '../../src/utils/chatSettings.js'
-import { changeValue, changeView, proposalEdit, proposalIds, proposalView, receiptWhen, triggerCards } from '../../src/utils/chatProposal.js'
+import { changeValue, changeView, deliveryModeKey, proposalEdit, proposalIds, proposalView, receiptWhen, triggerCards } from '../../src/utils/chatProposal.js'
 import { BROWSER_CHATS_KEY, browserChatStores, importBrowserChats } from '../../src/utils/browserChats.js'
 import { toolRefusal } from '../../src/utils/addonChange.js'
 
@@ -80,6 +80,8 @@ test('trigger proposals: the card says proposed, created (same id) or gone, and 
   })
   const f = { id: 'p2', name: 'Inbox', prompt: 'Read', kind: 'file', folder: '/In', quiet_seconds: 30 }
   assert.deepEqual(proposalEdit(f, { name: 'Inbox', when: '/Contracts' }), { name: 'Inbox', prompt: 'Read', kind: 'file', enabled: false, daily_cap: 0, folder: '/Contracts', quiet_seconds: 30 })
+  assert.equal(proposalEdit({ ...p, run_limit: '30m' }, { name: 'News', when: 'daily 08:00' }).run_limit, '30m', 'an edit keeps the time limit')
+  assert.equal('run_limit' in proposalEdit(p, { name: 'News', when: 'daily 08:00' }), false)
   assert.deepEqual(proposalIds([
     { role: 'tool', card: { kind: 'trigger_proposal', id: 'p1' } },
     { role: 'tool', card: { kind: 'mcp_app', id: 'x' } },
@@ -101,7 +103,20 @@ test('trigger changes: the card reads the state the server keeps and the cards k
   assert.equal(changeValue('enabled', { enabled: false }), 'off')
   assert.equal(changeValue('writes', { plan: { writes: 'data/a.json' } }), 'data/a.json')
   assert.equal(changeValue('estimated_tokens', { cost: {} }), '')
+  assert.equal(changeValue('run_limit', { run_limit: '30m' }), '30m')
+  assert.equal(changeValue('run_limit', { run_limit: '' }), '')
   assert.equal(changeValue('name', { name: 'X' }), 'X')
+  assert.equal(changeValue('acts', { acts: ['act.files', 'act.spend'] }), 'act.files, act.spend')
+  assert.equal(changeValue('acts', {}), '')
+  assert.equal(changeValue('delivery', { delivery: { target: 'channel', channel_label: 'General' } }), 'channel General')
+  assert.equal(changeValue('delivery', { delivery: { target: 'channel', channel_label: 'General', connection_name: 'Team chat' } }), 'channel Team chat General')
+  assert.equal(changeValue('delivery', { delivery: { target: 'inbox' } }), 'inbox')
+  // The mode of a delivery is said in words only when it is not the default.
+  assert.equal(deliveryModeKey({ target: 'inbox', mode: 'always' }), '')
+  assert.equal(deliveryModeKey({ target: 'inbox' }), '')
+  assert.equal(deliveryModeKey(undefined), '')
+  assert.equal(deliveryModeKey({ target: 'channel', mode: 'on_change' }), 'proposal.plan.deliveryModeOnChange')
+  assert.equal(deliveryModeKey({ target: 'channel', mode: 'on_problem' }), 'proposal.plan.deliveryModeOnProblem')
   assert.deepEqual(triggerCards([
     { role: 'tool', card: { kind: 'trigger_change', id: 'c1' } },
     { role: 'tool', card: { kind: 'mcp_app', id: 'x' } },

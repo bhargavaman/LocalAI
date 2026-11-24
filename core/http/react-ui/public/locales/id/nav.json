@@ -42,9 +42,10 @@
     "audioTransform": "Transformasi Audio",
     "faceRecognition": "Pengenalan Wajah",
     "voiceRecognition": "Pengenalan Suara",
+    "projects": "Proyek",
     "agents": "Agen",
     "skills": "Skill",
-    "memory": "Memori",
+    "memory": "Pengetahuan",
     "mcpJobs": "MCP CI Jobs",
     "usage": "Penggunaan",
     "users": "Pengguna",
@@ -52,8 +53,8 @@
     "backends": "Backend",
     "voiceLibrary": "Pustaka Suara",
     "traces": "Trace",
-    "nodes": "Node",
-    "scheduling": "Penjadwalan",
+    "nodes": "Worker",
+    "scheduling": "Penempatan",
     "swarm": "Swarm",
     "system": "Sistem",
     "settings": "Pengaturan",
@@ -62,7 +63,7 @@
     "overview": "Ikhtisar",
     "thisMachine": "Mesin ini",
     "failover": "Failover",
-    "p2p": "P2P",
+    "p2p": "Berbagi",
     "addons": "Add-on",
     "logs": "Logs",
     "trafficModels": "Models",
@@ -71,10 +72,12 @@
     "chats": "Chats",
     "files": "Berkas",
     "triggers": "Pemicu",
-    "mcpConnectors": "Konektor MCP",
+    "connections": "Koneksi",
     "chatsAdmin": "Obrolan semua pengguna",
     "pages": "Halaman",
-    "allChats": "Semua obrolan"
+    "allChats": "Semua obrolan",
+    "inbox": "Notifikasi",
+    "apiKeys": "Kunci API"
   },
   "footer": {
     "github": "GitHub",
@@ -110,7 +113,8 @@
       "addons": "Pasang add-on dan buka aplikasi yang disediakannya.",
       "triggers": "Mulai obrolan secara otomatis, sesuai jadwal atau saat ada berkas masuk."
     },
-    "operateSupporting": "Apa yang berjalan di server ini, bagaimana server ini dipakai, dan bagaimana pengaturannya."
+    "operateSupporting": "Apa yang berjalan di server ini, bagaimana server ini dipakai, dan bagaimana pengaturannya.",
+    "updates": "Pembaruan"
   },
   "pinnedPages": "Halaman yang disematkan",
   "new": "Baru",
@@ -119,5 +123,57 @@
   "untitledChat": "Obrolan tanpa judul",
   "chatRunning": "Berjalan",
   "automatedWaiting": "Obrolan otomatis yang menunggu Anda: {{count}}",
-  "automatedRunning": "Obrolan otomatis yang berjalan: {{count}}"
+  "automatedRunning": "Obrolan otomatis yang berjalan: {{count}}",
+  "inboxUnread_one": "Notifikasi, {{count}} belum dibaca",
+  "inboxUnread_other": "Notifikasi, {{count}} belum dibaca",
+  "inboxArrived": "Notifikasi baru: {{title}}",
+  "inboxArrivedMany_one": "{{count}} notifikasi baru",
+  "inboxArrivedMany_other": "{{count}} notifikasi baru",
+  "updatesBadge_one": "{{count}} pembaruan butuh Anda",
+  "updatesBadge_other": "{{count}} pembaruan butuh Anda",
+  "inboxOps_one": "{{count}} operasi sedang berjalan",
+  "inboxOps_other": "{{count}} operasi sedang berjalan",
+  "inboxOpsFailed_one": "{{count}} operasi gagal",
+  "inboxOpsFailed_other": "{{count}} operasi gagal",
+  "inboxOpsFailedAnnounce": "Sebuah operasi gagal. Lihat tab Aktivitas di Notifikasi.",
+  "activityEntry": "Aktivitas",
+  "navLinkExternal": "Membuka {{site}} di tab baru setelah Anda konfirmasi",
+  "navLinkAsk": "Buka tautan ini?",
+  "startPage": "Halaman awal",
+  "admin": {
+    "nav": {
+      "overview": "Ringkasan",
+      "apiReference": "Referensi API",
+      "back": "Kembali ke {{name}}",
+      "search": "Cari",
+      "label": "Administrasi",
+      "crumbs": "Jalur navigasi"
+    },
+    "groups": {
+      "machine": "Mesin ini",
+      "cluster": "Klaster",
+      "runtime": "Model dan runtime",
+      "access": "Akses"
+    },
+    "palette": {
+      "label": "Cari di Administrasi",
+      "input": "Cari halaman, orang, worker, dan pengaturan",
+      "placeholder": "Cari halaman, orang, worker, pengaturan",
+      "results": "Hasil",
+      "none": "Tidak ada yang cocok dengan \"{{query}}\".",
+      "move": "pindah",
+      "open": "buka",
+      "kinds": {
+        "page": "Halaman",
+        "setting": "Pengaturan",
+        "worker": "Worker",
+        "person": "Orang"
+      }
+    },
+    "filters": {
+      "label": "Filter",
+      "active": "{{count}} diatur",
+      "sort": "Urutkan"
+    }
+  }
 }

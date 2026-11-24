@@ -71,7 +71,7 @@ func (s *Service) chatSkills(ctx context.Context, p string, rec session.ChatReco
 		return nil, nil
 	}
 	sc := s.scopeOf(ctx, rec)
-	skip := skillOff(rec.SkillsOff)
+	skip := skillOff(s.skillsOffOf(ctx, rec, sc))
 	command, err := s.addonCommandDescriptor(ctx, p, rec, sc)
 	if err != nil {
 		return nil, err
@@ -80,8 +80,10 @@ func (s *Service) chatSkills(ctx context.Context, p string, rec session.ChatReco
 	if err != nil {
 		return nil, err
 	}
-	list, _, err := skills.Resolve(ctx, s.d.Files.Store(), s.d.Files.Actor(p), s.d.Files.SkillRoots(p, ad.roots()...), ad.options(skills.Options{
-		Off:    func(sk skills.Skill) bool { return skip(sk) || (sc != nil && !sc.skills[sk.Name]) },
+	list, _, err := s.d.Files.ResolveSkills(ctx, p, s.d.Files.SkillRoots(p, slices.Concat(ad.roots(), s.projectSkillRoots(ctx, p, rec))...), ad.options(skills.Options{
+		Off: func(sk skills.Skill) bool {
+			return skip(sk) || (sc != nil && !sc.skills[sk.Name] && !sc.hostGrants(sk) && sk.Layer != skills.LayerProject)
+		},
 		Logger: s.log,
 	}))
 	if err != nil {
@@ -187,7 +189,7 @@ func (s *Service) SendCommand(ctx context.Context, user, conv, text string, up [
 		return s.SendWithFiles(ctx, user, conv, text, up)
 	}
 	p := principal(user)
-	rec, err := s.d.Store.GetChat(ctx, p, conv)
+	rec, err := s.getChatEffective(ctx, p, conv)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -219,7 +221,7 @@ func isThread(entries []session.Entry) bool {
 // any frontend while it changes what the model sees. It is ErrChatBusy while a
 // turn runs. Messages that arrived meanwhile start a turn after it.
 func (s *Service) contextCommand(ctx context.Context, p, conv string, fn func(rec session.ChatRecord, entries []session.Entry) error) error {
-	rec, err := s.d.Store.GetChat(ctx, p, conv)
+	rec, err := s.getChatEffective(ctx, p, conv)
 	if err != nil {
 		return err
 	}
@@ -240,7 +242,7 @@ func (s *Service) contextCommand(ctx context.Context, p, conv string, fn func(re
 		return err
 	}
 	// Read again under the claim: another frontend may have changed the chat.
-	rec, err = s.d.Store.GetChat(ctx, p, conv)
+	rec, err = s.getChatEffective(ctx, p, conv)
 	var entries []session.Entry
 	if err == nil {
 		entries, err = s.d.Store.Entries(ctx, conv, 0, 0)

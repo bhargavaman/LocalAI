@@ -9,6 +9,11 @@ import { mockChat } from './chat-fixtures.js'
 const CATALOG = '/app/ui-catalog'
 const SHOTS = process.env.UI_SHOTS_DIR
 
+// A height read from boundingBox() can be off by 1/65536 px, as Chromium
+// gives a box at a sub-pixel position. Round to 1/100 px: the contract is
+// the size scale, not the float.
+const px = (n) => Math.round(n * 100) / 100
+
 async function openCatalog(page, { theme = 'light' } = {}) {
   await page.addInitScript((t) => localStorage.setItem('localai-theme', t), theme)
   await page.goto(CATALOG)
@@ -37,7 +42,7 @@ test.describe('UI primitives', () => {
 
   test('buttons: one size scale for the component and the legacy classes', async ({ page }) => {
     await openCatalog(page)
-    const box = async (id) => (await page.getByTestId(id).boundingBox()).height
+    const box = async (id) => px((await page.getByTestId(id).boundingBox()).height)
     expect(await box('btn-primary')).toBe(36)
     expect(await box('btn-primary-sm')).toBe(28)
     expect(await box('legacy-primary')).toBe(36)
@@ -98,19 +103,42 @@ test.describe('UI primitives', () => {
     await expect(first).toHaveAttribute('aria-checked', 'false')
     await expect(page.getByRole('switch', { name: 'Opposite switch' })).toHaveAttribute('aria-checked', 'true')
     await expect(page.getByRole('switch', { name: 'Disabled off' })).toBeDisabled()
-    expect((await first.boundingBox()).height).toBe(26)
+    expect(px((await first.boundingBox()).height)).toBe(26)
+  })
+
+  test('slider: the range and the box agree, keys move a step, reset clears, the bad value is flagged', async ({ page }) => {
+    await openCatalog(page)
+    const set = page.getByTestId('cat-slider')
+    const box = set.getByTestId('cat-slider-input')
+    const range = set.getByTestId('cat-slider-range')
+    await expect(box).toHaveValue('0.7')
+    await expect(range).toHaveValue('0.7')
+    await range.focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(box).toHaveValue('0.75')
+    await box.fill('1.5')
+    await expect(range).toHaveValue('1.5')
+    await set.getByTestId('cat-slider-reset').click()
+    await expect(box).toHaveValue('')
+    await expect(box).toHaveAttribute('placeholder', 'Model default')
+    await expect(set.getByTestId('cat-slider-reset')).toBeDisabled()
+    const bad = page.getByRole('textbox', { name: 'Out of range' })
+    await expect(bad).toHaveAttribute('aria-invalid', 'true')
+    // The box and the reset button share the control height.
+    expect(px((await box.boundingBox()).height)).toBe(36)
+    expect(px((await set.getByTestId('cat-slider-reset').boundingBox()).height)).toBe(36)
   })
 
   for (const theme of ['light', 'dark']) {
     test(`status chips: words, an icon and 4.5:1 text in ${theme}`, async ({ page }) => {
       await openCatalog(page, { theme })
       const chips = page.getByTestId('chips').locator('.ui-chip')
-      expect(await chips.count()).toBe(7)
+      expect(await chips.count()).toBe(12)
       const read = await chips.evaluateAll(els => els.map(el => {
         const cs = getComputedStyle(el)
         return { text: el.textContent, icon: !!el.querySelector('.ui-chip__icon'), fg: cs.color, bg: cs.backgroundColor, h: el.getBoundingClientRect().height }
       }))
-      expect(read.map(c => c.text)).toEqual(['Running', 'Ready', 'Starting', 'Stopped', 'Failed', 'Update available', 'No runs yet'])
+      expect(read.map(c => c.text)).toEqual(['Running', 'Ready', 'Starting', 'Stopped', 'Failed', 'Update available', 'No runs yet', 'Update available', 'Updating', 'Held for approval', 'Cannot update', 'Differs from the cluster'])
       for (const c of read) {
         expect(c.icon).toBe(true)
         expect(c.h).toBe(22)
@@ -266,6 +294,111 @@ test.describe('UI primitives', () => {
     expect(side.width).toBe(240)
     release()
     await expect(shell).toHaveCount(0, { timeout: 15_000 })
+  })
+
+  test('Tabs: one tab stop, arrows, Home and End move the selection, disabled is skipped', async ({ page }) => {
+    await openCatalog(page)
+    const list = page.getByTestId('cat-tabs')
+    const tab = (id) => page.getByTestId(`cat-tab-${id}`)
+    await list.scrollIntoViewIfNeeded()
+    await expect(list).toHaveAttribute('role', 'tablist')
+    await expect(list.getByRole('tab')).toHaveCount(4)
+    const state = async () => page.evaluate(() => [...document.querySelectorAll('[data-testid="cat-tabs"] [role=tab]')]
+      .map(b => `${b.dataset.tab}:${b.getAttribute('aria-selected')}:${b.tabIndex}`))
+    expect(await state()).toEqual(['overview:true:0', 'files:false:-1', 'locked:false:-1', 'access:false:-1'])
+    await expect(page.getByTestId('cat-tabpanel')).toHaveAttribute('aria-labelledby', 'cat-tabs-tab-overview')
+    await expect(tab('access')).toHaveAccessibleName('Access 2 waiting')
+
+    await tab('overview').focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(tab('files')).toBeFocused()
+    await expect(tab('files')).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByTestId('cat-tabpanel')).toHaveAttribute('id', 'cat-tabs-panel-files')
+    await page.keyboard.press('ArrowRight')
+    await expect(tab('access')).toBeFocused()
+    await page.keyboard.press('ArrowRight')
+    await expect(tab('overview')).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(tab('access')).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(tab('overview')).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(tab('overview')).toBeFocused()
+    expect(await state()).toEqual(['overview:true:0', 'files:false:-1', 'locked:false:-1', 'access:false:-1'])
+    await page.keyboard.press('Tab')
+    await expect(page.getByTestId('cat-tabpanel')).toBeFocused()
+
+    const pill = page.getByTestId('cat-tabs-pill')
+    await expect(pill).toHaveClass(/dk-segmented/)
+    await pill.getByRole('tab', { name: 'Record' }).click()
+    await expect(pill.getByRole('tab', { name: 'Record' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  for (const theme of ['light', 'dark']) {
+    test(`tags: 20 px and 4.5:1 text in ${theme}`, async ({ page }) => {
+      await openCatalog(page, { theme })
+      const tags = page.getByTestId('tags').locator('.ui-tag')
+      expect(await tags.count()).toBe(6)
+      const read = await tags.evaluateAll(els => els.map(el => {
+        const cs = getComputedStyle(el)
+        return { text: el.textContent, fg: cs.color, bg: cs.backgroundColor, h: el.getBoundingClientRect().height }
+      }))
+      for (const c of read) {
+        expect(c.h).toBe(20)
+        expect(contrastOf(c.fg, c.bg), `${c.text} ${c.fg} on ${c.bg}`).toBeGreaterThanOrEqual(4.5)
+      }
+    })
+  }
+
+  test('Segmented radio mode: one tab stop, arrows and Home/End move the choice, disabled is skipped', async ({ page }) => {
+    await openCatalog(page)
+    const group = page.getByTestId('cat-segmented-radio')
+    const item = (id) => page.getByTestId(`cat-segmented-radio-${id}`)
+    await group.scrollIntoViewIfNeeded()
+    await expect(group).toHaveAttribute('role', 'radiogroup')
+    await expect(group).toHaveAttribute('aria-label', 'Where it runs')
+    await expect(group.getByRole('radio')).toHaveCount(4)
+    await expect(item('auto')).not.toHaveAttribute('aria-pressed', /.*/)
+    const state = async () => page.evaluate(() => [...document.querySelectorAll('[data-testid="cat-segmented-radio"] [role=radio]')]
+      .map(b => `${b.dataset.filter}:${b.getAttribute('aria-checked')}:${b.tabIndex}`))
+    expect(await state()).toEqual(['auto:true:0', 'here:false:-1', 'away:false:-1', 'both:false:-1'])
+
+    // Tab enters the group on the checked item and leaves it in one stop.
+    await page.getByTestId('cat-segmented').getByRole('button').last().focus()
+    await page.keyboard.press('Tab')
+    await expect(item('auto')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(page.getByTestId('cat-segmented-after')).toBeFocused()
+    await page.keyboard.press('Shift+Tab')
+    await expect(item('auto')).toBeFocused()
+
+    // Selection follows focus; the disabled option is skipped; both ends wrap.
+    await page.keyboard.press('ArrowRight')
+    await expect(item('here')).toBeFocused()
+    await expect(item('here')).toHaveAttribute('aria-checked', 'true')
+    await page.keyboard.press('ArrowDown')
+    await expect(item('both')).toBeFocused()
+    expect(await state()).toEqual(['auto:false:-1', 'here:false:-1', 'away:false:-1', 'both:true:0'])
+    await page.keyboard.press('ArrowRight')
+    await expect(item('auto')).toBeFocused()
+    await page.keyboard.press('ArrowLeft')
+    await expect(item('both')).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(item('here')).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(item('both')).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(item('auto')).toBeFocused()
+    await expect(item('auto')).toHaveAttribute('aria-checked', 'true')
+    await expect(item('away')).toBeDisabled()
+
+    // Space selects the focused item; a click selects too.
+    await item('here').click()
+    await expect(item('here')).toHaveAttribute('aria-checked', 'true')
+    await page.keyboard.press('Home')
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Space')
+    await expect(item('here')).toHaveAttribute('aria-checked', 'true')
   })
 
   test('reduced motion: skeletons stand still, toasts and panes switch at once', async ({ page }) => {

@@ -14,6 +14,7 @@ export const SUPPORTED_LANGUAGES = [
   { code: 'ko', name: '한국어', flag: 'KO' },
   { code: 'pt-BR', name: 'Português (Brasil)', flag: 'BR' },
   { code: 'fr', name: 'Français', flag: 'FR' },
+  { code: 'bn', name: 'বাংলা', flag: 'BN' },
 ]
 
 export const NAMESPACES = [
@@ -25,10 +26,13 @@ export const NAMESPACES = [
   'chat',
   'chats',
   'agents',
+  'projects',
   'skills',
   'workspace',
   'pages',
   'models',
+  'remotes',
+  'p2p',
   'collections',
   'library',
   'media',
@@ -36,11 +40,14 @@ export const NAMESPACES = [
   'admin',
   'operate',
   'swarm',
+  'cluster',
+  'p2psettings',
   'traffic',
   'usage',
-  'explorer',
   'addons',
   'upgrade',
+  'updates',
+  'viewas',
 ]
 
 i18n

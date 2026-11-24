@@ -66,6 +66,13 @@
     "loadError": {
       "title": "Add-ons are not available right now.",
       "paused": "Add-on pages and tools are paused until it is back."
+    },
+    "busy": {
+      "upgrading": "The add-on server is busy (updating {{names}})",
+      "generic": "The add-on server is busy",
+      "unreachable": "The add-on server cannot be reached",
+      "reason": "Showing the last known state. This page asks again by itself.",
+      "retry": "Try again now"
     }
   },
   "browse": {
@@ -93,7 +100,14 @@
     "alias": "Alias",
     "kindLabel": "Kind",
     "installedOn": "{{name}} is installed and on.",
-    "installedChip": "Installed"
+    "installedChip": "Installed",
+    "category": {
+      "label": "Category",
+      "all": "All",
+      "chat": "Chat apps",
+      "tools": "Tools",
+      "models": "Models"
+    }
   },
   "catalog": {
     "allLibraries": "All libraries",
@@ -104,6 +118,9 @@
     "emptyBody": "This list is empty.",
     "emptyFiltered": "Nothing matches the search. Change the words or the library.",
     "emptyTitle": "Nothing to show",
+    "failedBody": "The libraries that loaded are listed below.",
+    "failedTitle_one": "A library could not be read.",
+    "failedTitle_other": "{{count}} libraries could not be read.",
     "libraries": "Libraries",
     "loading": "Loading results",
     "next": "Next page",
@@ -135,10 +152,13 @@
   "errors": {
     "auth": "You are signed out. Sign in again.",
     "denied": "The server refused this. You may not have permission, or the add-on changed. The list was refreshed.",
+    "operationNotFound": "The status of this update is no longer available. Check the add-on version.",
     "invalid": "The server could not accept this request.",
     "network": "The server could not be reached. Check your connection.",
     "unavailable": "Add-ons are not available right now. Try again in a moment.",
-    "unknownOutcome": "The result could not be confirmed. Check the status before you try again."
+    "unknownOutcome": "The result could not be confirmed. Check the status before you try again.",
+    "busy": "The add-on server is busy and did not answer in time. Try again in a moment.",
+    "needsNewerHost": "This add-on needs a newer LocalAI. Update LocalAI, then try again. Nothing was installed."
   },
   "installed": {
     "disabled": "Off",
@@ -166,6 +186,7 @@
       "urlCredentials": "The address must not contain a user name or password.",
       "urlQuery": "The address must not contain a query string or fragment.",
       "either": "Use the exact identity or the pattern, not both.",
+      "sourceRepository": "Enter an https address, such as https://github.com/owner/repo.",
       "urlEmpty": "Enter the address of the index.",
       "mirrors": "Each mirror must start with https://, http://, github:, oci:// or file://, and at most 8 are allowed."
     },
@@ -179,6 +200,7 @@
       "requireSignature": "Require a signature",
       "url": "Catalog URL",
       "identityRegex": "Signer identity pattern (optional)",
+      "sourceRepository": "Source repository (optional)",
       "kind": "Kind",
       "format": "Index format",
       "mirrors": "Mirrors"
@@ -192,7 +214,8 @@
       "id": "Lowercase letters, digits and hyphens. It cannot change later.",
       "reference": "The name of a credential an administrator configured on this server. Never paste a token or password here.",
       "url": "An https address without credentials or a query string.",
-      "identityRegex": "An anchored pattern, from ^ to $, used instead of the exact identity. Backend libraries use it so builds from master and from tags both verify.",
+      "identityRegex": "An anchored pattern, from ^ to $, used instead of the exact identity. Backend libraries use it so builds from master and from tags both verify. An add-on verifies against a pattern only when the source repository is also set.",
+      "sourceRepository": "The https address of the repository the signature must be made for, such as https://github.com/owner/repo. LocalAI compares it exactly with the signing certificate.",
       "format": "A library index uses the shared library entry shape. A gallery index is a model or backend gallery, as the gallery flags name it.",
       "mirrors": "Fallback addresses, one per line, tried in order when the main address cannot be fetched."
     },
@@ -208,10 +231,12 @@
       "backend": "Backends",
       "model": "Models"
     },
+    "lastGood": "Last loaded {{when}}",
     "lastRefresh": "Refreshed {{when}}, {{count}} entries",
     "lead": "A library is an index that lists add-ons, backends or models. Credentials are never typed here: a private add-on library names a credential an administrator configured on this server.",
     "listLabel": "Libraries",
     "loading": "Loading libraries",
+    "neverLoaded": "Never loaded",
     "notRefreshed": "Not refreshed yet",
     "officialOff": "Official libraries are off in Settings. The default libraries stay listed, shown as off, and are not read. Libraries you added are not affected.",
     "reference": "Credential reference: {{name}}",
@@ -351,7 +376,8 @@
     "starting": "Starting",
     "stopped": "Off",
     "update-pending": "Update pending",
-    "updateTo": "Update {{version}}"
+    "updateTo": "Update {{version}}",
+    "needsSetup": "Needs setup"
   },
   "supporting": "Software you install to give LocalAI new pages and chat tools. Each one runs on its own and asks only for what it lists.",
   "tabs": {
@@ -376,6 +402,7 @@
     "platform": "Platform",
     "selection": "Selected as",
     "signatureRequired": "Signature required",
+    "sourceRepository": "Source repository",
     "verification": "Verification",
     "version": "Version"
   },
@@ -472,7 +499,7 @@
     },
     "state": {
       "ready": "Ready",
-      "upgrading": "Upgrading",
+      "upgrading": "Updating",
       "restoring": "Restoring",
       "needs-recovery": "Needs recovery",
       "purging": "Purging"
@@ -561,7 +588,8 @@
       "protocol-version": "The protocol version does not fit",
       "sdk-version": "The interface SDK version does not fit",
       "data-format": "The data format does not fit",
-      "digest-changed": "The digest of this version changed"
+      "digest-changed": "The digest of this version changed",
+      "feature-level": "This add-on needs a newer LocalAI."
     },
     "class": {
       "source-unavailable": "The library cannot be reached.",
@@ -575,57 +603,84 @@
     "installed": "Installed",
     "candidate": "Available",
     "reasons": "Why it does not fit",
-    "upgrade": "Upgrade",
+    "upgrade": "Update",
     "confirm": {
-      "title": "Upgrade {{name}} to {{version}}?",
+      "title": "Update {{name}} to {{version}}?",
       "body": "The add-on stops while its data is backed up and migrated, then the new version starts. If the new version does not start, the current version keeps running.",
       "data": "Its data is backed up before anything changes.",
-      "action": "Upgrade",
+      "action": "Update",
       "library": "Library",
       "channel": "Channel",
       "from": "From",
       "to": "To"
     },
-    "progress": "Upgrading {{name}}. Its data is backed up first.",
-    "done": "Upgraded to version {{version}}.",
-    "browseUpdate": "Update {{version}} is available. Manage it in Installed.",
+    "progress": "Updating {{name}}. Its data is backed up first.",
+    "done": "Updated to version {{version}}.",
     "errors": {
       "stale_installed": "The installed version changed since it was checked. Check for updates again.",
       "candidate_changed": "The library no longer offers the version you checked. Check for updates again.",
-      "upgrade_conflict": "This upgrade is already recorded under another operation. It was not applied twice.",
+      "upgrade_conflict": "This update is already recorded under another operation. It was not applied twice.",
       "incompatible": "The new version is not compatible with this host. Nothing was changed.",
       "integrity_error": "The library lists the installed version with different contents. Nothing was changed.",
-      "upgrade_failed": "The upgrade did not complete and the installed version is kept. You can try again.",
+      "upgrade_failed": "The update did not complete and the installed version is kept. You can try again.",
       "operation_conflict": "The operation does not fit the current state. Nothing was applied.",
-      "check_failed": "The library could not be read, so the upgrade was not started. Nothing was changed.",
-      "unknownOutcome": "The result of the upgrade is not known. Read its status again; do not start another.",
+      "check_failed": "The library could not be read, so the update was not started. Nothing was changed.",
+      "unknownOutcome": "The result of the update is not known. Read its status again; do not start another.",
       "auth": "Sign in again to continue.",
       "denied": "Only an administrator can do this from their own browser session.",
+      "operationNotFound": "The status of this update is no longer available. Check the add-on version.",
       "network": "The network is not reachable.",
-      "unavailable": "The add-on service is not available. Try again."
+      "unavailable": "The add-on service is not available. Try again.",
+      "download": "The new version could not be downloaded",
+      "verify": "The new version did not pass its integrity check",
+      "swap": "The new version could not be put in place",
+      "start": "The new version did not start",
+      "not_installed": "It is not installed any more",
+      "no_update": "There is no newer version any more",
+      "stale": "A newer version came out after the review. Check for updates again",
+      "held": "The update waits for your approval",
+      "unknown": "The update failed",
+      "unconfirmed": "The result of the update could not be confirmed",
+      "run_active": "An update run is in progress. This page shows it",
+      "source_unchecked": "The update check is unavailable. Check again",
+      "run_not_finished": "The run has not finished yet",
+      "nothing_to_retry": "Nothing in this run can be retried",
+      "not_cancellable": "This update can no longer be cancelled",
+      "run_finished": "The run has already finished",
+      "invalid": "The request was not valid",
+      "not_found": "The server does not know this run any more",
+      "edited_keys": "You edited settings of this model. Use Upgrade on its row to choose what to keep",
+      "run_not_human_surface": "This update needs you to confirm it in the browser.",
+      "forbidden": "Your account cannot update add-ons.",
+      "run_unavailable": "Update runs are not available on this server.",
+      "in_run": "It is already in the update run in progress",
+      "installs_disabled": "Installing backends is turned off on this server",
+      "interrupted": "The update was interrupted by a restart. Check again"
     },
-    "upgradeNamed": "Upgrade {{name}}",
+    "upgradeNamed": "Update {{name}}",
     "why": {
-      "role": "An update is available. Only an administrator can upgrade it.",
+      "role": "An update is available. Only an administrator can update it.",
       "needs-check": "An update is reported, but its details are not confirmed yet. Check again to confirm it.",
       "check-failed": "The last check failed, so the update cannot be confirmed. Check again.",
       "incompatible": "An update exists but cannot run here:",
       "integrity": "The library lists this version with different contents. It is not offered as an update.",
-      "recovery": "The data of this add-on needs recovery first. Restore a backup in Details, then upgrade.",
+      "recovery": "The data of this add-on needs recovery first. Restore a backup in Details, then update.",
       "current": "The latest check found no update. The notice may be out of date. Check again.",
-      "unpinned": "The library reports an update but names no build to install, so it cannot be upgraded from here. Check again later."
+      "unpinned": "The library reports an update but names no build to install, so it cannot be updated from here. Check again later."
     },
     "checkAll": "Check for updates",
+    "notCheckedYet": "Updates have not been checked yet.",
     "checkingAll": "Checking...",
-    "checkAllDone": "Checked {{count}} add-ons.",
-    "checkAllFailed": "{{count}} could not be checked.",
     "checkResult": {
       "done": "Checked.",
       "failed": "The check did not complete.",
       "justNow": "Checked just now."
     },
-    "waitingService": "The add-on service is starting. LocalAI asks about the upgrade again in {{seconds}} s.",
-    "checkAgain": "Check now"
+    "waitingService": "The add-on service is starting. LocalAI asks about the update again in {{seconds}} s.",
+    "checkAgain": "Check now",
+    "open": "Open Updates",
+    "cancelledNote": "The update of {{name}} was canceled. Version {{version}} keeps running.",
+    "cancelling": "Canceling…"
   },
   "install": {
     "stepsLabel": "Install steps",
@@ -663,7 +718,12 @@
     "openNamed": "Open {{name}}",
     "removeTitle": "Remove {{name}}?",
     "removeBody": "{{name}} turns off and is removed from this server. Its data is kept, so installing it again picks it up. Nothing is deleted.",
-    "removeNamed": "Remove {{name}}…"
+    "removeNamed": "Remove {{name}}…",
+    "setUp": "Set up",
+    "setUpNamed": "Set up {{name}}",
+    "review": "Review",
+    "reviewNamed": "Review {{name}}",
+    "updateTo": "Update to {{version}}"
   },
   "preview": {
     "screenshots": "Screenshots",
@@ -677,6 +737,7 @@
     "updateTitle": "Update to {{version}}"
   },
   "flow": {
+    "background": "This runs in the background. You can close this window; closing does not stop it.",
     "installAndTurnOn": "Install and turn on",
     "installing": "Installing {{name}}...",
     "turningOn": "Turning on {{name}}...",
@@ -722,7 +783,11 @@
     "toolsOff_other": "Its {{count}} chat tools are off until it runs again.",
     "pageOff": "Its page is not available until it runs again.",
     "updateTitle": "{{name}} {{version}} is available.",
-    "updateBody": "You have {{current}}. You see what changes and confirm before anything is replaced."
+    "updateBody": "You have {{current}}. You see what changes and confirm before anything is replaced.",
+    "title_one": "{{count}} add-on needs setup",
+    "title_other": "{{count}} add-ons need setup",
+    "connectionBody_one": "has {{count}} connection that cannot answer yet. {{reason}}",
+    "connectionBody_other": "has {{count}} connections that cannot answer yet. {{reason}}"
   },
   "meta": {
     "builtin": "Built in",
@@ -756,9 +821,10 @@
   "hostAccess": {
     "addonsTitle": "Add-ons",
     "approve": {
-      "action": "Approve and upgrade",
+      "action": "Approve and update",
       "body": "Version {{current}} of {{name}} keeps running. If you approve, the new version can run these actions. New ones are marked.",
-      "done": "{{name}} was upgraded.",
+      "done": "{{name}} was updated.",
+      "running": "The update runs in the background. You can close this window; closing does not stop it. Choose Cancel to stop it.",
       "title": "Approve host access for {{name}} {{version}}"
     },
     "asksNothing": "This add-on asks for no host access.",
@@ -856,12 +922,14 @@
     "keepOwnNamed": "Keep the blanket grants of {{name}} as my own",
     "loadError": "Host access did not load",
     "loading": "Reading what this add-on asks for...",
+    "loadingSlow": "Still working. The package is being downloaded and its signature checked before the permissions can be shown. A large add-on can take a while.",
     "loadingPage": "Loading host access",
     "locked": "The deployment turned off changes to host access. You can read this page but not change it.",
     "lockedNoAuth": "Sign-in is off, so anyone who can reach this server could change these; they are set by the administrator in the policy file.",
     "newOptional": "The new version also asks for {{ops}}. These are optional and not allowed.",
     "noLongerRequested": "This version no longer asks for it. You can turn it off.",
-    "notOfficial": "This add-on comes from {{library}}, not the official library.",
+    "notOfficialWarning": "This add-on comes from {{library}}, not the official library. It runs as trusted code on this server and can use the credentials it is given. Install it only if you trust its author.",
+    "signedNotReviewed": "Signed by {{signer}}. Not reviewed by LocalAI. It runs as trusted code on this server and can use the credentials it is given. Install it only if you trust the signer.",
     "op": {
       "alreadyAllowed": "Already allowed",
       "blocked": "Blocked by the administrator policy",
@@ -893,10 +961,65 @@
     "tabWaiting": "Approvals waiting: {{count}}",
     "waiting": {
       "body": "The new version asks for host access that the current one does not have. Version {{current}} keeps running until you approve. Operations it adds: {{count}}.",
+      "cancellingTitle": "Canceling the update of {{name}}",
+      "failedTitle": "The update of {{name}} to {{version}} failed",
+      "queuedBody": "It is queued and runs in the background.",
       "review": "Review and approve",
+      "reviewAgain": "Review again",
       "reviewNamed": "Review and approve the host access of {{name}}",
-      "title": "{{name}} {{version}} waits for your approval"
+      "title": "{{name}} {{version}} waits for your approval",
+      "updatingTitle": "Updating {{name}} to {{version}}"
     }
+  },
+  "oauthClient": {
+    "title": "Account login",
+    "intro": "People connect this add-on to their own account at a service. Register the callback address below with the service, enter the client it gives you, and approve the login. Nobody can connect before that.",
+    "status": {
+      "unconfigured": "Not approved yet. Nobody can connect.",
+      "changed": "The login of this add-on changed since it was approved. Nobody can connect or renew a login until you approve it again.",
+      "approved": "Approved on {{when}}.",
+      "approvedBy": "Approved by {{who}} on {{when}}."
+    },
+    "sentTo": "People sign in at",
+    "hosts": "Allowed hosts",
+    "required": "Always requested",
+    "optional": "People may add",
+    "none": "None",
+    "tokens": "Tokens come from",
+    "revoke": "Disconnect revokes at",
+    "noRevoke": "No address: a disconnect only forgets the login here",
+    "clientAuth": "Client authentication",
+    "auth": {
+      "basic": "Client ID and secret, sent in the request header",
+      "post": "Client ID and secret, sent in the request body",
+      "none": "No secret (a public client)",
+      "other": "Other"
+    },
+    "params": "Extra sign-in parameters",
+    "callback": "Callback address",
+    "callbackHint": "Register this address with the service as the redirect address of the client.",
+    "copy": "Copy",
+    "copied": "Copied",
+    "baseUrlRequired": "This server does not know its public address, so there is no callback address and nobody can connect. Set the external base URL of the server, then reload this page.",
+    "clientId": "Client ID",
+    "clientSecret": "Client secret",
+    "secretHint": "Write-only: it is stored sealed and never shown again.",
+    "secretSaved": "A secret is saved. Leave the field empty to keep it.",
+    "secretKeepPlaceholder": "Saved (hidden)",
+    "noSecret": "This login uses no client secret.",
+    "approve": "Approve and save",
+    "saved": "Saved. The login is approved.",
+    "stale": "The login of this add-on changed while you reviewed it. Nothing was saved.",
+    "refresh": "Show the new login",
+    "loadFailed": "The login of this add-on could not be read",
+    "errors": {
+      "unavailable": "The add-on could not be reached. Try again later.",
+      "needsApproval": "The add-on is not approved.",
+      "baseUrlRequired": "This server does not know its public address. Set the external base URL of the server.",
+      "approvalStale": "The login of this add-on changed. Show the new login.",
+      "save": "The client could not be saved."
+    },
+    "unknownLibrary": "an unknown library"
   },
   "file": {
     "button": "Install from file",
@@ -929,6 +1052,81 @@
       "downgradeTitle": "Older version",
       "downgrade": "This installs version {{version}}, which is older than the installed version {{installed}}. An older version may not read data that a newer one wrote.",
       "downgradeConfirm": "I want to install the older version"
+    },
+    "progress": "Installing {{name}} from a file. It runs in the background.",
+    "failedTitle": "Installing {{name}} from a file failed",
+    "failedHint": "The file is kept for one hour. Choose Try again to use it once more."
+  },
+  "notice": {
+    "enableFailedTitle": "Could not turn on {{name}}",
+    "incompatibleTitle": "Cannot turn on {{name}}: not compatible with this server",
+    "noUpgrade": "No newer version is listed yet. Keep it off, or remove it."
+  },
+  "operation": {
+    "kind": {
+      "install": "Installing…",
+      "upgrade": "Updating…",
+      "uninstall": "Removing…",
+      "enable": "Starting…",
+      "disable": "Stopping…",
+      "working": "Working…"
+    },
+    "label": "In progress: {{operation}}",
+    "phase": {
+      "queued": "waiting",
+      "downloading": "downloading and checking",
+      "backing-up": "backing up data",
+      "installing": "installing",
+      "migrating": "migrating data",
+      "starting": "starting",
+      "working": "working"
     }
+  },
+  "groups": {
+    "chat": "Chat apps",
+    "tools": "Tools and services",
+    "models": "Media and models",
+    "builtin": "Built in"
+  },
+  "connection": {
+    "title": "Connections",
+    "none": "No connections yet.",
+    "answersAs": "Answers as {{name}}",
+    "noAgent": "No agent chosen",
+    "manage": "Manage connections",
+    "acceptsListed_one": "Accepts {{count}} person",
+    "acceptsListed_other": "Accepts {{count}} people",
+    "accepts": {
+      "anyone": "Accepts anyone",
+      "nobody": "Accepts nobody yet"
+    },
+    "state": {
+      "running": "Running",
+      "off": "Off",
+      "attention": "Needs setup"
+    }
+  },
+  "queue": {
+    "title": "Install queue",
+    "select": "Add to queue",
+    "selectNamed": "Add {{name}} to the install queue",
+    "inQueue": "In queue",
+    "selectionLabel": "Add-ons selected for install",
+    "selected": "Selected: {{count}}",
+    "reviewPicked": "Review and queue",
+    "clear": "Clear",
+    "position": "Add-on {{number}} of {{total}}.",
+    "batchNote": "Nothing is queued until you finish the last one.",
+    "confirmBody": "Version {{version}} from the source {{library}} is added to the install queue. It downloads in the background and is checked before it is installed. It is not turned on.",
+    "add": "Add to queue",
+    "acceptNext": "Accept and next",
+    "acceptLast": "Accept and queue all",
+    "skip": "Skip",
+    "unpinned": "This development entry is not pinned to one package. It installs whatever the source serves now.",
+    "reviewTitle": "Review needed.",
+    "reviewBody": "The package asks for more host access than you approved. Check the list again before it is installed.",
+    "refused": "{{name}} was not queued. {{reason}}",
+    "noAnswer": "The server gave no answer for it.",
+    "notInLibrary": "This add-on is no longer in your libraries."
   }
 }

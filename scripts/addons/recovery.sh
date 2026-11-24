@@ -59,7 +59,7 @@ run_go() {
     shift
     report="$cache/logs/recovery-$name.json"
     rm -f "$report"
-    go test -count=1 -p 2 -tags auth "$@" -ginkgo.json-report="$report" >"$cache/logs/recovery-$name.log" 2>&1 || { tail -40 "$cache/logs/recovery-$name.log" >&2; exit 1; }
+    go test -count=1 -p 2 -tags auth,nosqlite,purego_utp "$@" -ginkgo.json-report="$report" >"$cache/logs/recovery-$name.log" 2>&1 || { tail -40 "$cache/logs/recovery-$name.log" >&2; exit 1; }
     go_cases "$report"
 }
 run_go package ./core/services/addons/recovery
@@ -70,7 +70,7 @@ run_go owner ./tests/addons/recovery
 # 3. The real owner, the real Tables executable, the built package.
 node "$pkg/build.mjs" >"$cache/logs/recovery-build.log" 2>&1 || { cat "$cache/logs/recovery-build.log" >&2; exit 1; }
 tables_exe="$cache/tmp/recovery-exe"
-CGO_ENABLED=1 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
+CGO_ENABLED=0 go build -p 2 -o "$tables_exe" ./addons/tables/cmd/tables
 fixture_dir="$cache/tmp/recovery-fixture"
 rm -rf "$fixture_dir"
 mkdir -p "$fixture_dir/tables"

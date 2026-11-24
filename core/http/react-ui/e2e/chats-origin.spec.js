@@ -1,5 +1,6 @@
 import { test, expect } from './coverage-fixtures.js'
 import { mockOriginChats } from './chats-origin.js'
+import { noWellKnown } from './home-fixtures.js'
 
 // Chats that a trigger, a connector, a job or a page started stay out of the
 // lists of a person's own chats and have a tab of their own in All chats. The
@@ -107,6 +108,7 @@ test.describe('Chats that no person started', () => {
 
   test('Home does not offer them under Jump back in', async ({ page }) => {
     const { lists } = await mockOriginChats(page)
+    await noWellKnown(page, 'home')
     await page.goto('/app')
     await expect(page.getByTestId('home-conversation')).toHaveCount(1)
     await expect(page.getByTestId('home-conversation').first()).toContainText('Plan the week')
@@ -119,11 +121,11 @@ test.describe('Chats that no person started', () => {
     await page.getByTestId('chats-trigger').click()
     const menu = page.getByTestId('chats-menu')
     await expect(menu.getByTestId('chats-row')).toHaveCount(8)
-    await menu.getByRole('combobox').fill('alice')
+    await menu.getByRole('combobox', { name: 'Search conversations...' }).fill('alice')
     const row = menu.getByTestId('chats-row')
     await expect(row).toHaveCount(1)
     await expect(row.getByTestId('chats-origin-badge')).toHaveText('Team assistant')
-    await menu.getByRole('combobox').fill('Plan')
+    await menu.getByRole('combobox', { name: 'Search conversations...' }).fill('Plan')
     await expect(menu.getByTestId('chats-row').getByTestId('chats-origin-badge')).toHaveCount(0)
   })
 
@@ -131,7 +133,9 @@ test.describe('Chats that no person started', () => {
     await mockOriginChats(page)
     await page.goto('/app/chats/b1')
     const banner = page.getByTestId('chat-origin-banner')
-    await expect(banner).toContainText('This conversation was started by Team assistant.')
+    // A connector chat has a header of its own: the connection, then where it lives.
+    await expect(banner.getByTestId('connector-name')).toHaveText('Team assistant')
+    await expect(banner.getByTestId('connector-kind')).toHaveText('Chat App')
     await expect(page.getByTestId('chat-origin-link')).toHaveAttribute('href', '/app/addons/chatapp/bot')
     await page.goto('/app/chats/f1')
     await expect(page.getByTestId('chat-origin-banner')).toContainText('started by something else')

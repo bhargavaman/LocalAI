@@ -19,13 +19,13 @@ import (
 	"github.com/mudler/LocalAI/core/http/auth"
 	studioendpoint "github.com/mudler/LocalAI/core/http/endpoints/studio"
 	"github.com/mudler/LocalAI/core/http/routes"
+	"github.com/mudler/LocalAI/core/services/notify"
 	"github.com/mudler/LocalAI/core/services/studio"
 	"github.com/mudler/LocalAI/core/services/studio/agents"
 	"github.com/mudler/LocalAI/core/services/studio/connectors"
 	"github.com/mudler/LocalAI/core/services/studio/files"
 	"github.com/mudler/LocalAI/core/services/studio/jobs"
 	"github.com/mudler/LocalAI/core/services/studio/loops"
-	"github.com/mudler/LocalAI/core/services/studio/notify"
 	"github.com/mudler/LocalAI/core/services/studio/provider"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/store"
@@ -34,6 +34,7 @@ import (
 	"github.com/mudler/LocalAI/tests/studiobot"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"gorm.io/gorm"
 )
 
 // studioServer drives the studio endpoints through the registration function
@@ -48,7 +49,32 @@ type studioServer struct {
 	svc      *studio.Service
 	// store is the chat store behind svc, for specs that seed chats a person did not start.
 	store session.Store
+	// db is the account database; conns the connector manager.
+	db    *gorm.DB
+	conns *studio.Connectors
+	// agents is the saved-agent store behind svc, for specs that seed an agent the API would refuse.
+	agents agents.Store
+	// connStore, trigStore and loopStore are the stores of the connectors, triggers and loops, for specs that seed a row the API would refuse.
+	connStore connectors.Store
+	trigStore triggers.Store
+	loopStore loops.Store
 }
+
+// studioSharedDB and studioSharedConnStore, when set, are the account
+// database and the connector store of the servers built next, so two servers
+// act as two frontends of one cluster. Reset them after the spec.
+var (
+	studioSharedDB        *gorm.DB
+	studioSharedConnStore connectors.Store
+)
+
+// studioConnectorOptions lets a spec change the options of the connector
+// manager; studioRouteOptions adds options to the routes. Reset them after
+// the spec.
+var (
+	studioConnectorOptions func(*studio.ConnectorOptions)
+	studioRouteOptions     func(*studioServer) []studioendpoint.HandlerOption
+)
 
 // studioTriggerOptions lets a spec set the clock or the limits of the trigger
 // host before the server is built. Reset it after the spec.
@@ -75,11 +101,15 @@ func newStudioServerFiles(f *files.Service) *studioServer { return newStudioServ
 
 // newStudioServerWith lets a spec change the service's dependencies.
 func newStudioServerWith(f *files.Service, mod func(*studio.Deps)) *studioServer {
-	db, err := auth.InitDB(":memory:")
-	Expect(err).NotTo(HaveOccurred())
-	sqlDB, err := db.DB()
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(sqlDB.Close)
+	db := studioSharedDB
+	if db == nil {
+		var err error
+		db, err = auth.InitDB(":memory:")
+		Expect(err).NotTo(HaveOccurred())
+		sqlDB, err := db.DB()
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(sqlDB.Close)
+	}
 
 	st, err := store.NewJSON("")
 	Expect(err).NotTo(HaveOccurred())
@@ -120,8 +150,11 @@ func newStudioServerWith(f *files.Service, mod func(*studio.Deps)) *studioServer
 	Expect(err).NotTo(HaveOccurred())
 	svc.SetJobs(jobHost)
 	DeferCleanup(jobHost.Close)
-	cs, err := connectors.NewJSON("")
-	Expect(err).NotTo(HaveOccurred())
+	var cs connectors.Store = studioSharedConnStore
+	if cs == nil {
+		cs, err = connectors.NewJSON("")
+		Expect(err).NotTo(HaveOccurred())
+	}
 	var ctr studio.ConnectorTransport = studioTelegram
 	if studioTelegram == nil {
 		ctr = studiobot.NewBotTransport(&transport.API{})
@@ -130,20 +163,25 @@ func newStudioServerWith(f *files.Service, mod func(*studio.Deps)) *studioServer
 	if studioVerifyTokens && studioTelegram != nil {
 		copts.VerifyToken = studio.VerifyTokenWithMe(ctr)
 	}
+	if studioConnectorOptions != nil {
+		studioConnectorOptions(&copts)
+	}
 	conns, err := studio.NewConnectors(svc, copts)
 	Expect(err).NotTo(HaveOccurred())
 	svc.SetConnectors(conns)
 	DeferCleanup(conns.Close)
 	DeferCleanup(host.Close)
 
-	s := &studioServer{e: echo.New(), harness: h, sessions: map[string]string{}, notify: nsvc, host: host, svc: svc, store: st}
+	s := &studioServer{e: echo.New(), harness: h, sessions: map[string]string{}, notify: nsvc, host: host, svc: svc, store: st, db: db, conns: conns, agents: ag, connStore: cs, trigStore: ts, loopStore: lstore}
 	for _, id := range []string{"alice", "bob", "carol", "dave", "root"} {
 		role := auth.RoleUser
 		if id == "root" {
 			role = auth.RoleAdmin
 		}
 		user := &auth.User{ID: id, Email: id + "@example.test", Name: id, Role: role, Status: auth.StatusActive, Provider: auth.ProviderLocal}
-		Expect(db.Create(user).Error).To(Succeed())
+		if db.First(&auth.User{}, "id = ?", id).Error != nil {
+			Expect(db.Create(user).Error).To(Succeed())
+		}
 		session, err := auth.CreateSession(db, id, "")
 		Expect(err).NotTo(HaveOccurred())
 		s.sessions[id] = session
@@ -164,7 +202,16 @@ func newStudioServerWith(f *files.Service, mod func(*studio.Deps)) *studioServer
 		}
 		return nil
 	})
-	routes.RegisterStudioRoutes(s.e, svc, models, auth.RequireAdmin())
+	ropts := []studioendpoint.HandlerOption{studioendpoint.WithUserLookup(func(_ context.Context, id string) (bool, error) {
+		var n int64
+		err := db.Model(&auth.User{}).Where("id = ?", id).Count(&n).Error
+		return n > 0, err
+	})}
+	if studioRouteOptions != nil {
+		ropts = append(ropts, studioRouteOptions(s)...)
+	}
+	routes.RegisterStudioRoutes(s.e, svc, models, auth.RequireAdmin(), ropts...)
+	routes.RegisterNotificationRoutes(s.e, nsvc, pusher, true)
 	return s
 }
 

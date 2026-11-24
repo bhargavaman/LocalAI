@@ -8,27 +8,6 @@ import (
 	"github.com/mudler/xlog"
 )
 
-// deprecatedFlags maps old flag names to their new replacements.
-var deprecatedFlags = map[string]string{
-	"--p2ptoken": "--p2p-token", // #nosec G101 -- flag names, not a credential
-}
-
-// warnDeprecatedFlags checks os.Args for any deprecated flag names and logs
-// a warning directing the user to the new name. Old flags continue to work
-// via kong aliases, so this is purely informational.
-func warnDeprecatedFlags() {
-	for _, arg := range os.Args[1:] {
-		// Strip any =value suffix to match flag names like --p2ptoken=xyz
-		flag := arg
-		if idx := strings.Index(flag, "="); idx != -1 {
-			flag = flag[:idx]
-		}
-		if newName, ok := deprecatedFlags[flag]; ok {
-			xlog.Warn("Deprecated flag used", "old", flag, "new", newName, "message", "please switch to the new flag name; the old name will be removed in a future release")
-		}
-	}
-}
-
 // RemovedAgentOptions are the flags and environment variables of the old agent
 // pool, agent jobs, skills and chat history. The runtime for them is gone, so
 // they do nothing, but they are still accepted: a deployment that sets one keeps
@@ -45,6 +24,23 @@ type RemovedAgentOptions struct {
 	AgentHubURL                    string `env:"LOCALAI_AGENT_HUB_URL" hidden:"" help:"Removed; ignored"`
 }
 
+// RemovedAssistantOptions are the flag and environment variable that used to
+// switch the LocalAI Assistant off. They are deprecated: a true value is mapped
+// to chats_localai_admin=false (the admin tool group off), with a warning. The
+// option is an operator choice: it wins over a stored chats_localai_admin=true.
+type RemovedAssistantOptions struct {
+	DisableLocalAIAssistant bool `name:"disable-local-ai-assistant" env:"LOCALAI_DISABLE_ASSISTANT" hidden:"" help:"Deprecated: maps to chats_localai_admin=false (Settings > Tools)"`
+}
+
+func (o RemovedAssistantOptions) set() []string { return setOptions(o) }
+
+func (o RemovedAssistantOptions) warn() {
+	if set := o.set(); len(set) > 0 {
+		xlog.Warn("The option to disable the LocalAI Assistant is deprecated; it was mapped to chats_localai_admin=false. Set chats_localai_admin in Settings > Tools instead",
+			"options", strings.Join(set, ", "))
+	}
+}
+
 // RemovedAgentWorkerOptions are the flags and environment variables of the old
 // agent worker, which ran agents and jobs and called the HTTP API. They do
 // nothing now and are accepted so a deployment that sets them keeps starting.
@@ -53,7 +49,7 @@ type RemovedAgentWorkerOptions struct {
 	APIToken        string `env:"LOCALAI_API_TOKEN" hidden:"" help:"Removed; ignored"`
 	Subject         string `env:"LOCALAI_AGENT_SUBJECT" hidden:"" help:"Removed; ignored"`
 	Queue           string `env:"LOCALAI_AGENT_QUEUE" hidden:"" help:"Removed; ignored"`
-	MCPCIJobTimeout string `env:"LOCALAI_MCP_CI_JOB_TIMEOUT" hidden:"" help:"Removed; ignored"`
+	MCPCIJobTimeout string `env:"LOCALAI_MCP_CI_JOB_TIMEOUT" hidden:"" help:"Removed on agent-worker; ignored there. The server still reads it."`
 }
 
 // setOptions returns the first environment variable name of each field of the

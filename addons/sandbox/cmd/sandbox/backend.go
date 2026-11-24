@@ -16,21 +16,41 @@ import (
 	"github.com/mudler/xlog"
 
 	"github.com/mudler/LocalAI/addons/sandbox/internal/backends"
+	"github.com/mudler/LocalAI/addons/sandbox/internal/profiles"
 	"github.com/mudler/LocalAI/addons/sandbox/internal/sandbox"
 	"github.com/mudler/LocalAI/addons/sandbox/internal/sandbox/chv"
 	"github.com/mudler/LocalAI/addons/sandbox/internal/sandbox/gvisor"
+	"github.com/mudler/LocalAI/addons/sandbox/internal/sandbox/vz"
 	"github.com/mudler/LocalAI/core/services/studio/sandbox/host"
 	"github.com/mudler/LocalAI/core/services/studio/sandbox/runner"
 
-	"github.com/mudler/LocalAI/addons/internal/atomicfile"
+	"github.com/mudler/LocalAI/pkg/addons/sdk/atomicfile"
+	"github.com/mudler/LocalAI/pkg/addons/sdk/protocol"
 )
 
 // The release sets this with -ldflags "-X main.guestImage=...". A build that
 // does not has no guest image, and the isolated backends then say so.
 var (
-	// guestImage is the OCI reference, by digest, of the image the guest runs.
+	// guestImage is the OCI reference, by digest, of the image of the base
+	// profile.
 	guestImage string
+	// profileImages lists the images of the other profiles, as
+	// "media=<ref>". A profile that is not listed has no image in
+	// this release, and a chat that asks for it runs in base.
+	profileImages string
 )
+
+// releaseImages is the image of each profile of this build.
+func releaseImages() (profiles.Images, error) {
+	imgs, err := profiles.ParseImages(profileImages)
+	if err != nil {
+		return nil, err
+	}
+	if guestImage != "" {
+		imgs[profiles.Base] = guestImage
+	}
+	return imgs, nil
+}
 
 // unsupported builds the error a constructor returns when the host cannot run
 // a backend.
@@ -173,6 +193,13 @@ func fileSHA256(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// ownerInWSL reports whether a Windows host runs this add-on in WSL 2.
+var ownerInWSL = protocol.InWSL
+
+// errHostInWSL is why the host backend is off in WSL 2: there it would not be
+// a Linux host of its own, but the Windows computer of the user.
+var errHostInWSL = unsupported("the host backend is off when LocalAI runs on Windows: in WSL 2 its commands could read the Windows drives under /mnt and start Windows programs with your rights. Use gVisor or KVM")
+
 // newSelector builds the choice of backend over the data directory.
 func newSelector(dataDir string) (*backends.Selector, error) {
 	noImage := func() error {
@@ -215,7 +242,19 @@ func newSelector(dataDir string) (*backends.Selector, error) {
 			}
 			return gvisor.New(gvisor.Options{StateDir: filepath.Join(dataDir, "run", "gvisor"), CacheDir: filepath.Join(dataDir, "images", "gvisor"), Runsc: runsc, DefaultImage: guestImage})
 		},
+		VZ: func() (sandbox.Backend, error) {
+			if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+				return nil, unsupported("the Virtualization.framework backend needs macOS on Apple silicon")
+			}
+			if err := noImage(); err != nil {
+				return nil, err
+			}
+			return vz.New(vz.Options{StateDir: filepath.Join(dataDir, "run", "vz"), CacheDir: filepath.Join(dataDir, "images", "vz"), DefaultImage: guestImage})
+		},
 		Host: func() (sandbox.Backend, error) {
+			if ownerInWSL() {
+				return nil, errHostInWSL
+			}
 			return host.New(host.Options{Root: filepath.Join(dataDir, "run", "host"), Log: func(principal, command string) {
 				// The record of what ran on the host, with the user it ran for.
 				xlog.Warn("sandbox: host command", "user", principal, "command", command)
@@ -229,6 +268,25 @@ func newSelector(dataDir string) (*backends.Selector, error) {
 type settingsAdapter struct {
 	*backends.Selector
 	m *runner.Manager
+	d *profiles.Delivery
+}
+
+func (s settingsAdapter) ProfileStates(ctx context.Context) []profiles.State {
+	if s.d == nil {
+		return nil
+	}
+	return s.d.Status(ctx)
+}
+
+func (s settingsAdapter) ChatSandbox(user, conv string) (string, string, bool) {
+	return s.m.Info(user, conv)
+}
+
+func (s settingsAdapter) CurrentImage(profile string) string {
+	if s.d == nil {
+		return ""
+	}
+	return s.d.Current(profile)
 }
 
 func (s settingsAdapter) Reset() { s.m.Reset(context.Background()) }

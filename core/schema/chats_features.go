@@ -42,20 +42,45 @@ type ChatsForkRequest struct {
 	Title string `json:"title,omitempty"`
 }
 
+// ChatsSearchRange marks a part of a snippet. Start and End are offsets in
+// UTF-16 code units (the way a JavaScript string counts); End is exclusive.
+type ChatsSearchRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 // ChatsChatHit is a chat that matches a search.
 type ChatsChatHit struct {
 	Chat ChatsConversation `json:"chat"`
 	// InTitle is true when the title matches.
 	InTitle bool `json:"in_title"`
-	// Seq is the first matching transcript line, or 0 when only the title matches.
+	// Seq is the matching transcript line, or 0 when only the title matches.
 	Seq int64 `json:"seq,omitempty"`
 	// Snippet is the matching text with a little around it.
 	Snippet string `json:"snippet,omitempty"`
+	// Role is user or assistant: who wrote the matching line.
+	Role string `json:"role,omitempty"`
+	// At is when the matching line was written.
+	At *time.Time `json:"at,omitempty"`
+	// Highlights are the parts of Snippet that match, in order.
+	Highlights []ChatsSearchRange `json:"highlights,omitempty"`
+	// Matches is how many lines of the chat match, among the newest matches.
+	Matches int `json:"matches,omitempty"`
 }
 
 // ChatsChatSearchResponse is the response of the chat search.
 type ChatsChatSearchResponse struct {
 	Hits []ChatsChatHit `json:"hits"`
+	// Engine is how the server searched: fts5, pg_trgm or scan.
+	Engine string `json:"engine,omitempty"`
+	// Indexing is true while the server still adds earlier chats to its
+	// search index, so older chats may be missing from the hits.
+	Indexing bool `json:"indexing,omitempty"`
+	// Partial is true when a server without an index stopped before it had
+	// read every chat; SearchedChats of TotalChats were read.
+	Partial       bool `json:"partial,omitempty"`
+	SearchedChats int  `json:"searched_chats,omitempty"`
+	TotalChats    int  `json:"total_chats,omitempty"`
 }
 
 // ChatsExport is a chat as a file. Version is 1.
@@ -96,6 +121,9 @@ type ChatsSubAgent struct {
 	// turn ended: done, stopped, failed, interrupted or paused.
 	Running  bool   `json:"running"`
 	LastTurn string `json:"last_turn,omitempty"`
+	// Loop is the loop or wait that keeps the run going, when it has one. The
+	// run shows as running while it is set.
+	Loop *ChatsLoop `json:"loop,omitempty"`
 }
 
 // ChatsSubAgentList lists the sub-agent runs of a chat.
@@ -174,12 +202,31 @@ type ChatsMCPRef struct {
 // is 1, 2 for an agent with one folder (folder), or 3 for an agent with
 // several (folders): an older server refuses the file instead of importing the agent without its folder. The
 // file holds the definition only: no ID, owner or time, and the folder as a
-// path, never as the server's own reference to it.
+// path, never as the server's own reference to it. Version 5 is a project
+// agent: it carries projectRef and the folders as the project-relative paths
+// files and memory.
 type ChatsAgentExport struct {
 	Version    int             `json:"version"`
 	Kind       string          `json:"kind"`
 	ExportedAt time.Time       `json:"exported_at"`
 	Agent      ChatsAgentWrite `json:"agent"`
+}
+
+// ChatsAgentProjectRequired is the 409 answer of an import of a project agent
+// when no project was chosen. Error.type is project_required and
+// Error.project_name is the name of the project in the file (empty when the
+// file has none): send the query parameter project_id (one of your own
+// projects) or create_project=true, and import again.
+type ChatsAgentProjectRequired struct {
+	Error ChatsAgentProjectRequiredError `json:"error"`
+}
+
+// ChatsAgentProjectRequiredError is the error of ChatsAgentProjectRequired.
+type ChatsAgentProjectRequiredError struct {
+	Message     string `json:"message"`
+	Code        int    `json:"code"`
+	Type        string `json:"type" example:"project_required"`
+	ProjectName string `json:"project_name"`
 }
 
 // ChatsAgentImportResult is the response of an agent import.

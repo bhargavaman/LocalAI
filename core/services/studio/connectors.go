@@ -8,41 +8,28 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/mudler/LocalAI/core/http/auth"
+	"github.com/mudler/LocalAI/core/services/notify"
 	"github.com/mudler/LocalAI/core/services/studio/connectors"
+	"github.com/mudler/LocalAI/core/services/studio/hostmsg"
 	"github.com/mudler/LocalAI/core/services/studio/media"
-	"github.com/mudler/LocalAI/core/services/studio/notify"
+	"github.com/mudler/LocalAI/core/services/studio/oauthtoken"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/store"
 	"github.com/mudler/LocalAI/pkg/addons/contract"
 )
 
-// Sentences the bot says. They name no internal error.
+// The sentences the bot says are keys of the host message catalog (see
+// hostmsg and msg). They name no internal error.
 const (
-	sentNoUpload      = "You may not send files to this bot."
-	sentUnsupported   = "I cannot read this kind of message. Please send text, a photo, a file or a voice message."
-	sentTooLong       = "That message is too long. Please send less than 8,000 characters."
-	sentRate          = "Too many messages: please wait a minute."
-	sentUnavailable   = "This bot is not available right now."
-	sentNoAnswer      = "The agent had nothing to say."
-	sentStopped       = "The turn was stopped."
-	sentInterrupted   = "The agent was interrupted. Please send your message again."
-	sentFailed        = "The agent stopped because of an error."
-	sentFolderLimit   = "This agent cannot start because its file access exceeds the folder limit. Ask an administrator to reduce the shared folders available to you, then try again."
-	sentNoFolder      = "This agent cannot work right now: its folder is missing."
-	sentNoFile        = "I could not read the file you sent."
-	sentNoFileAbility = "I cannot take files on this platform."
-	sentFileType      = "I cannot read files of this type here."
-	sentFileTotal     = "Those files are too large together: please send fewer of them."
-	sentNoFiles       = "I can only read the text of your message here: files are turned off."
-	sentNoListen      = "I cannot listen to voice messages here: no speech-to-text model is set up. Please write your message."
-	sentNoTranscript  = "I could not understand your voice message. Please send it again, or write it."
-
 	// voiceMark starts the transcript of a voice message in the text of a
 	// turn, so the agent knows that the sender spoke and did not write.
 	voiceMark = "[Voice message, transcribed]"
@@ -73,6 +60,10 @@ type ConnectorOptions struct {
 	// Transport reaches the connector add-ons. Required.
 	Transport ConnectorTransport
 	Clock     func() time.Time
+	// LeaseWait pauses a caller that lost the refresh lease of an OAuth grant
+	// before it looks for the token the winner writes. Nil sleeps for real;
+	// a test passes a hook that does not.
+	LeaseWait func(ctx context.Context, d time.Duration) error
 	// Tick is how often the manager looks for bindings to start or stop; zero
 	// means 2 seconds.
 	Tick time.Duration
@@ -106,10 +97,27 @@ type ConnectorOptions struct {
 	// FileCeiling reads the host ceiling of a connector file from the owner
 	// policy, in bytes. Nil or zero: contract.DefaultFileCeilingBytes.
 	FileCeiling func(ctx context.Context) (int64, error)
+	// OwnerLanguage returns the interface language of an owner (a tag such as
+	// "it" or "pt-BR"), or "" when the server does not know it. It is asked
+	// for a connection whose reply language is auto and that holds no language
+	// of its own (Binding.UILanguage). Nil: not known.
+	OwnerLanguage func(ctx context.Context, owner string) string
 	// OutboxPoll is how often a queued message looks again for room under
 	// the limit of its binding; zero means one second.
 	OutboxPoll time.Duration
-	Logger     *slog.Logger
+	// OAuthDescriptor returns the OAuth descriptor that the credential slot of
+	// an installed add-on declares now. Nil: this process cannot run OAuth
+	// logins or refreshes, and an OAuth binding is unavailable here.
+	OAuthDescriptor func(ctx context.Context, addonID string) (contract.OAuthDescriptor, error)
+	// TokenClient calls the token endpoints. Nil: oauthtoken.New.
+	TokenClient *oauthtoken.Client
+	// InstanceID names this process in the lease of a grant. Empty: a
+	// random name.
+	InstanceID string
+	// Shares is the sharing policy of the bindings (see ConnectionShares).
+	// Nil: no binding is shared.
+	Shares ConnectionShares
+	Logger *slog.Logger
 }
 
 // Connectors runs the bindings of the chats. A message becomes a chat of the
@@ -133,9 +141,28 @@ type Connectors struct {
 	o   ConnectorOptions
 	log *slog.Logger
 
+	// afterSettle runs in the reply after each check whether to give the chat
+	// up, with the outcome. Only the specs set it.
+	afterSettle func(settled bool)
+
+	// beforeJoin runs in deliver after a message has joined a running reply
+	// and before it reaches the chat. Only the specs set it, to hold a
+	// message in that gap.
+	beforeJoin func()
+
 	sealMu sync.Mutex
 	sealer *connectors.Sealer
-	wmu    sync.Mutex // serialises writes of bindings
+
+	// refreshes runs one refresh per grant and version in this process; the
+	// lease in the grant row does the same across processes.
+	refreshes    singleflight.Group
+	instance     string
+	defaultToken *oauthtoken.Client
+	wmu          sync.Mutex // serialises writes of bindings
+	// logins counts the login starts of each person in this process (see
+	// allowLoginStart).
+	loginMu sync.Mutex
+	logins  map[string]loginWindow
 
 	mu    sync.Mutex // guards loops and shut, and orders wg.Add before Close's Wait
 	loops map[string]context.CancelFunc
@@ -144,10 +171,19 @@ type Connectors struct {
 	smu     sync.Mutex
 	senders map[string]*senderState
 
+	// chatSends counts the messages that the model of a chat in Studio wrote
+	// with send_message (see sendlimit.go).
+	chatSends sendLimiter
+
+	amu2         sync.Mutex
+	accountTried map[string]time.Time // by binding: when this process last asked its add-on for its account
+
 	emu      sync.Mutex
 	nextEdit map[string]time.Time // by binding: when its next edit may go
 
 	outbox outboxes // text the host writes on its own, by binding
+
+	lang langMemory // the last clear language of each sender and chat
 
 	gmu   sync.Mutex
 	gates []CapabilitySwitch // extra switches of a capability (see AddCapabilitySwitch)
@@ -173,6 +209,10 @@ type senderState struct {
 	// do: the intersection over the messages the turn took. Nil while no turn
 	// runs.
 	grant *turnGrant
+	// joining counts the messages that found a reply running and are on their
+	// way to the chat. The reply may not give the chat up while one is: the
+	// turn it starts would have no reply to carry its answer.
+	joining int
 }
 
 // NewConnectors returns the manager. It does nothing until Run or Sync is called.
@@ -182,6 +222,9 @@ func NewConnectors(svc *Service, o ConnectorOptions) (*Connectors, error) {
 	}
 	if o.Clock == nil {
 		o.Clock = time.Now
+	}
+	if o.LeaseWait == nil {
+		o.LeaseWait = sleep
 	}
 	if o.Tick <= 0 {
 		o.Tick = 2 * time.Second
@@ -204,8 +247,11 @@ func NewConnectors(svc *Service, o ConnectorOptions) (*Connectors, error) {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
-	return &Connectors{svc: svc, o: o, log: o.Logger, loops: map[string]context.CancelFunc{}, senders: map[string]*senderState{}, nextEdit: map[string]time.Time{},
-		wake: make(chan struct{}, 1), done: make(chan struct{}), gates: []CapabilitySwitch{agentGrantSwitch(svc)}}, nil
+	if o.InstanceID == "" {
+		o.InstanceID = newID()
+	}
+	return &Connectors{svc: svc, o: o, log: o.Logger, instance: o.InstanceID, defaultToken: oauthtoken.New(), logins: map[string]loginWindow{}, loops: map[string]context.CancelFunc{}, senders: map[string]*senderState{}, nextEdit: map[string]time.Time{},
+		wake: make(chan struct{}, 1), done: make(chan struct{}), gates: []CapabilitySwitch{agentGrantSwitch(svc), toolsSwitch(svc), knowledgeSwitch(svc), resourcesSwitch(svc)}}, nil
 }
 
 // Notify asks Run to look at the bindings now.
@@ -310,7 +356,8 @@ func (c *Connectors) Sync(ctx context.Context) {
 		if b.CredentialsOnly() {
 			continue
 		}
-		if k, ok := kindFor(kinds, b); ok && k.Delivery == contract.DeliveryPull {
+		// A tool-only kind never listens, whatever an older row says.
+		if k, ok := kindFor(kinds, b); ok && !k.ToolOnly && k.Delivery == contract.DeliveryPull {
 			want[b.ID] = b
 		}
 	}
@@ -372,6 +419,8 @@ poll:
 			c.disable(b, "its bot token cannot be read")
 			return
 		}
+		// A binding whose add-on told no account yet is asked again every so often.
+		b = c.learnAccount(ctx, b, token)
 		offset, _, err := c.o.Store.Offset(ctx, id)
 		if err != nil {
 			c.log.Warn("studio: could not read a connector offset", "binding", id, "error", err)
@@ -413,6 +462,12 @@ poll:
 		backoff, conflicts = c.o.Backoff, 0
 		for _, u := range resp.Updates {
 			if ctx.Err() != nil {
+				return
+			}
+			// This frontend may have lost the lead while the poll was in
+			// flight: the new leader reads the update again from the stored
+			// offset, so handing it over here would answer it twice.
+			if c.o.Lead != nil && !c.o.Lead(ctx) {
 				return
 			}
 			// The same function as the host operation: it reads the binding
@@ -576,7 +631,7 @@ func (c *Connectors) Ingest(ctx context.Context, addonID string, in contract.Con
 		return nil
 	}
 	if m.Chat == "" || m.SenderID == "" || len(m.SenderID) > contract.MaxConnectorSender || len(m.Chat) > contract.MaxConnectorSender ||
-		len(m.Thread) > contract.MaxConnectorSender || len(m.Media) > contract.MaxConnectorMedia {
+		len(m.Thread) > contract.MaxConnectorSender || len(m.Media) > contract.MaxConnectorMedia || len(m.MediaKinds) > contract.MaxConnectorMedia {
 		return connectors.ErrInvalid
 	}
 	// The sender log keeps the name in a column of 255 characters.
@@ -590,6 +645,13 @@ func (c *Connectors) Ingest(ctx context.Context, addonID string, in contract.Con
 	if err != nil {
 		c.disable(b, "its bot token cannot be read")
 		return connectors.ErrForbidden
+	}
+	// A push platform has no loop that learns the account, so it is learned here.
+	b = c.learnAccount(ctx, b, token)
+	// Two connections of one bot get the same message: the oldest answers.
+	if older, twin := c.olderTwin(ctx, b, m); twin {
+		c.log.Info("studio: a connection stays silent because an older connection of the same bot answers", "binding", b.ID, "answering", older.ID, "kind", b.Kind, "message", m.MessageID)
+		return nil
 	}
 	c.handle(ctx, b, token, m)
 	return nil
@@ -713,29 +775,54 @@ func (c *Connectors) handle(ctx context.Context, b connectors.Binding, token str
 	if err := c.o.Store.RecordSender(ctx, b.ID, senderID, name, allowed, c.o.Clock()); err != nil {
 		c.log.Warn("studio: could not record a sender", "binding", b.ID, "error", err)
 	}
+	if ns, ok := c.o.Store.(connectors.SenderNoter); ok {
+		note := connectors.SenderNote{Chat: m.Chat, ChatName: m.ChatName}
+		switch {
+		case allowed:
+		case !m.Direct && !m.Mention:
+			note.Reason = connectors.ReasonNotAddressed
+		default:
+			note.Reason = connectors.ReasonNotListed
+		}
+		if err := ns.NoteSender(ctx, b.ID, senderID, note); err != nil {
+			c.log.Warn("studio: could not note a sender", "binding", b.ID, "error", err)
+		}
+	}
 	if !allowed {
 		return // ignored: not answered, and in the sender log for the owner
 	}
+	c.noteLanguage(b, m)
+	v := c.voice(ctx, b, senderID, m.Chat)
 	say := func(text string) { c.say(b, token, m.Chat, m.Thread, text) }
+	// What the host says to the sender about a message is also noted in the
+	// chat of that conversation, when there is one, so the owner reads why a
+	// message went unanswered.
+	tell := func(key string, args ...any) {
+		text := v.T(key, args...)
+		say(text)
+		if code, ok := hostNoteCodes[key]; ok {
+			c.noteChat(ctx, b, m, code, text)
+		}
+	}
 	st := c.sender(b.ID, senderID)
 	switch ok, notice := c.allow(st); {
 	case !ok && notice:
-		say(sentRate)
+		tell("rate")
 		return
 	case !ok:
 		return
 	}
 	// A pairing code is checked before any model turn and never reaches the
 	// model or the log.
-	if c.tryPairing(ctx, b, m, st, say) {
+	if c.tryPairing(ctx, b, m, st, tell) {
 		return
 	}
 	switch {
 	case m.Unsupported && len(m.Media) == 0:
-		say(sentUnsupported)
+		tell("unsupported")
 		return
 	case utf8.RuneCountInString(m.Text) > maxMessageRunes:
-		say(sentTooLong)
+		tell("too_long")
 		return
 	}
 	if c.svc.d.Users != nil {
@@ -744,25 +831,39 @@ func (c *Connectors) handle(ctx context.Context, b connectors.Binding, token str
 			if errors.Is(err, ErrNoUser) {
 				c.disable(b, "its owner no longer exists")
 			}
-			say(sentUnavailable)
+			tell("unavailable")
 			return
 		}
 		if c.svc.d.Allowed != nil && !c.svc.d.Allowed(owner, auth.FeatureConnectors) {
-			say(sentUnavailable)
+			tell("unavailable")
 			return
 		}
 	}
+	// The new chat command is decided here too, and the model never reads it.
+	if isNewCommand(m) {
+		c.newChat(ctx, b, m, tell)
+		return
+	}
 	// "confirm 7K2Q" or "cancel 7K2Q" answers a proposal that this binding made;
 	// it is decided here, before any model turn, and the model never reads it.
-	if len(m.Media) == 0 && c.answerPhrase(ctx, b, m, say) {
+	if len(m.Media) == 0 && c.answerPhrase(ctx, b, m, say, v) {
 		return
 	}
 	// A scoped agent whose folder is missing does not run, on any frontend
 	// or worker: one plain reply, and the binding stays on, so it works
 	// again once the folder is back.
-	if _, err := c.svc.agentScope(ctx, b.Owner, b.AgentID); errors.Is(err, ErrAgentFolderMissing) {
+	_, scopeErr := c.svc.agentScope(ctx, b.Owner, b.AgentID)
+	if errors.Is(scopeErr, ErrAgentFolderMissing) {
 		c.log.Warn("studio: a connector message was refused: the agent's folder is missing", "binding", b.ID)
-		say(sentNoFolder)
+		tell("no_folder")
+		return
+	}
+	// An agent of a project that is archived, deleted or broken does not run
+	// either: one plain reply, no chat, and the binding stays on, so it works
+	// again when the project is restored.
+	if errors.Is(scopeErr, ErrProjectUnavailable) {
+		c.log.Warn("studio: a connector message was refused: the agent's project is not available", "binding", b.ID)
+		tell(projectKey(scopeErr))
 		return
 	}
 	// The files are read before the chat is made: a message that cannot
@@ -771,11 +872,11 @@ func (c *Connectors) handle(ctx context.Context, b connectors.Binding, token str
 	var up []session.Upload
 	if len(m.Media) > 0 {
 		if d := c.Authorize(ctx, b, m, contract.CapFilesUpload); !d.Allowed {
-			say(sentNoUpload)
+			tell(refusalKey(b, m, d, "no_upload"))
 			return
 		}
 		var ok bool
-		if m.Text, up, ok = c.inputs(ctx, b, token, m, say); !ok {
+		if m.Text, up, ok = c.inputs(ctx, b, token, m, say, v); !ok {
 			return
 		}
 	}
@@ -789,27 +890,89 @@ func (c *Connectors) handle(ctx context.Context, b connectors.Binding, token str
 			c.disable(b, "its agent has no model")
 		case errors.Is(err, ErrAgentFolderLimit):
 			c.log.Warn("studio: a connector message exceeds the folder limit", "binding", b.ID)
-			say(sentFolderLimit)
+			tell("folder_limit")
 			return
 		case errors.Is(err, ErrAgentFolderMissing):
 			c.log.Warn("studio: a connector message was refused: the agent's folder is missing", "binding", b.ID)
-			say(sentNoFolder)
+			tell("no_folder")
+			return
+		case errors.Is(err, ErrProjectUnavailable):
+			c.log.Warn("studio: a connector message was refused: the agent's project is not available", "binding", b.ID)
+			tell(projectKey(err))
 			return
 		default:
 			c.log.Warn("studio: could not make the chat of a sender", "binding", b.ID, "error", err)
 		}
-		say(sentUnavailable)
+		tell("unavailable")
 		return
 	}
 	c.rememberPlace(ctx, b, chatID, m)
+	c.rememberInfo(ctx, b, chatID, m)
 	// One reply goroutine serves a conversation; the rate limit stays the sender's.
 	// The earlier messages of a thread go to the first turn of a chat that
 	// the thread just started, once.
 	var earlier string
+	who := turnWho{Sender: c.senderFor(b, m)}
 	if created {
-		earlier = c.threadDirective(ctx, b, token, m)
+		var st threadStats
+		earlier, st = c.threadDirective(ctx, b, token, m)
+		if earlier != "" {
+			who.Thread, who.ThreadLines, who.ThreadCut = earlier, st.Lines, st.Truncated
+		}
 	}
+	ctx = withTurnWho(ctx, who)
 	c.deliver(ctx, b, token, m, c.sender(b.ID, "\x01"+key), chatID, up, earlier)
+}
+
+// projectKey is the sentence for a refused project agent: the project is not
+// available, or its folders changed and the owner must save the agent again.
+func projectKey(err error) string {
+	if errors.Is(err, ErrProjectFoldersChanged) {
+		return "project_changed"
+	}
+	return "project_unavailable"
+}
+
+// refusalKey picks the sentence a sender reads for a refused capability, so
+// the reply says why in one plain sentence and not only "not allowed": the
+// channel is set to answer only, the sender is not on the list, the action
+// needs a pairing, or the owner has not turned it on. fallback is the sentence
+// of the feature, for a reason the sender cannot act on.
+func refusalKey(b connectors.Binding, m contract.ConnectorMessage, d Decision, fallback string) string {
+	switch d.Code {
+	case CodeChannelNotTrusted:
+		if !m.Direct && b.Allows(m.Chat, "") {
+			return "refuse.channel"
+		}
+		return "refuse.unlisted"
+	case CodeSenderNeedsPairing:
+		return "refuse.pairing"
+	case CodeConnectionPermissionOff, CodeAgentPermissionOff, CodeToolsSwitchOff:
+		return "refuse.off"
+	}
+	return fallback
+}
+
+// hostNoteCodes maps the sentence keys of the host's own messages to the
+// code of the note the chat keeps (session.RoleHostNote). A sentence that has
+// no code here is told to the sender and not noted.
+var hostNoteCodes = map[string]string{
+	"unsupported":         session.HostNoteUnsupported,
+	"too_long":            session.HostNoteTooLong,
+	"no_upload":           session.HostNoteNoUpload,
+	"rate":                session.HostNoteRate,
+	"pairing.done":        session.HostNotePairing,
+	"no_folder":           session.HostNoteRefused,
+	"project_unavailable": session.HostNoteRefused,
+	"project_changed":     session.HostNoteRefused,
+	"folder_limit":        session.HostNoteRefused,
+	"no_files":            session.HostNoteRefused,
+	// The reasons a capability was refused (see refusalKey): the sender read
+	// one sentence, and so does the owner.
+	"refuse.channel":  session.HostNoteRefused,
+	"refuse.unlisted": session.HostNoteRefused,
+	"refuse.pairing":  session.HostNoteRefused,
+	"refuse.off":      session.HostNoteRefused,
 }
 
 // inputs turns the files of a message into what the turn gets: the uploads
@@ -819,9 +982,15 @@ func (c *Connectors) handle(ctx context.Context, b connectors.Binding, token str
 // in the text under voiceMark; the recording is not kept. The sender is told
 // about a file that could not be read or was too large. It reports false when
 // the message must not start a turn: nothing is left to send, or a voice
-// message cannot be transcribed.
-func (c *Connectors) inputs(ctx context.Context, b connectors.Binding, token string, m contract.ConnectorMessage, say func(string)) (string, []session.Upload, bool) {
-	got, note := c.media(ctx, b, token, m.Media)
+// message cannot be transcribed. A file of a kind that the binding does not
+// take (see connectors.Binding.InboundMedia) is never read: the sender is
+// told, and the text still goes.
+func (c *Connectors) inputs(ctx context.Context, b connectors.Binding, token string, m contract.ConnectorMessage, say func(string), v hostmsg.Voice) (string, []session.Upload, bool) {
+	refs, refused := c.accepted(b, m)
+	if len(refused) > 0 {
+		say(v.T("media.refused", "kinds", refusedKinds(v, refused)))
+	}
+	got, note := c.media(ctx, b, token, refs, v)
 	if note != "" {
 		say(note)
 	}
@@ -832,7 +1001,7 @@ func (c *Connectors) inputs(ctx context.Context, b connectors.Binding, token str
 	)
 	for _, f := range got {
 		if media.IsAudio(f.Name) {
-			t, refusal := c.transcribe(ctx, b, f.Name, f.body(c))
+			t, refusal := c.transcribe(ctx, b, f.Name, f.body(c), v)
 			if refusal != "" {
 				say(refusal)
 				return "", nil, false
@@ -847,7 +1016,7 @@ func (c *Connectors) inputs(ctx context.Context, b connectors.Binding, token str
 		up = append(up, session.Upload{Name: f.Name, Body: f.body(c)})
 	}
 	if filesOff {
-		say(sentNoFiles)
+		say(v.T("no_files"))
 	}
 	text := m.Text
 	if len(voices) > 0 {
@@ -863,21 +1032,59 @@ func (c *Connectors) inputs(ctx context.Context, b connectors.Binding, token str
 	return text, up, len(up) > 0 || strings.TrimSpace(text) != ""
 }
 
+// accepted splits the files of a message into the references that the
+// binding takes and the kinds it refused, before any file is read. A
+// message whose add-on names no kind for a file (MediaKinds missing or not
+// one per file) has files of an unknown kind, which only a binding that
+// takes every kind reads.
+func (c *Connectors) accepted(b connectors.Binding, m contract.ConnectorMessage) ([]string, []string) {
+	var refs, refused []string
+	for i, ref := range m.Media {
+		kind := ""
+		if len(m.MediaKinds) == len(m.Media) {
+			kind = m.MediaKinds[i]
+		}
+		if !b.Accepts(kind) {
+			c.log.Info("studio: a connector message carried a file of a kind the binding does not take", "binding", b.ID, "kind", b.Kind, "media", kind)
+			refused = append(refused, kind)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	return refs, refused
+}
+
+// refusedKinds names the media kinds of the files that a binding did not
+// take, for the sentence "This bot does not accept photos." Each kind is
+// named once; a file of an unknown kind is one of "other files".
+func refusedKinds(v hostmsg.Voice, kinds []string) string {
+	var nouns []string
+	for _, k := range kinds {
+		if k == "" || !hostmsg.Has("media.kind."+k) {
+			k = "other"
+		}
+		if n := v.T("media.kind." + k); !slices.Contains(nouns, n) {
+			nouns = append(nouns, n)
+		}
+	}
+	return v.Join(nouns)
+}
+
 // transcribe makes a voice message text, through the same media service and
 // model as a voice note attached in a chat, as the owner of the binding: the
 // owner's model allowlist and quota apply. It returns the sentence for the
 // sender when it cannot.
-func (c *Connectors) transcribe(ctx context.Context, b connectors.Binding, name string, body io.Reader) (string, string) {
+func (c *Connectors) transcribe(ctx context.Context, b connectors.Binding, name string, body io.Reader, v hostmsg.Voice) (string, string) {
 	m := c.svc.d.Media
 	if !m.CanTranscribe() {
-		return "", sentNoListen
+		return "", v.T("no_listen")
 	}
 	tctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
 	defer cancel()
 	t, err := m.Transcribe(tctx, principal(b.Owner), name, body)
 	if t = strings.TrimSpace(t); err != nil || t == "" {
 		c.log.Warn("studio: could not transcribe the voice message of a connector", "binding", b.ID, "kind", b.Kind, "error", err)
-		return "", sentNoTranscript
+		return "", v.T("no_transcript")
 	}
 	return t, ""
 }
@@ -888,7 +1095,7 @@ func (c *Connectors) transcribe(ctx context.Context, b connectors.Binding, name 
 // sent; the chat saves it in its own folder. The add-on writes each file to the
 // host in chunks by a handle (see connectorxfer.go). A kind that declares no
 // way to receive files gets the sender a plain sentence.
-func (c *Connectors) media(ctx context.Context, b connectors.Binding, token string, refs []string) ([]inboundFile, string) {
+func (c *Connectors) media(ctx context.Context, b connectors.Binding, token string, refs []string, v hostmsg.Voice) ([]inboundFile, string) {
 	var (
 		out    []inboundFile
 		note   string
@@ -897,7 +1104,7 @@ func (c *Connectors) media(ctx context.Context, b connectors.Binding, token stri
 		start  = time.Now()
 	)
 	if limits.Receive.Bytes <= 0 {
-		return nil, sentNoFileAbility
+		return nil, v.T("no_file_ability")
 	}
 	for _, ref := range refs {
 		req := contract.ConnectorRequest{Op: contract.ConnectorOpMedia, Kind: b.Kind, Token: token, Media: ref}
@@ -912,26 +1119,26 @@ func (c *Connectors) media(ctx context.Context, b connectors.Binding, token stri
 		var ce *contract.ConnectorError
 		switch {
 		case errors.Is(ferr, errFileTooLarge) || (errors.As(err, &ce) && ce.Code == contract.ConnectorTooLarge):
-			note = sentFileTooBig(limits, f.Size)
+			note = c.sentFileTooBig(v, limits, f.Size)
 			c.auditFile(b, "in", f.Size, "too_large", limits.Receive, time.Since(start))
 			continue
 		case ferr != nil:
 			c.log.Warn("studio: could not read the file of a connector message", "binding", b.ID, "kind", b.Kind, "error", ferr)
 			if note == "" {
-				note = sentNoFile
+				note = v.T("no_file")
 			}
 			c.auditFile(b, "in", 0, "failed", limits.Receive, time.Since(start))
 			continue
 		}
 		if !typeAllowed(limits.ReceiveTypes, f.MIME) {
 			c.log.Warn("studio: a connector file has a type the kind does not declare", "binding", b.ID, "kind", b.Kind)
-			note = sentFileType
+			note = v.T("file_type")
 			c.auditFile(b, "in", f.Size, "type", limits.Receive, time.Since(start))
 			continue
 		}
 		// Files of one message may not add up to more than a few times the limit.
 		if total += f.Size; total > limits.Receive.Bytes*fileTurnFactor {
-			note = sentFileTotal
+			note = v.T("file_total")
 			c.auditFile(b, "in", f.Size, "total", limits.Receive, time.Since(start))
 			continue
 		}
@@ -948,7 +1155,7 @@ var errAgentGone = errors.New("the agent was deleted")
 // now, or when fresh asks for a new one. created says that the chat is new.
 func (c *Connectors) chatFor(ctx context.Context, b connectors.Binding, key, name string, fresh bool) (string, bool, error) {
 	if id, ok, err := c.o.Store.ChatOf(ctx, b.ID, key); err == nil && ok && !fresh {
-		if rec, err := c.svc.Get(ctx, b.Owner, id); err == nil && rec.AgentID == b.AgentID {
+		if rec, err := c.svc.Get(ctx, b.Owner, id); err == nil && rec.AgentID == b.AgentID && !c.svc.chatMoved(ctx, rec) {
 			c.followAgentModel(ctx, b, rec)
 			return id, false, nil
 		}
@@ -992,6 +1199,9 @@ func (c *Connectors) deliver(ctx context.Context, b connectors.Binding, token st
 	c.smu.Lock()
 	was := st.active
 	st.active = true
+	if was {
+		st.joining++
+	}
 	if was && st.grant != nil {
 		grant = st.grant.merge(grant)
 	}
@@ -999,6 +1209,9 @@ func (c *Connectors) deliver(ctx context.Context, b connectors.Binding, token st
 	c.smu.Unlock()
 	c.svc.access.set(chatID, grant)
 	ctx = withTurnGrant(ctx, grant)
+	if was && c.beforeJoin != nil {
+		c.beforeJoin()
+	}
 	var events <-chan session.Event
 	var cancel func()
 	if !was {
@@ -1008,11 +1221,17 @@ func (c *Connectors) deliver(ctx context.Context, b connectors.Binding, token st
 			st.active, st.grant = false, nil
 			c.smu.Unlock()
 			c.svc.access.clear(chatID)
-			c.say(b, token, m.Chat, m.Thread, sentUnavailable)
+			c.say(b, token, m.Chat, m.Thread, c.voice(ctx, b, m.SenderID, m.Chat).T("unavailable"))
 			return
 		}
 	}
-	if _, err := c.start(ctx, b, chatID, m.Text, up, earlier); err != nil {
+	_, err := c.start(ctx, b, chatID, m.Text, up, earlier)
+	if was {
+		c.smu.Lock()
+		st.joining--
+		c.smu.Unlock()
+	}
+	if err != nil {
 		if !was {
 			cancel()
 			c.smu.Lock()
@@ -1020,15 +1239,21 @@ func (c *Connectors) deliver(ctx context.Context, b connectors.Binding, token st
 			c.smu.Unlock()
 			c.svc.access.clear(chatID)
 		}
-		text := sentFailed
+		v := c.voice(ctx, b, m.SenderID, m.Chat)
+		text := v.T("failed")
 		if errors.Is(err, ErrAgentFolderLimit) {
 			c.log.Warn("studio: a connector message exceeds the folder limit", "binding", b.ID)
-			text = sentFolderLimit
+			text = v.T("folder_limit")
 		}
 		if errors.Is(err, ErrAgentFolderMissing) {
 			// The folder went away between the check and the turn.
 			c.log.Warn("studio: a connector message was refused: the agent's folder is missing", "binding", b.ID)
-			text = sentNoFolder
+			text = v.T("no_folder")
+		}
+		if errors.Is(err, ErrProjectUnavailable) {
+			// The project went away between the check and the turn.
+			c.log.Warn("studio: a connector message was refused: the agent's project is not available", "binding", b.ID)
+			text = v.T(projectKey(err))
 		}
 		c.say(b, token, m.Chat, m.Thread, text)
 		return
@@ -1078,9 +1303,34 @@ func (c *Connectors) reply(b connectors.Binding, token string, m contract.Connec
 	var poll <-chan time.Time
 	errText := ""
 	l, since, turn := c.startLive(b, token, m, pace), time.Now(), 0
+	// settle gives the chat up when it is idle (see settled).
+	settle := func() bool {
+		ok := c.settled(b, st, chatID, events)
+		if c.afterSettle != nil {
+			c.afterSettle(ok)
+		}
+		return ok
+	}
+	// quiet is set when settle saw a turn on its way and none of its events
+	// has come yet. The claim that starts a turn from the waiting messages is
+	// also held for a moment when it finds none, so that sign can be false:
+	// recheck then ends the reply instead of waiting for a turn that never
+	// comes, which would leave the sender refused as busy.
+	quiet := false
+	recheck := time.NewTicker(time.Second)
+	defer recheck.Stop()
 	for {
 		ended := false
+		var again <-chan time.Time
+		if quiet {
+			again = recheck.C
+		}
 		select {
+		case <-again:
+			if settle() {
+				return
+			}
+			continue
 		case ev, ok := <-events:
 			if !ok {
 				events = nil
@@ -1089,6 +1339,7 @@ func (c *Connectors) reply(b connectors.Binding, token string, m contract.Connec
 				poll = p.C
 				continue
 			}
+			quiet = false
 			l.observe(ev)
 			switch ev.Kind {
 			case session.KindError:
@@ -1110,25 +1361,47 @@ func (c *Connectors) reply(b connectors.Binding, token string, m contract.Connec
 		if !ended {
 			continue
 		}
-		ids := c.finish(b, token, m, l, c.answerOf(b, chatID, errText))
+		answer := c.answerOf(b, chatID, turn, errText, c.voice(context.Background(), b, m.SenderID, m.Chat))
+		ids := c.finish(b, token, m, l, answer)
 		c.remember(b, m, chatID, ids)
-		c.sendFiles(b, token, m, chatID, turn, since)
+		c.sendFiles(b, token, m, chatID, turn, since, answer)
 		errText = ""
-		c.smu.Lock()
-		tctx, tcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		info, err := c.svc.Turn(tctx, b.Owner, chatID) // under smu on purpose: a message that arrives now must see either the running turn or the cleared flag
-		tcancel()
-		if err == nil && info.Running {
-			c.smu.Unlock()
-			// A waiting message started the next turn.
-			l, since, turn = c.startLive(b, token, m, pace), time.Now(), 0
-			continue
+		if settle() {
+			return
 		}
-		st.active, st.grant = false, nil
-		c.smu.Unlock()
-		c.svc.access.clear(chatID)
-		return
+		// A waiting message started the next turn.
+		l, since, turn, quiet = c.startLive(b, token, m, pace), time.Now(), 0, true
 	}
+}
+
+// settled gives the chat up when it is idle. It reports false when another turn
+// runs, when its events are queued, or when one is on its way. The check is
+// under smu on purpose: a message that arrives now must see either the running
+// turn or the cleared flag.
+func (c *Connectors) settled(b connectors.Binding, st *senderState, chatID string, events <-chan session.Event) bool {
+	c.smu.Lock()
+	tctx, tcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	info, err := c.svc.Turn(tctx, b.Owner, chatID)
+	tcancel()
+	// A waiting message starts the next turn at once, and that turn may be
+	// over before this point; its events are then still queued.
+	if (err == nil && info.Running) || len(events) > 0 || st.joining > 0 {
+		c.smu.Unlock()
+		return false
+	}
+	// A turn that finished starts the next one from the waiting messages
+	// after it has announced its end, so for a moment the chat is idle with a
+	// message waiting. That turn needs this reply.
+	if err == nil && info.Last.Finished() {
+		if wait, perr := c.svc.Pending(context.Background(), b.Owner, chatID); perr == nil && len(wait) > 0 {
+			c.smu.Unlock()
+			return false
+		}
+	}
+	st.active, st.grant = false, nil
+	c.smu.Unlock()
+	c.svc.access.clear(chatID)
+	return true
 }
 
 // remember keeps the chat of the messages that hold an answer, in the thread
@@ -1145,7 +1418,7 @@ func (c *Connectors) remember(b connectors.Binding, m contract.ConnectorMessage,
 }
 
 // answerOf is what the sender reads for the turn that just ended.
-func (c *Connectors) answerOf(b connectors.Binding, chatID, errText string) string {
+func (c *Connectors) answerOf(b connectors.Binding, chatID string, turn int, errText string, v hostmsg.Voice) string {
 	var info store.TurnInfo
 	// The event comes before the store records the outcome, so look again for
 	// up to five seconds. Close ends the wait at once.
@@ -1168,21 +1441,21 @@ wait:
 	}
 	switch info.Last {
 	case store.TurnStopped:
-		return sentStopped
+		return v.T("stopped")
 	case store.TurnInterrupted:
-		return sentInterrupted
+		return v.T("interrupted")
 	case store.TurnFailed:
 		if errText == "" {
-			return sentFailed
+			return v.T("failed")
 		}
 		return errText
 	}
 	fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if t := strings.TrimSpace(c.svc.finalText(fctx, chatID)); t != "" {
+	if t := strings.TrimSpace(c.svc.finalTextOf(fctx, chatID, turn)); t != "" {
 		return t
 	}
-	return sentNoAnswer
+	return v.T("no_answer")
 }
 
 func isAgentMissing(err error) bool {
@@ -1193,7 +1466,16 @@ func isAgentMissing(err error) bool {
 // that user that has one. The title and the text go, never the link. The inbox
 // calls it on the frontend that stored the notification, so a notification is
 // sent once. It does not wait, and a failure is only logged.
+//
+// Only what a trigger or a connector sent goes to a chat: the person set those
+// up and wants to hear when a run ends or a connector stops. The news of the
+// system itself (a backend update, a finished install, the conversion of old
+// data) stays in the inbox and in browser push, so an administrator's phone is
+// not filled with it. A notification with no source is the system's.
 func (c *Connectors) Forward(ctx context.Context, n notify.Notification) {
+	if n.Source != notify.SourceTrigger && n.Source != notify.SourceConnector {
+		return
+	}
 	if c.closed() {
 		return
 	}
@@ -1215,5 +1497,17 @@ func (c *Connectors) Forward(ctx context.Context, n notify.Notification) {
 		if !c.spawn(func() { c.say(b, token, b.NotifyChat, "", text) }) {
 			return // closed meanwhile
 		}
+	}
+}
+
+// sleep waits for d or until ctx ends.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

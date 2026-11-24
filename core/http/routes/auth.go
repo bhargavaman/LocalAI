@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/http/auth"
 	"github.com/mudler/LocalAI/core/services/galleryop"
+	"github.com/mudler/xlog"
 	"gorm.io/gorm"
 )
 
@@ -120,6 +122,76 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(years) * 365 * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
+}
+
+// revokeAPIKeyHandler deletes a key of the signed-in user. A client key that is
+// deleted here is revoked like one deleted on /api/client/keys: onRevoke
+// stops the jobs the client started.
+func revokeAPIKeyHandler(db *gorm.DB, onRevoke func(ctx context.Context, ownerID, clientID string)) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		user := auth.GetUser(c)
+		if user == nil {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		}
+
+		keyID := c.Param("id")
+		var key auth.UserAPIKey
+		isClient := db.Where("id = ? AND user_id = ?", keyID, user.ID).First(&key).Error == nil && key.IsClientKey()
+		if err := auth.RevokeAPIKey(db, keyID, user.ID); err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
+		}
+		if isClient && onRevoke != nil {
+			onRevoke(context.WithoutCancel(c.Request().Context()), user.ID, keyID)
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "API key revoked"})
+	}
+}
+
+// AdminListUsersHandler answers GET /api/auth/admin/users. Mount it behind the
+// admin check: besides the account it carries two admin-only fields, when the
+// person was last active (lastActiveAt, null until they made an authenticated
+// request) and how many API keys they hold (apiKeyCount, a number, never the
+// keys or their names).
+func AdminListUsersHandler(db *gorm.DB) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var users []auth.User
+		if err := db.Order("created_at ASC").Find(&users).Error; err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list users"})
+		}
+
+		// Admin-only fields: when a person was last active and how many API
+		// keys they hold (a count, never the keys).
+		keyCounts, err := auth.CountAPIKeysByUser(db)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list users"})
+		}
+
+		result := make([]map[string]any, 0, len(users))
+		for _, u := range users {
+			entry := map[string]any{
+				"id":        u.ID,
+				"email":     u.Email,
+				"name":      u.Name,
+				"avatarUrl": u.AvatarURL,
+				"role":      u.Role,
+				"status":    u.Status,
+				"provider":  u.Provider,
+				"createdAt": u.CreatedAt,
+				// null until the person makes an authenticated request.
+				"lastActiveAt": u.LastActiveAt,
+				"apiKeyCount":  keyCounts[u.ID],
+			}
+			entry["permissions"] = auth.GetPermissionMapForUser(db, &u)
+			entry["allowed_models"] = auth.GetModelAllowlist(db, u.ID)
+			if quotas, err := auth.GetQuotaStatuses(db, u.ID); err == nil && len(quotas) > 0 {
+				entry["quotas"] = quotas
+			}
+			result = append(result, entry)
+		}
+
+		return c.JSON(http.StatusOK, map[string]any{"users": result})
+	}
 }
 
 // RegisterAuthRoutes registers authentication-related API routes.
@@ -748,19 +820,7 @@ func RegisterAuthRoutes(e *echo.Echo, app *application.Application) {
 	})
 
 	// DELETE /api/auth/api-keys/:id - revoke API key
-	e.DELETE("/api/auth/api-keys/:id", func(c echo.Context) error {
-		user := auth.GetUser(c)
-		if user == nil {
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
-		}
-
-		keyID := c.Param("id")
-		if err := auth.RevokeAPIKey(db, keyID, user.ID); err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
-		}
-
-		return c.JSON(http.StatusOK, map[string]string{"message": "API key revoked"})
-	})
+	e.DELETE("/api/auth/api-keys/:id", revokeAPIKeyHandler(db, clientJobsCanceller(app)))
 
 	// PATCH /api/auth/api-keys/:id - pause or resume an API key
 	e.PATCH("/api/auth/api-keys/:id", func(c echo.Context) error {
@@ -877,34 +937,7 @@ func RegisterAuthRoutes(e *echo.Echo, app *application.Application) {
 	}, adminMw)
 
 	// GET /api/auth/admin/users - list all users
-	e.GET("/api/auth/admin/users", func(c echo.Context) error {
-		var users []auth.User
-		if err := db.Order("created_at ASC").Find(&users).Error; err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list users"})
-		}
-
-		result := make([]map[string]any, 0, len(users))
-		for _, u := range users {
-			entry := map[string]any{
-				"id":        u.ID,
-				"email":     u.Email,
-				"name":      u.Name,
-				"avatarUrl": u.AvatarURL,
-				"role":      u.Role,
-				"status":    u.Status,
-				"provider":  u.Provider,
-				"createdAt": u.CreatedAt,
-			}
-			entry["permissions"] = auth.GetPermissionMapForUser(db, &u)
-			entry["allowed_models"] = auth.GetModelAllowlist(db, u.ID)
-			if quotas, err := auth.GetQuotaStatuses(db, u.ID); err == nil && len(quotas) > 0 {
-				entry["quotas"] = quotas
-			}
-			result = append(result, entry)
-		}
-
-		return c.JSON(http.StatusOK, map[string]any{"users": result})
-	}, adminMw)
+	e.GET("/api/auth/admin/users", AdminListUsersHandler(db), adminMw)
 
 	// PUT /api/auth/admin/users/:id/role - change user role
 	e.PUT("/api/auth/admin/users/:id/role", func(c echo.Context) error {
@@ -1196,6 +1229,11 @@ func RegisterAuthRoutes(e *echo.Echo, app *application.Application) {
 		if admin == nil {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		}
+		// An invite records its creator, and the static API key has no account
+		// row to record: the insert would fail on the creator foreign key.
+		if admin.ID == "legacy-api-key" {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "a named account is required to create invites; sign in with a user account instead of the static API key"})
+		}
 
 		var body struct {
 			ExpiresInHours int `json:"expiresInHours"`
@@ -1220,6 +1258,7 @@ func RegisterAuthRoutes(e *echo.Echo, app *application.Application) {
 			ExpiresAt:  time.Now().Add(time.Duration(body.ExpiresInHours) * time.Hour),
 		}
 		if err := db.Create(invite).Error; err != nil {
+			xlog.Error("failed to create invite", "creator", admin.ID, "error", err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create invite"})
 		}
 

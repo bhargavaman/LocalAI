@@ -52,12 +52,18 @@ func (s *Service) grantUsable(ctx context.Context, user, grant string) bool {
 			return false
 		}
 		return s.changes.grantsAKind(grant)
+	case builtins.GrantKnowledgeWrite:
+		return s.changes != nil && s.changes.grantsAKind(grant) && s.knowledgeAvailable(ctx, user)
 	case builtins.GrantTriggersPropose, builtins.GrantTriggersRun:
 		return s.triggers != nil && s.mayUseTriggers(ctx, user) == nil
 	case builtins.GrantFilesUpload, builtins.GrantActFiles:
 		return s.d.Files.Available()
 	case builtins.GrantSavedAgents:
 		return s.d.Agents != nil
+	case builtins.GrantHistoryRead:
+		return s.historyAvailable()
+	case builtins.GrantProjectMemoryWrite:
+		return s.d.Files.Available() && s.changes != nil && s.d.Projects != nil
 	}
 	return builtins.ValidGrant(grant)
 }
@@ -82,7 +88,7 @@ func (s *Service) AgentGrants(ctx context.Context, user, agentID string) []strin
 	if s.d.Agents == nil || agentID == "" {
 		return nil
 	}
-	ag, err := s.d.Agents.Get(ctx, principal(user), agentID)
+	ag, err := s.chatAgent(ctx, principal(user), agentID)
 	if err != nil {
 		return nil
 	}
@@ -133,7 +139,7 @@ func (s *Service) checkAnyChangeGrant(ctx context.Context, user, agentID string,
 		return nil
 	}
 	for _, g := range s.AgentGrants(ctx, user, agentID) {
-		if s.changes.grantsAKind(g) {
+		if s.changes.grantsAKind(g) || g == builtins.GrantProjectMemoryWrite {
 			return nil
 		}
 	}

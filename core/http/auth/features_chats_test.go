@@ -2,6 +2,8 @@
 package auth_test
 
 import (
+	"strings"
+
 	. "github.com/mudler/LocalAI/core/http/auth"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -42,12 +44,18 @@ var _ = Describe("Chats feature registration", func() {
 			"POST /api/chats/agents",
 			"GET /api/chats/agents/templates",
 			"GET /api/chats/agents/builtin-grants",
+			"GET /api/chats/agents/addons/:addon/resources",
 			"POST /api/chats/agents/templates/:id/create",
 			"POST /api/chats/agents/import",
 			"GET /api/chats/agents/:id/export",
 			"GET /api/chats/agents/:id/runs",
+			"POST /api/chats/agents/:id/share",
+			"GET /api/chats/agents/:id/references",
+			"GET /api/chats/agents/:id/needs",
+			"GET /api/chats/projects/:id/agents",
 			"GET /api/chats/agents/:id",
 			"PUT /api/chats/agents/:id",
+			"PUT /api/chats/agents/:id/project",
 			"DELETE /api/chats/agents/:id",
 		))
 		Expect(AgentFeatures).To(ContainElement(FeatureAgents))
@@ -71,6 +79,7 @@ var _ = Describe("Chats feature registration", func() {
 			}
 		}
 		Expect(routes).To(ConsistOf(
+			"GET /api/chats/projects/:id/triggers",
 			"GET /api/chats/triggers",
 			"POST /api/chats/triggers",
 			"GET /api/chats/triggers/preview",
@@ -89,6 +98,7 @@ var _ = Describe("Chats feature registration", func() {
 			"PUT /api/chats/triggers/:id",
 			"DELETE /api/chats/triggers/:id",
 			"POST /api/chats/triggers/:id/run",
+			"POST /api/chats/triggers/:id/secret",
 			"POST /api/chats/triggers/:id/enable",
 			"POST /api/chats/triggers/:id/disable",
 			"GET /api/chats/triggers/:id/runs",
@@ -114,20 +124,26 @@ var _ = Describe("Chats feature registration", func() {
 			}
 		}
 		Expect(routes).To(ConsistOf(
+			"GET /api/chats/projects/:id/connections",
 			"GET /api/chats/connectors",
 			"GET /api/chats/connectors/kinds",
 			"POST /api/chats/connectors",
 			"GET /api/chats/connectors/:id",
 			"PUT /api/chats/connectors/:id",
 			"DELETE /api/chats/connectors/:id",
+			"POST /api/chats/connectors/:id/share",
 			"POST /api/chats/connectors/:id/enable",
 			"POST /api/chats/connectors/:id/disable",
 			"POST /api/chats/connectors/:id/test",
 			"GET /api/chats/connectors/:id/senders",
 			"POST /api/chats/connectors/:id/senders/:sender/allow",
 			"GET /api/chats/connectors/:id/access",
+			"POST /api/chats/connectors/:id/access/preview",
 			"POST /api/chats/connectors/:id/pairing",
 			"DELETE /api/chats/connectors/:id/paired/:sender",
+			"POST /api/chats/connectors/:id/oauth/start",
+			"POST /api/chats/connectors/:id/oauth/disconnect",
+			"GET /api/chats/connectors/oauth/callback",
 		))
 		Expect(AgentFeatures).To(ContainElement(FeatureConnectors))
 		Expect(APIFeatures).NotTo(ContainElement(FeatureConnectors))
@@ -172,6 +188,24 @@ var _ = Describe("Chats feature registration", func() {
 			if r.Feature == FeatureChats {
 				Expect(r.Pattern).NotTo(MatchRegexp(`/api/chats/(agents|triggers|connectors)(/|$)`), r.Method+" "+r.Pattern)
 			}
+		}
+	})
+
+	It("gates the shared project routes with the chats feature, read only", func() {
+		want := map[string]bool{"GET /api/chats/projects/shared": false, "GET /api/chats/projects/shared/:ref": false,
+			"GET /api/chats/projects/shared/:ref/memory": false}
+		for _, r := range RouteFeatureRegistry {
+			key := r.Method + " " + r.Pattern
+			if _, ok := want[key]; ok {
+				Expect(r.Feature).To(Equal(FeatureChats), key)
+				want[key] = true
+			}
+			if strings.Contains(r.Pattern, "projects/shared") {
+				Expect(r.Method).To(Equal("GET"), key)
+			}
+		}
+		for k, seen := range want {
+			Expect(seen).To(BeTrue(), k)
 		}
 	})
 

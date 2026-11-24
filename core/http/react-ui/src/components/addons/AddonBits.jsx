@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import Icon from '../Icon'
 import StatusChip from '../ui/StatusChip'
 import Button from '../ui/Button'
-import { addedByEntry, hueOf, monogram, stateChip, versionLabel } from './addonState'
+import Callout from '../ui/Callout'
+import { addedByEntry, hueOf, monogram, operationOf, stateChip, versionLabel } from './addonState'
 import { installSteps } from './installSteps'
 import './addons.css'
 
@@ -18,6 +20,23 @@ export function StateChip({ app, className = '' }) {
   return (
     <span className={`ad-state ${className}`.trim()} data-tone={chip.tone} data-state={chip.key} role="img" aria-label={t('state.label', { state: text })}>
       <StatusChip status={CHIP_STATUS[chip.key]} label={text} dot />
+    </span>
+  )
+}
+
+// The operation the owner runs on an add-on now ("Upgrading… Downloading and
+// checking"). It is separate from the process state: the old generation can
+// keep running while the next one is fetched and checked.
+export function OperationChip({ app, className = '', upgrading = null }) {
+  const { t } = useTranslation('addons')
+  // An upgrade this browser follows tells its state before the owner's own
+  // list does: waiting for a slot, or at work.
+  const op = operationOf(app) || (upgrading ? { kind: 'upgrade', phase: upgrading.phase === 'queued' ? 'queued' : 'working', since: '' } : null)
+  if (!op) return null
+  const text = `${t(`operation.kind.${op.kind}`)} · ${t(`operation.phase.${op.phase}`)}`
+  return (
+    <span className={`ad-state ${className}`.trim()} data-tone="accent" data-testid="operation-chip" data-operation={op.kind} data-phase={op.phase} role="img" aria-label={t('operation.label', { operation: text })}>
+      <StatusChip status="starting" label={text} />
     </span>
   )
 }
@@ -47,13 +66,15 @@ export function ApprovalChip() {
   )
 }
 
-// The identity tile of an add-on: its icon from the host's own icon route, or
-// its first letter on a colour of its own (a hue from its id), so two add-ons
-// in the sidebar or the list never look the same. Never a remote address: the
-// server sends only a same-origin path.
+// The identity tile of an add-on: its icon from the host's own icon route. When
+// the host has no file to serve (the add-on is not installed yet, or the file
+// does not load) the tile is drawn here: a colour from the id and the first
+// letter of the name. The same rounded tile either way, so a list never mixes shapes. Never
+// a remote address: the server sends only a same-origin path.
 export function AppIcon({ src, id, name, size = 36 }) {
-  if (src && src.startsWith('/')) {
-    return <img className="ad-icon" data-size={size} src={src} alt="" width={size} height={size} loading="lazy" decoding="async" />
+  const [failed, setFailed] = useState(false)
+  if (src && src.startsWith('/') && !failed) {
+    return <img className="ad-icon" data-size={size} src={src} alt="" width={size} height={size} loading="lazy" decoding="async" onError={() => setFailed(true)} />
   }
   return (
     <span className="ad-icon ad-icon--mark" data-size={size} data-hue={hueOf(id || name)} aria-hidden="true">
@@ -74,6 +95,16 @@ export function VersionText({ version }) {
   if (!v.text) return null
   if (v.dev) return <span className="ad-dev" title={v.text}>{t('meta.devBuild')}</span>
   return <span className="ad-version">{v.text}</span>
+}
+
+// The warning for an add-on that does not come from the official library.
+// See untrustedSource for when it shows. When the library pins a signer (see
+// signedBy) the notice says who signed it and that LocalAI did not review it;
+// the warning still applies, so the install confirmation stays.
+export function UntrustedNotice({ library, signer = '', testId = 'untrusted-source' }) {
+  const { t } = useTranslation('addons')
+  if (signer) return <Callout tone="warn" testId={testId} data-signer={signer}>{t('hostAccess.signedNotReviewed', { signer })}</Callout>
+  return <Callout tone="warn" testId={testId}>{t('hostAccess.notOfficialWarning', { library })}</Callout>
 }
 
 // What a library entry adds, before it is installed: "Adds a page" when it has

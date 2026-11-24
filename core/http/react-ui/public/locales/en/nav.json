@@ -42,18 +42,19 @@
     "audioTransform": "Audio Transform",
     "faceRecognition": "Face Recognition",
     "voiceRecognition": "Voice Recognition",
+    "projects": "Projects",
     "agents": "Agents",
     "skills": "Skills",
-    "memory": "Memory",
+    "memory": "Knowledge",
     "mcpJobs": "MCP CI Jobs",
     "usage": "Usage",
-    "users": "Users and keys",
+    "users": "Users",
     "middleware": "Middleware",
     "backends": "Backends",
     "voiceLibrary": "Voice Library",
     "traces": "Traces",
-    "nodes": "Nodes",
-    "scheduling": "Placement rules",
+    "nodes": "Workers",
+    "scheduling": "Placement",
     "swarm": "Swarm",
     "system": "System",
     "settings": "Settings",
@@ -63,7 +64,7 @@
     "thisMachine": "This machine",
     "failover": "Failover",
     "logs": "Logs",
-    "p2p": "P2P",
+    "p2p": "Sharing",
     "trafficModels": "Models",
     "gpuHost": "GPU and host",
     "prometheus": "Prometheus",
@@ -71,10 +72,12 @@
     "chats": "Chats",
     "files": "Files",
     "triggers": "Triggers",
-    "mcpConnectors": "MCP connectors",
+    "connections": "Connections",
     "chatsAdmin": "Chats of all users",
     "pages": "Pages",
-    "allChats": "All chats"
+    "allChats": "All chats",
+    "inbox": "Notifications",
+    "apiKeys": "API keys"
   },
   "footer": {
     "github": "GitHub",
@@ -109,7 +112,8 @@
       "addons": "Install, turn on and open add-ons.",
       "triggers": "Start a chat by itself, on a schedule or when a file arrives."
     },
-    "operateSupporting": "What runs on this server, how it is used, and how it is set up."
+    "operateSupporting": "What runs on this server, how it is used, and how it is set up.",
+    "updates": "Updates"
   },
   "pinnedPages": "Pinned pages",
   "new": "New",
@@ -118,5 +122,57 @@
   "untitledChat": "Untitled chat",
   "chatRunning": "Working",
   "automatedWaiting": "Automated chats waiting for you: {{count}}",
-  "automatedRunning": "Automated chats running: {{count}}"
+  "automatedRunning": "Automated chats running: {{count}}",
+  "inboxUnread_one": "Notifications, {{count}} unread",
+  "inboxUnread_other": "Notifications, {{count}} unread",
+  "inboxArrived": "New notification: {{title}}",
+  "inboxArrivedMany_one": "{{count}} new notification",
+  "inboxArrivedMany_other": "{{count}} new notifications",
+  "updatesBadge_one": "{{count}} update needs you",
+  "updatesBadge_other": "{{count}} updates need you",
+  "inboxOps_one": "{{count}} operation in progress",
+  "inboxOps_other": "{{count}} operations in progress",
+  "inboxOpsFailed_one": "{{count}} operation failed",
+  "inboxOpsFailed_other": "{{count}} operations failed",
+  "inboxOpsFailedAnnounce": "An operation failed. See the Activity tab in Notifications.",
+  "activityEntry": "Activity",
+  "navLinkExternal": "Opens {{site}} in a new tab after you confirm",
+  "navLinkAsk": "Open this link?",
+  "startPage": "Start page",
+  "admin": {
+    "nav": {
+      "overview": "Overview",
+      "apiReference": "API reference",
+      "back": "Back to {{name}}",
+      "search": "Search",
+      "label": "Administration",
+      "crumbs": "Breadcrumb"
+    },
+    "groups": {
+      "machine": "This machine",
+      "cluster": "Cluster",
+      "runtime": "Models and runtime",
+      "access": "Access"
+    },
+    "palette": {
+      "label": "Search Administration",
+      "input": "Search pages, people, workers and settings",
+      "placeholder": "Search pages, people, workers, settings",
+      "results": "Results",
+      "none": "Nothing matches \"{{query}}\".",
+      "move": "move",
+      "open": "open",
+      "kinds": {
+        "page": "Pages",
+        "setting": "Settings",
+        "worker": "Workers",
+        "person": "People"
+      }
+    },
+    "filters": {
+      "label": "Filters",
+      "active": "{{count}} set",
+      "sort": "Sort"
+    }
+  }
 }

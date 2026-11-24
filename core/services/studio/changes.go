@@ -15,7 +15,9 @@ import (
 
 	"github.com/mudler/LocalAI/core/services/studio/builtins"
 	"github.com/mudler/LocalAI/core/services/studio/files"
+	"github.com/mudler/LocalAI/core/services/studio/projects"
 	"github.com/mudler/LocalAI/core/services/studio/proposals"
+	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/workspace"
 	"github.com/mudler/LocalAI/pkg/addons/contract"
 )
@@ -41,6 +43,11 @@ var (
 	ErrNotApplied = errors.New("studio: only a change that was applied can be reverted")
 	// ErrCannotRevert means later edits of the file stop the revert.
 	ErrCannotRevert = errors.New("studio: the file was edited since; change it in Files")
+	// ErrProposalVoid means a note that someone proposed for a shared project can
+	// no longer be applied: the project is not shared with that person for
+	// editing any more, or it is gone, moved or archived. The proposal is
+	// settled as stale and nothing is written.
+	ErrProposalVoid = errors.New("studio: this proposal can no longer be applied")
 	// ErrNothingToRevert means the scope has no applied change.
 	ErrNothingToRevert = errors.New("studio: there is no applied change to revert")
 )
@@ -94,6 +101,16 @@ type ProposeInput struct {
 	Target      string
 	Content     string
 	Summary     string
+	// Project is the ID of the project a note with scope project is for. The
+	// host sets it from the chat; it is never read from the model.
+	Project string
+	// PulledRef is the reference ("s:<node>") of a project that another person
+	// shares with User for editing, for a note with scope project. The host
+	// checks it against the chat before it is set. Propose resolves it again
+	// as User: the grant must be a write grant and the project active. The note
+	// is then stored for the project's owner, who confirms it, with User as
+	// the proposer. Never with Auto.
+	PulledRef string
 	// Auto marks a memory note that the host applies at once because the
 	// person chose so. Only a chat of the person (Source.Kind "") can set it.
 	Auto bool
@@ -108,8 +125,19 @@ func (c *Changes) audit(ctx context.Context, action string, p contract.ChangePro
 	if p.Auto && detail == "" {
 		detail = "automatic: the person chose to save memory notes at once"
 	}
-	ev := proposals.Event{At: c.s.now().UTC(), Owner: p.Owner, Action: action, Proposal: p.ID, Kind: p.Kind, Scope: p.Scope,
-		Target: p.Target, Agent: p.Agent, Source: p.Source, Rev: rev, Hash: hashOf(p.Content), Detail: detail}
+	owner, agent, source := p.Owner, p.Agent, p.Source
+	if p.Proposer != "" {
+		if action == proposals.ActionRefuse {
+			// A refusal of what a person proposed to another is theirs: it
+			// goes to their own audit, so nobody fills the owner's.
+			owner = p.Proposer
+		} else {
+			// The owner reads this line: nothing of the proposer's chat.
+			agent, source = "", contract.ChangeSource{Kind: p.Source.Kind}
+		}
+	}
+	ev := proposals.Event{At: c.s.now().UTC(), Owner: owner, Action: action, Proposal: p.ID, Kind: p.Kind, Scope: p.Scope,
+		Target: p.Target, Agent: agent, Source: source, Rev: rev, Hash: hashOf(p.Content), Detail: detail}
 	if err := c.store.AddEvent(ctx, ev); err != nil {
 		c.s.log.Warn("studio: could not write the change audit", "action", action, "proposal", p.ID, "error", err)
 	}
@@ -125,6 +153,9 @@ func (c *Changes) sweep(ctx context.Context) {
 	}
 	for _, p := range done {
 		c.audit(ctx, proposals.ActionExpire, p, 0, "")
+		if p.Kind == addonHoldKind && c.s.connectors != nil {
+			c.s.connectors.holdLapsed(ctx, p)
+		}
 	}
 }
 
@@ -153,26 +184,64 @@ func (c *Changes) Propose(ctx context.Context, in ProposeInput) (contract.Change
 		return contract.ChangeProposal{}, fmt.Errorf("%w: kind must be one of %v", ErrBadChange, c.kinds.Names())
 	}
 	if !contract.ValidChangeScope(in.Scope) {
-		return contract.ChangeProposal{}, fmt.Errorf("%w: scope must be user, agent or channel", ErrBadChange)
+		return contract.ChangeProposal{}, fmt.Errorf("%w: scope must be user, agent, channel or project", ErrBadChange)
 	}
-	p := contract.ChangeProposal{V: contract.ChangeProposalVersion, ID: uuid.NewString(), Owner: principal(in.User), Agent: in.Agent,
+	// actor is the person whose chat proposes. Owner is whose home is written
+	// and who confirms: the actor, until a shared project says otherwise.
+	actor := principal(in.User)
+	p := contract.ChangeProposal{V: contract.ChangeProposalVersion, ID: uuid.NewString(), Owner: actor, Agent: in.Agent,
 		Kind: kind.Name, Scope: contract.ChangeScope(in.Scope), Summary: cleanSummary(in.Summary), Content: in.Content, Source: in.Source,
 		Status: contract.ProposalPending, Auto: in.Auto}
-	if in.Auto && (in.Source.Kind != "" || kind.Name != contract.ChangeMemory) {
+	if in.Auto && !c.autoAllowed(ctx, in, kind.Name) {
 		// Defence in depth: the tool decides this too, but nothing but a memory
-		// note from the person's own chat is ever applied unasked.
+		// note from the person's own chat, or a note to the conversation of a
+		// paired sender in a private chat that the person allowed, is ever
+		// applied unasked.
 		c.audit(ctx, proposals.ActionRefuse, p, 0, "automatic save is for a memory note from the person's own chat")
 		return contract.ChangeProposal{}, fmt.Errorf("%w: only a memory note from your own chat can be saved at once", ErrBadChange)
 	}
-	if err := c.s.checkChangeGrant(ctx, p.Owner, in.Agent, in.Source, kind.Grant); err != nil {
+	grant := kind.Grant
+	if kind.Name == contract.ChangeMemory && p.Scope == contract.ScopeProject && c.s.projectAgentID(ctx, actor, in.Agent) {
+		// A note for the project of a project agent needs the grant of the
+		// project, not the one for the notes of the person.
+		grant = builtins.GrantProjectMemoryWrite
+	}
+	if err := c.s.checkChangeGrant(ctx, actor, in.Agent, in.Source, grant); err != nil {
 		c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
 		return contract.ChangeProposal{}, err
 	}
-	if err := c.gate.Allow(ctx, proposals.Request{Action: proposals.GatePropose, User: p.Owner, Agent: in.Agent, Kind: p.Kind, Scope: p.Scope, Source: in.Source}); err != nil {
+	if err := c.gate.Allow(ctx, proposals.Request{Action: proposals.GatePropose, User: actor, Agent: in.Agent, Kind: p.Kind, Scope: p.Scope, Source: in.Source}); err != nil {
 		c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
 		return contract.ChangeProposal{}, err
 	}
 	aim := proposals.Aim{Scope: p.Scope, Agent: in.Agent, Target: in.Target, Source: in.Source}
+	switch {
+	case in.PulledRef != "":
+		// A note for a project shared with the proposer. Only a plain memory
+		// note with scope project, never saved at once.
+		if kind.Name != contract.ChangeMemory || p.Scope != contract.ScopeProject || in.Auto || in.Project != "" {
+			c.audit(ctx, proposals.ActionRefuse, p, 0, "a shared project takes only a confirmed memory note")
+			return contract.ChangeProposal{}, fmt.Errorf("%w: a project shared with you takes only a memory note with scope project", ErrBadChange)
+		}
+		sh, err := c.s.sharedWritable(ctx, actor, in.PulledRef)
+		if err != nil {
+			c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
+			return contract.ChangeProposal{}, fmt.Errorf("%w: %s", ErrBadChange, err)
+		}
+		if _, ok := sharedMemoryDir(sh); !ok {
+			c.audit(ctx, proposals.ActionRefuse, p, 0, "the folder of the shared project is not where it is expected")
+			return contract.ChangeProposal{}, fmt.Errorf("%w: the folder of the project is not where it is expected; nothing was proposed", ErrBadChange)
+		}
+		p.Owner, p.Proposer, p.ProjectNode = sh.OwnerPrincipal, actor, sh.Node
+		aim.Project = sh.Slug
+	case p.Scope == contract.ScopeProject && kind.Name == contract.ChangeMemory:
+		dir, err := c.s.projectMemoryDirOf(ctx, in.User, in.Project)
+		if err != nil {
+			c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
+			return contract.ChangeProposal{}, fmt.Errorf("%w: %s", ErrBadChange, err)
+		}
+		aim.Project = dir
+	}
 	rel, err := kind.Path(aim)
 	if err != nil {
 		return contract.ChangeProposal{}, fmt.Errorf("%w: %s", ErrBadChange, strings.TrimPrefix(err.Error(), proposals.ErrBadTarget.Error()+": "))
@@ -186,11 +255,17 @@ func (c *Changes) Propose(ctx context.Context, in ProposeInput) (contract.Change
 	case p.Summary == "":
 		return contract.ChangeProposal{}, fmt.Errorf("%w: give a short summary of the change", ErrBadChange)
 	}
-	snap, err := c.snapshot(ctx, p.Owner, kind, rel, in.Content)
-	if err != nil {
-		return contract.ChangeProposal{}, err
+	var snap snap
+	if kind.Dest == nil {
+		if snap, err = c.snapshot(ctx, p.Owner, kind, rel, in.Content); err != nil {
+			return contract.ChangeProposal{}, c.neutral(p, err)
+		}
 	}
 	if err := c.check(ctx, p.Owner, kind, aim, rel, in.Content, snap); err != nil {
+		return contract.ChangeProposal{}, c.neutral(p, err)
+	}
+	if err := c.prepare(ctx, kind, p); err != nil {
+		c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
 		return contract.ChangeProposal{}, err
 	}
 	p.BaseHash = snap.hash
@@ -200,15 +275,85 @@ func (c *Changes) Propose(ctx context.Context, in ProposeInput) (contract.Change
 	c.sweep(ctx)
 	now := c.s.now().UTC()
 	p.Created, p.Expires = now, now.Add(contract.ChangeExpiry)
-	lim := proposals.Limits{MaxPending: contract.MaxPendingChanges, PerWindow: contract.MaxChangesPerHour, Window: time.Hour}
+	lim := proposals.Limits{MaxPending: contract.MaxPendingChanges, MaxPendingProject: contract.MaxPendingPerProject,
+		PerWindow: contract.MaxChangesPerHour, Window: time.Hour}
 	if err := c.store.Create(ctx, p, lim); err != nil {
-		if errors.Is(err, proposals.ErrTooManyPending) || errors.Is(err, proposals.ErrRateLimited) {
+		if errors.Is(err, proposals.ErrTooManyPending) || errors.Is(err, proposals.ErrRateLimited) || errors.Is(err, proposals.ErrTooManyForProject) {
 			c.audit(ctx, proposals.ActionRefuse, p, 0, err.Error())
 		}
 		return contract.ChangeProposal{}, err
 	}
-	c.audit(ctx, proposals.ActionPropose, p, 0, "")
-	return p, nil
+	detail := ""
+	if p.Proposer != "" {
+		detail = "proposed by " + c.nameOf(ctx, p.Proposer) + " for a project shared with them"
+	}
+	c.audit(ctx, proposals.ActionPropose, p, 0, detail)
+	return c.named(ctx, withWarning(p)), nil
+}
+
+// neutral words a failure to read the project of another person: the proposer
+// never reads a path or an error from the owner's side. The cause is logged.
+// A refusal about the proposer's own content (a size, a budget, a name) is
+// not about the owner's side, so it passes unchanged.
+func (c *Changes) neutral(p contract.ChangeProposal, err error) error {
+	var src *proposals.SourceError
+	if p.Proposer == "" || (errors.Is(err, ErrBadChange) && !errors.As(err, &src)) {
+		return err
+	}
+	c.s.log.Warn("studio: a note for a shared project could not be checked", "proposal", p.ID, "error", err)
+	return fmt.Errorf("%w: the project cannot be read now (it may have been moved or deleted), so nothing was proposed", ErrBadChange)
+}
+
+// nameOf is the display name of a person, never the account.
+func (c *Changes) nameOf(ctx context.Context, user string) string {
+	if c.s.d.Projects == nil {
+		return "Another user"
+	}
+	return c.s.d.Projects.DisplayName(ctx, user)
+}
+
+// named replaces the account of the proposer of a record by a display name,
+// for a record that leaves the host's own code: the owner reads who proposed,
+// never the account.
+//
+// The agent and the chat of the proposer are the proposer's own: of the source
+// only its kind stays (the binding, chat, thread and sender are theirs, and a
+// sender is the personal ID of a person on a messaging platform).
+func (c *Changes) named(ctx context.Context, p contract.ChangeProposal) contract.ChangeProposal {
+	if p.Proposer != "" {
+		p.Proposer = c.nameOf(ctx, p.Proposer)
+		p.Agent, p.Source = "", contract.ChangeSource{Kind: p.Source.Kind}
+	}
+	return p
+}
+
+// fetch reads one proposal of the owner from the store, with its warning and
+// the display name of its proposer.
+func (c *Changes) fetch(ctx context.Context, owner, id string) (contract.ChangeProposal, error) {
+	p, err := c.store.Get(ctx, owner, id)
+	if err != nil {
+		return p, err
+	}
+	return c.named(ctx, withWarning(p)), nil
+}
+
+// withWarning adds the warning of the threat scan to a proposal. It is worked
+// out at each read, so a change of the patterns reaches the proposals that wait.
+func withWarning(p contract.ChangeProposal) contract.ChangeProposal {
+	p.Warning = knowledgeWarning(p)
+	return p
+}
+
+// prepare asks the destination of a kind that has one whether it can take the
+// change now. A kind that writes to the home has nothing to ask.
+func (c *Changes) prepare(ctx context.Context, kind proposals.Kind, p contract.ChangeProposal) error {
+	if kind.Dest == nil || kind.Dest.Prepare == nil {
+		return nil
+	}
+	if err := kind.Dest.Prepare(ctx, proposals.ApplyInput{Owner: p.Owner, Proposal: p}); err != nil {
+		return fmt.Errorf("%w: %s", ErrBadChange, err)
+	}
+	return nil
 }
 
 // snap is the state of what a change would write, for the base hash.
@@ -249,7 +394,7 @@ func (c *Changes) snapshot(ctx context.Context, owner string, kind proposals.Kin
 	for _, f := range fs {
 		cur, exists, err := c.s.d.Files.ReadHome(ctx, owner, f.Path, maxTargetRead)
 		if err != nil {
-			return snap{}, fmt.Errorf("%w: cannot read %s: %v", ErrBadChange, f.Path, err)
+			return snap{}, fmt.Errorf("%w: cannot read %s: %w", ErrBadChange, f.Path, &proposals.SourceError{Err: err})
 		}
 		out.exists = out.exists || exists
 		out.same = out.same && exists && cur == f.Content
@@ -281,14 +426,18 @@ func (c *Changes) check(ctx context.Context, owner string, kind proposals.Kind, 
 		return c.s.d.Files.ReadHome(ctx, owner, p, maxTargetRead)
 	}})
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrBadChange, err)
+		return fmt.Errorf("%w: %w", ErrBadChange, err)
 	}
 	return nil
 }
 
 // aimOf rebuilds where a stored proposal writes, for the checks at confirm.
 func aimOf(p contract.ChangeProposal) proposals.Aim {
-	return proposals.Aim{Scope: p.Scope, Agent: p.Agent, Target: targetName(p), Source: p.Source}
+	a := proposals.Aim{Scope: p.Scope, Agent: p.Agent, Target: targetName(p), Source: p.Source}
+	if p.Scope == contract.ScopeProject {
+		a.Project = proposals.ProjectOfPath(p.Target)
+	}
+	return a
 }
 
 // targetName is the name the model gave, recovered from the stored path: the
@@ -298,7 +447,7 @@ func targetName(p contract.ChangeProposal) string {
 	switch p.Kind {
 	case contract.ChangeSkill:
 		t = strings.TrimSuffix(t, "/SKILL.md")
-	case contract.ChangeMemory, contract.ChangeProfile, contract.ChangeDashboard:
+	case contract.ChangeMemory, contract.ChangeProfile, contract.ChangeDashboard, contract.ChangeKnowledge:
 		return t
 	}
 	if i := strings.LastIndexByte(t, '/'); i >= 0 {
@@ -311,13 +460,37 @@ func targetName(p contract.ChangeProposal) string {
 // settled first.
 func (c *Changes) List(ctx context.Context, user string, statuses ...contract.ProposalStatus) ([]contract.ChangeProposal, error) {
 	c.sweep(ctx)
-	return c.store.List(ctx, principal(user), statuses...)
+	list, err := c.store.List(ctx, principal(user), statuses...)
+	// The held writes of add-ons share the store but are answered through
+	// the add-on, not here.
+	list = slices.DeleteFunc(list, func(p contract.ChangeProposal) bool { return p.Kind == addonHoldKind })
+	for i := range list {
+		list[i] = c.named(ctx, withWarning(list[i]))
+	}
+	return list, err
+}
+
+// load returns one proposal of the owner as stored: the proposer is an account.
+// It is for the host's own checks and never leaves it.
+func (c *Changes) load(ctx context.Context, user, id string) (contract.ChangeProposal, error) {
+	c.sweep(ctx)
+	p, err := c.store.Get(ctx, principal(user), id)
+	if err != nil {
+		return p, err
+	}
+	if p.Kind == addonHoldKind {
+		return contract.ChangeProposal{}, proposals.ErrNotFound
+	}
+	return withWarning(p), nil
 }
 
 // Get returns one proposal of the user.
 func (c *Changes) Get(ctx context.Context, user, id string) (contract.ChangeProposal, error) {
-	c.sweep(ctx)
-	return c.store.Get(ctx, principal(user), id)
+	p, err := c.load(ctx, user, id)
+	if err != nil {
+		return p, err
+	}
+	return c.named(ctx, p), nil
 }
 
 // Events returns the audit of the user, newest first.
@@ -354,12 +527,22 @@ func (c *Changes) confirm(ctx context.Context, user, id string, edited *string) 
 		return contract.ChangeProposal{}, err
 	}
 	owner := principal(user)
-	p, err := c.Get(ctx, owner, id)
+	p, err := c.load(ctx, owner, id)
 	if err != nil {
 		return contract.ChangeProposal{}, err
 	}
+	if p.Proposer == owner {
+		// Never the case for a stored proposal; a proposer does not answer
+		// their own.
+		return contract.ChangeProposal{}, proposals.ErrNotFound
+	}
 	if p.Status != contract.ProposalPending {
 		return contract.ChangeProposal{}, notPending(p)
+	}
+	if p.Proposer != "" {
+		if err := c.stillShared(ctx, p); err != nil {
+			return contract.ChangeProposal{}, err
+		}
 	}
 	kind, ok := c.kinds.Lookup(string(p.Kind))
 	if !ok {
@@ -374,6 +557,9 @@ func (c *Changes) confirm(ctx context.Context, user, id string, edited *string) 
 			return contract.ChangeProposal{}, fmt.Errorf("%w: the text must be text", ErrBadChange)
 		}
 		p.Content = *edited
+	}
+	if kind.Dest != nil {
+		return c.confirmExternal(ctx, owner, p, kind)
 	}
 	// The base hash covers the files the model proposed; an edit by the owner
 	// may change the files to write, not what the proposal was based on.
@@ -408,6 +594,11 @@ func (c *Changes) confirm(ctx context.Context, user, id string, edited *string) 
 		return contract.ChangeProposal{}, ErrChangeAnswered
 	}
 	title := string(p.Kind) + ": " + p.Summary
+	if p.Proposer != "" {
+		// The change set is read by the owner (and anyone the project is shared
+		// with): the display name says who proposed it, never the account.
+		title += " (proposed by " + session.PromptName(c.nameOf(ctx, p.Proposer)) + ")"
+	}
 	rev, err := c.write(ctx, owner, writes, title, int64(kind.Limit()))
 	if err != nil {
 		if _, rerr := c.store.Settle(ctx, owner, id, contract.ProposalApplied, contract.ProposalPending, time.Time{}, 0); rerr != nil {
@@ -420,7 +611,71 @@ func (c *Changes) confirm(ctx context.Context, user, id string, edited *string) 
 	}
 	p.Status, p.Rev = contract.ProposalApplied, rev
 	c.audit(ctx, proposals.ActionConfirm, p, rev, "")
-	return c.store.Get(ctx, owner, id)
+	return c.fetch(ctx, owner, id)
+}
+
+// stillShared checks, when the owner confirms a note that someone proposed for
+// a shared project, that the proposer can still write to that project: the
+// grant exists and is a write grant, the project is active, it is the same
+// owner's folder and it has not moved or been renamed. Otherwise the proposal
+// is voided: settled as stale (the existing status for a proposal the world
+// moved away from), nothing written, and the owner is told.
+func (c *Changes) stillShared(ctx context.Context, p contract.ChangeProposal) error {
+	void := func(why string) error {
+		if won, _ := c.store.Settle(ctx, p.Owner, p.ID, contract.ProposalPending, contract.ProposalStale, c.s.now().UTC(), 0); won {
+			c.audit(ctx, proposals.ActionStale, p, 0, "voided: "+why)
+		}
+		return fmt.Errorf("%w: %s can no longer edit this project (%s). Nothing was written", ErrProposalVoid, c.nameOf(ctx, p.Proposer), why)
+	}
+	if c.s.d.Projects == nil {
+		return void("projects are not available")
+	}
+	sh, err := c.s.d.Projects.ResolveSharedNode(ctx, p.Proposer, p.ProjectNode)
+	switch {
+	case errors.Is(err, projects.ErrNotFound), errors.Is(err, projects.ErrInvalid), errors.Is(err, projects.ErrForbidden):
+		return void("it is not shared with them, or it is gone, moved or broken")
+	case err != nil:
+		// A store that fails is not a reason to void: the owner can try again.
+		return fmt.Errorf("studio: could not check who the project is shared with: %w", err)
+	}
+	switch {
+	case sharedWriteRefusal(sh) != "":
+		return void(sharedWriteRefusal(sh))
+	case sh.OwnerPrincipal != p.Owner:
+		return void("the project is not the owner's any more")
+	case !sharedDirIs(sh, p.Target):
+		return void("the project folder was renamed or moved")
+	}
+	return nil
+}
+
+// confirmExternal applies a proposal of a kind with a destination of its own.
+// It has no base hash and no change set: the destination is asked again, since
+// it may have changed since the proposal, and the write is claimed first so two
+// confirmations apply once.
+func (c *Changes) confirmExternal(ctx context.Context, owner string, p contract.ChangeProposal, kind proposals.Kind) (contract.ChangeProposal, error) {
+	if err := c.check(ctx, owner, kind, aimOf(p), p.Target, p.Content, snap{}); err != nil {
+		return contract.ChangeProposal{}, err
+	}
+	if err := c.prepare(ctx, kind, p); err != nil {
+		return contract.ChangeProposal{}, err
+	}
+	won, err := c.store.Settle(ctx, owner, p.ID, contract.ProposalPending, contract.ProposalApplied, c.s.now().UTC(), 0)
+	if err != nil {
+		return contract.ChangeProposal{}, err
+	}
+	if !won {
+		return contract.ChangeProposal{}, ErrChangeAnswered
+	}
+	if err := kind.Dest.Apply(ctx, proposals.ApplyInput{Owner: owner, Proposal: p}); err != nil {
+		if _, rerr := c.store.Settle(ctx, owner, p.ID, contract.ProposalApplied, contract.ProposalPending, time.Time{}, 0); rerr != nil {
+			c.s.log.Warn("studio: could not reopen a change that failed to apply", "proposal", p.ID, "error", rerr)
+		}
+		return contract.ChangeProposal{}, fmt.Errorf("studio: could not apply the change: %w", err)
+	}
+	p.Status = contract.ProposalApplied
+	c.audit(ctx, proposals.ActionConfirm, p, 0, "")
+	return c.fetch(ctx, owner, p.ID)
 }
 
 // write puts the files of a change into the home as one change set.
@@ -438,7 +693,7 @@ func (c *Changes) write(ctx context.Context, owner string, fs []proposals.FileWr
 // Dismiss answers a pending proposal with no.
 func (c *Changes) Dismiss(ctx context.Context, user, id string) (contract.ChangeProposal, error) {
 	owner := principal(user)
-	p, err := c.Get(ctx, owner, id)
+	p, err := c.load(ctx, owner, id)
 	if err != nil {
 		return contract.ChangeProposal{}, err
 	}
@@ -450,7 +705,7 @@ func (c *Changes) Dismiss(ctx context.Context, user, id string) (contract.Change
 		return contract.ChangeProposal{}, notPending(p)
 	}
 	c.audit(ctx, proposals.ActionDismiss, p, 0, "")
-	return c.store.Get(ctx, owner, id)
+	return c.fetch(ctx, owner, id)
 }
 
 // Revert undoes an applied change with the change set it wrote.
@@ -459,12 +714,16 @@ func (c *Changes) Revert(ctx context.Context, user, id string) (contract.ChangeP
 		return contract.ChangeProposal{}, err
 	}
 	owner := principal(user)
-	p, err := c.Get(ctx, owner, id)
+	p, err := c.load(ctx, owner, id)
 	if err != nil {
 		return contract.ChangeProposal{}, err
 	}
-	if p.Status != contract.ProposalApplied || p.Rev == 0 {
+	kind, _ := c.kinds.Lookup(string(p.Kind))
+	if p.Status != contract.ProposalApplied || (p.Rev == 0 && kind.Dest == nil) {
 		return contract.ChangeProposal{}, ErrNotApplied
+	}
+	if kind.Dest != nil {
+		return c.revertExternal(ctx, owner, p, kind)
 	}
 	now := c.s.now().UTC()
 	won, err := c.store.Settle(ctx, owner, id, contract.ProposalApplied, contract.ProposalReverted, now, 0)
@@ -489,18 +748,44 @@ func (c *Changes) Revert(ctx context.Context, user, id string) (contract.ChangeP
 		c.s.log.Warn("studio: could not record the change set of a revert", "proposal", id, "error", err)
 	}
 	c.audit(ctx, proposals.ActionRevert, p, cs.Rev, "")
-	return c.store.Get(ctx, owner, id)
+	return c.fetch(ctx, owner, id)
+}
+
+// revertExternal takes back a change of a kind with a destination of its own.
+func (c *Changes) revertExternal(ctx context.Context, owner string, p contract.ChangeProposal, kind proposals.Kind) (contract.ChangeProposal, error) {
+	now := c.s.now().UTC()
+	won, err := c.store.Settle(ctx, owner, p.ID, contract.ProposalApplied, contract.ProposalReverted, now, 0)
+	if err != nil {
+		return contract.ChangeProposal{}, err
+	}
+	if !won {
+		return contract.ChangeProposal{}, ErrNotApplied
+	}
+	if err := kind.Dest.Undo(ctx, proposals.ApplyInput{Owner: owner, Proposal: p}); err != nil {
+		if _, rerr := c.store.Settle(ctx, owner, p.ID, contract.ProposalReverted, contract.ProposalApplied, p.Answered, 0); rerr != nil {
+			c.s.log.Warn("studio: could not reopen a change that failed to revert", "proposal", p.ID, "error", rerr)
+		}
+		return contract.ChangeProposal{}, fmt.Errorf("studio: could not revert the change: %w", err)
+	}
+	c.audit(ctx, proposals.ActionRevert, p, 0, "")
+	return c.fetch(ctx, owner, p.ID)
 }
 
 // RevertLast reverts the change applied last for the user in the scope of
 // agent: the changes proposed in chats of that agent, or in plain chats when
 // agent is empty.
-func (c *Changes) RevertLast(ctx context.Context, user, agent string) (contract.ChangeProposal, error) {
+// The kinds in skip are left out: a chat that may not touch them does not undo
+// them either.
+func (c *Changes) RevertLast(ctx context.Context, user, agent string, skip ...contract.ChangeKind) (contract.ChangeProposal, error) {
 	applied, err := c.List(ctx, user, contract.ProposalApplied)
 	if err != nil {
 		return contract.ChangeProposal{}, err
 	}
-	applied = slices.DeleteFunc(applied, func(p contract.ChangeProposal) bool { return p.Agent != agent })
+	// A note that someone else proposed is never "the last change" of a chat
+	// of the owner: its agent is the proposer's. The owner undoes it by its ID.
+	applied = slices.DeleteFunc(applied, func(p contract.ChangeProposal) bool {
+		return p.Agent != agent || p.Proposer != "" || slices.Contains(skip, p.Kind)
+	})
 	if len(applied) == 0 {
 		return contract.ChangeProposal{}, ErrNothingToRevert
 	}
@@ -535,9 +820,48 @@ func (c *Changes) grantsAKind(grant string) bool {
 func (c *Changes) kindsHeld(ch builtins.Chat) []contract.ChangeKind {
 	var out []contract.ChangeKind
 	for _, n := range c.kinds.Names() {
-		if k, ok := c.kinds.Lookup(string(n)); ok && (k.Grant == "" || ch.HoldsGrant(k.Grant)) {
+		if k, ok := c.kinds.Lookup(string(n)); ok && !k.Internal && (k.Grant == "" || ch.HoldsGrant(k.Grant)) {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// kindsOffered is kindsHeld plus the memory kind for a chat of a project agent
+// that holds only the project memory grant: it may propose a note for its
+// project and nothing else of memory (Propose checks the grant of the scope).
+func (c *Changes) kindsOffered(ctx context.Context, ch builtins.Chat) []contract.ChangeKind {
+	out := c.kindsHeld(ch)
+	if slices.Contains(out, contract.ChangeMemory) || !ch.HoldsGrant(builtins.GrantProjectMemoryWrite) || !c.s.projectAgentID(ctx, ch.Actor.Principal, ch.AgentID) {
+		return out
+	}
+	if _, ok := c.kinds.Lookup(string(contract.ChangeMemory)); !ok {
+		return out
+	}
+	return append([]contract.ChangeKind{contract.ChangeMemory}, out...)
+}
+
+// autoAllowed says whether the host lets a proposal be applied unasked. It is
+// the second check after the tool: a note from the person's own chat unless
+// the level in force is always or never, and a note to the conversation of a
+// messaging chat only when the level in force is auto, which needs the row
+// paired_private, a paired sender and a one-to-one chat (see
+// effectiveSaveLevel). Anything else asks.
+func (c *Changes) autoAllowed(ctx context.Context, in ProposeInput, kind contract.ChangeKind) bool {
+	if kind != contract.ChangeMemory || in.Scope == string(contract.ScopeProject) {
+		return false
+	}
+	switch in.Source.Kind {
+	case "":
+		level := effectiveSaveLevel(SaveInputs{User: c.storedSaveMode(ctx, in.User), Agent: c.s.agentMemorySave(ctx, in.User, in.Agent)})
+		return level != SaveAlways && level != SaveNever
+	case session.OriginConnector:
+		if in.Scope != string(contract.ScopeChannel) {
+			return false
+		}
+		direct, paired := c.s.messagingFacts(in.Source.Chat)
+		return effectiveSaveLevel(SaveInputs{User: c.storedSaveMode(ctx, in.User), Agent: c.s.agentMemorySave(ctx, in.User, in.Agent),
+			Messaging: c.storedMessagingSave(ctx, in.User), Origin: session.OriginConnector, Direct: direct, Paired: paired}) == SaveAuto
+	}
+	return false
 }

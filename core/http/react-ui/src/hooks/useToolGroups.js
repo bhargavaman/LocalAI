@@ -1,6 +1,8 @@
 import { useTranslation } from 'react-i18next'
 import { connectorRef } from '../utils/chatMCP'
 import { unknownTextKey } from '../utils/chatCommands'
+import { GRANT_SECTIONS, connectionsMissing, grantKey, placeGrants } from '../utils/toolOptions'
+import { reconnectConnections } from '../utils/connectorOAuth'
 
 // The groups of the Tools list, built from the lists of the switches
 // (useChatSwitches for a chat, useAgentTools for a saved agent). The Tools
@@ -24,7 +26,10 @@ import { unknownTextKey } from '../utils/chatCommands'
 export const SAVED_AGENTS = 'saved_agents'
 export const SHELL = 'shell'
 export const SUBAGENTS = 'subagents'
-const BUILTIN_ORDER = [SHELL, 'files', 'web', 'media', 'collections', SUBAGENTS, SAVED_AGENTS, 'triggers', 'changes']
+export const MEMORY = 'memory'
+export const LOCALAI_CLIENT = 'localai_client'
+export const LOCALAI_ADMIN = 'localai_admin'
+const BUILTIN_ORDER = [SHELL, 'files', 'web', 'media', LOCALAI_CLIENT, 'collections', MEMORY, SUBAGENTS, SAVED_AGENTS, 'triggers', 'changes', LOCALAI_ADMIN]
 export const builtinRank = (g) => {
   const i = BUILTIN_ORDER.indexOf(g)
   return i < 0 ? BUILTIN_ORDER.length : i
@@ -71,6 +76,14 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
     return { chip, note: tc(`tools.commands.${unknownTextKey(selected.code)}`) }
   }
 
+  // The memory row: while the person's own switch is off the row cannot be
+  // used and says where to turn it on; a chat that switched it off is a
+  // private chat.
+  const memoryNote = (b) => {
+    if (b.usable !== false) return b.off ? { chip: tc('memoryOff.chipPrivate') } : {}
+    return { reason: tc('memoryOff.userRow') }
+  }
+
   const builtinRow = (b) => ({
     key: `b-${b.group}`, id: b.group, optIn: !!b.opt_in,
     label: tc(`tools.builtin.${b.group}`, { defaultValue: b.title || b.group }),
@@ -78,25 +91,52 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
     whenOff: tc(`tools.whenOff.${b.group}`, { defaultValue: b.when_off || '' }),
     title: tc('tools.builtinBy', { tools: (b.tools || []).join(', ') }),
     on: !b.off, usable: b.usable, reason: b.reason, onToggle: (on) => switches.toggleBuiltin(b.group, on),
-    ...(b.group === SHELL ? shellNote(b) : builtinNote(b)),
+    ...(b.group === SHELL ? shellNote(b) : b.group === MEMORY ? memoryNote(b) : builtinNote(b)),
+    // The tools of the group are found with tool_search instead of being sent in full.
+    ...(b.deferred ? { chip: tc('tools.onDemand') } : {}),
   })
+  // A built-in row with the options that refine it.
+  const withOptions = (row) => {
+    const own = placed.byGroup[row.id]
+    if (!own || own.length === 0) return row
+    const parent = { on: row.on && row.usable !== false, label: row.label }
+    return { ...row, options: own.map((x) => grantRow(x, parent)) }
+  }
 
-  // The builtin grants of a saved agent: what the agent may ask to change
-  // (memory, its profile, skills, pages...). Each row says in plain words what
-  // the right allows, and a sensitive one says so. No onSet: Select all must
-  // never grant a right. The agent form edits them; a chat shows what its
-  // agent holds, read only.
+  // The grants of a saved agent (what it may change, reach or do on its own).
+  // Each one is shown once. A grant that refines a built-in switch sits under
+  // that switch as an option; the rest go in a section of their own. A grant
+  // is greyed, with the reason, while the switch above it is off: its stored
+  // value stays as it is, so it comes back as it was. The agent form edits
+  // them; a chat shows what its agent holds, read only. No onSet anywhere:
+  // Select all must never grant a right.
   const g = switches.grants
-  const grantsGroup = {
-    key: 'grants', title: tc('tools.grants'), icon: 'shield', rows: (g?.list || []).map((x) => ({
+  const connections = switches.connections || []
+  const builtinList = switches.builtins || []
+  const placed = placeGrants(g?.list, builtinList.map((b) => b.group))
+  const grantRow = (x, parent) => {
+    const k = grantKey(x.name)
+    const blocked = !!parent && !parent.on
+    const missing = x.on && !x.gone && !blocked ? connectionsMissing(x.name, connections) : []
+    return {
       key: `g-${x.name}`, id: x.name,
-      label: tc(`tools.grant.${x.name.replace(/\./g, '_')}.title`, { defaultValue: x.title || x.name }),
-      description: x.gone ? '' : tc(`tools.grant.${x.name.replace(/\./g, '_')}.description`, { defaultValue: x.description || '' }),
+      label: x.gone ? x.name : tc(`tools.grant.${k}.title`, { defaultValue: x.title || x.name }),
+      description: x.gone ? '' : tc(`tools.grant.${k}.description`, { defaultValue: x.description || '' }),
       note: x.gone ? tc('tools.gone') : (x.sensitive ? tc('tools.grantSensitive') : ''),
       warn: !!x.sensitive && !x.gone,
+      blocked, reason: blocked ? tc('tools.optionNeeds', { name: parent.label }) : '',
+      notes: missing.map((c) => ({ key: c.id, text: tc('tools.connectionMissing', { name: c.name }), link: { to: c.to, label: tc('tools.connectionOpen') } })),
       on: x.on, readOnly: !g.editable, onToggle: (on) => g.onToggle?.(x.name, on),
-    })),
+    }
   }
+  const sectionGroup = (s) => ({
+    key: s.key, title: tc(`tools.section.${s.key}.title`), icon: s.icon, intro: tc(`tools.section.${s.key}.intro`),
+    rows: (placed.bySection[s.key] || []).map((x) => grantRow(x)),
+  })
+  const grantGroups = [
+    ...GRANT_SECTIONS.map(sectionGroup),
+    { key: 'grants', title: tc('tools.grants'), icon: 'shield', rows: placed.other.map((x) => grantRow(x)) },
+  ]
 
   // The connections an add-on that runs with a credential may use. The host
   // picks none for the person: with one it is enabled, with several the person
@@ -113,8 +153,27 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
     const options = list.map((c) => ({ value: c.id, label: c.name }))
     // The only connection of the person is always enabled: there is nothing to choose.
     const sole = list.length === 1 && a.connection_by === 'only'
+    // The agent form draws this choice in its Connections section.
+    if (forAgent && switches.pickElsewhere) return {}
+    // A connection that logs in with OAuth and whose login ended: the row
+    // says which, and links to the Connectors page to connect it again.
+    const stale = reconnectConnections(a).filter((c) => forAgent || chosen.includes(c.id) || a.connection_state === 'reconnect_needed')
+    // The login of a connection that was shared with the person is its
+    // owner's: the row says that the owner must connect it again and offers
+    // no login to the person.
+    const mine = stale.filter((c) => !c.shared)
+    const theirs = stale.filter((c) => c.shared)
+    const staleNotes = [
+      mine.length ? tc('tools.connection.reconnectNeeded', { names: mine.map((c) => c.name).join(', ') }) : '',
+      theirs.length ? tc('tools.connection.ownerReconnectNeeded', { names: theirs.map((c) => c.name).join(', ') }) : '',
+    ].filter(Boolean)
+    const reconnect = stale.length ? { warn: true, note: staleNotes.join(' ') } : {}
+    const connectorsLink = (fallback) => (mine.length
+      ? { to: '/app/chats/connectors', label: tc('tools.connection.reconnect') }
+      : fallback)
     if (forAgent) {
       return {
+        ...reconnect,
         pick: {
           label: tc('tools.connection.agentLabel'),
           hint: none ? tc('tools.connection.none') : (chosen.length ? tc('tools.connection.agentHelp') : tc('tools.connection.perChatHelp')),
@@ -122,11 +181,12 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
           options,
           disabled: !switches.setConnections,
           onChange: (ids) => switches.setConnections?.(a.id, ids),
-          link: none ? { to: '/app/chats/connectors', label: tc('tools.connection.create') } : undefined,
+          link: connectorsLink(none ? { to: '/app/chats/connectors', label: tc('tools.connection.create') } : undefined),
         },
       }
     }
     return {
+      ...reconnect,
       usable: !a.needs_connection,
       reason: a.needs_connection ? (none ? tc('tools.connection.none') : tc('tools.connection.choose')) : undefined,
       pick: {
@@ -136,18 +196,20 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
         options,
         disabled: byAgent || sole || !switches.setConnections,
         onChange: (ids) => switches.setConnections?.(a.id, ids),
-        link: none ? { to: '/app/chats/connectors', label: tc('tools.connection.create') } : undefined,
+        link: connectorsLink(none ? { to: '/app/chats/connectors', label: tc('tools.connection.create') } : undefined),
       },
     }
   }
+
+  // A tool the chat's project attaches is on and cannot be switched off here.
+  const projectMark = (x) => (x.fromProject ? { readOnly: true, chip: tc('tools.fromProject'), title: tc('tools.fromProjectTitle') } : {})
 
   const groups = [
     {
       // The tools LocalAI serves itself, such as web search: one switch per group.
       key: 'builtins', title: tc('tools.builtins'), icon: 'globe', onSet: switches.setBuiltinsOn,
-      rows: [...switches.builtins].sort((a, b) => builtinRank(a.group) - builtinRank(b.group)).map(builtinRow),
+      rows: [...builtinList].sort((a, b) => builtinRank(a.group) - builtinRank(b.group)).map((b) => withOptions(builtinRow(b))),
     },
-    grantsGroup,
     {
       // An add-on shows the title and the description its manifest declares.
       key: 'addons', title: tc('tools.addons'), icon: 'puzzle', onSet: switches.setAddonsOn,
@@ -156,6 +218,7 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
         description: a.gone ? '' : (a.description || tc('tools.addonDescribe', { count: a.tools || 0 })),
         note: a.gone ? tc('tools.gone') : '',
         meta: a.gone ? undefined : t('tools.toolCount', { count: a.tools }), on: !a.off, onToggle: (on) => switches.toggleAddon(a.id, on),
+        ...projectMark(a),
         ...connectionOf(a),
       })),
     },
@@ -163,16 +226,17 @@ export function useToolGroups(switches, { commandsInfo = null, commandState = tr
       key: 'servers', title: tc('tools.servers'), icon: 'server', onSet: switches.setMCPOn,
       rows: switches.servers.map((s) => ({
         key: `s-${s.name}`, id: s.name, label: s.name, description: tc('tools.serverDescribe'),
-        on: !s.off, usable: s.usable, reason: s.reason, onToggle: (on) => switches.toggleMCP(s.name, on),
+        on: !s.off, usable: s.usable, reason: s.reason, onToggle: (on) => switches.toggleMCP(s.name, on), ...projectMark(s),
       })),
     },
     {
       key: 'connectors', title: tc('tools.connectors'), icon: 'plug', onSet: switches.setMCPOn,
       rows: switches.connectors.map((c) => ({
         key: `c-${c.id}`, id: connectorRef(c.id), label: c.name, description: tc('tools.connectorDescribe'),
-        note: c.gone ? tc('tools.gone') : (c.hint || ''), on: !c.off, usable: c.usable, reason: c.reason, onToggle: (on) => switches.toggleMCP(connectorRef(c.id), on),
+        note: c.gone ? tc('tools.gone') : (c.hint || ''), on: !c.off, usable: c.usable, reason: c.reason, onToggle: (on) => switches.toggleMCP(connectorRef(c.id), on), ...projectMark(c),
       })),
     },
+    ...grantGroups,
   ]
   return groups
 }

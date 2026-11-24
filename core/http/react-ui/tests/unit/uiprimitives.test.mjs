@@ -5,8 +5,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buttonClass } from '../../src/components/ui/buttonClass.js'
-import { resolveStatus, legacyPillTone, STATUS } from '../../src/components/ui/status.js'
+import { buttonClass } from '../../packages/ui-kit/src/buttonClass.js'
+import { resolveStatus, legacyPillTone, STATUS } from '../../packages/ui-kit/src/status.js'
 import { toastDuration, pushToast, markLeaving, toastLift, TOAST_MS, TOAST_MAX } from '../../src/components/ui/toastModel.js'
 import { initialLoad, loadReducer, errorMessage } from '../../src/utils/loadState.js'
 
@@ -100,4 +100,25 @@ test('load state: the error text is the server message', () => {
   assert.equal(errorMessage({ error: { message: 'no such model' } }), 'no such model')
   assert.equal(errorMessage('timeout'), 'timeout')
   assert.equal(errorMessage(null), '')
+})
+
+test('notice: severity sets the live role, unknown severity reads as info', async () => {
+  const { noticeRole, noticeSeverity, NOTICE_ICONS } = await import('../../packages/ui-kit/src/noticeModel.js')
+  assert.equal(noticeRole('error'), 'alert')
+  assert.equal(noticeRole('warn'), 'status')
+  assert.equal(noticeRole('info'), 'note')
+  assert.equal(noticeSeverity('loud'), 'info')
+  assert.equal(noticeRole(undefined), 'note')
+  for (const level of ['info', 'warn', 'error']) assert.ok(NOTICE_ICONS[level], level)
+})
+
+test('notice: an action needs a label and something to do', async () => {
+  const { noticeAction } = await import('../../packages/ui-kit/src/noticeModel.js')
+  const go = () => {}
+  assert.equal(noticeAction(null), null)
+  assert.equal(noticeAction({ label: 'Open', onClick: undefined }), null)
+  assert.equal(noticeAction({ onClick: go }), null)
+  assert.deepEqual(noticeAction({ label: 'Open', to: '/app/settings' }), { label: 'Open', to: '/app/settings' })
+  assert.equal(noticeAction({ label: 'Go', href: '/x' }).href, '/x')
+  assert.equal(noticeAction({ label: 'Do', onClick: go }).onClick, go)
 })

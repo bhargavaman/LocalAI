@@ -33,7 +33,18 @@
     "agent": "Agente",
     "agentHelp": "Questa chat usa l'agente {{name}}: le sue istruzioni e solo gli strumenti che concede.",
     "editAgent": "Modifica agente",
-    "deleteHelp": "Elimina questa chat e i suoi messaggi in modo definitivo."
+    "deleteHelp": "Elimina questa chat e i suoi messaggi in modo definitivo.",
+    "collections": "Raccolte",
+    "collectionsHelp": "Questa chat può usare solo queste raccolte.",
+    "sliderOf": "Cursore {{name}}",
+    "reset": "Usa il valore del modello per {{name}}",
+    "hint": {
+      "temperature": "Valori più alti danno risposte più varie. Da 0 a 2.",
+      "topP": "Sceglie tra le parole più probabili che insieme raggiungono questa quota. Sopra 0, fino a 1.",
+      "topK": "Sceglie tra questo numero di parole più probabili. Un intero, 0 o più.",
+      "contextSize": "Da 512 a 4194304 token.",
+      "effort": "Si applica subito, dal prossimo turno."
+    }
   },
   "empty": {
     "manageTitle": "Gestisci LocalAI chattando",
@@ -84,7 +95,8 @@
     "selectModel": "Seleziona un modello",
     "copied": "Copiato negli appunti",
     "copyFailed": "Impossibile copiare negli appunti",
-    "newChatForModel": "Una chat mantiene il suo modello. Avviata una nuova chat con {{model}}."
+    "newChatForModel": "Una chat mantiene il suo modello. Avviata una nuova chat con {{model}}.",
+    "windowSet": "La finestra di contesto di {{model}} ora è di {{window}} token."
   },
   "menu": {
     "trigger": "Chat",
@@ -113,7 +125,52 @@
       "job": "Job",
       "page": "Pagina",
       "other": "Automatico"
-    }
+    },
+    "keys": {
+      "clear": "cancella"
+    },
+    "find": {
+      "searching": "Ricerca in corso…",
+      "count_one": "{{count}} risultato",
+      "count_other": "{{count}} risultati",
+      "more_one": "{{count}} altra corrispondenza in questa chat",
+      "more_other": "{{count}} altre corrispondenze in questa chat",
+      "indexing": "Le chat più vecchie sono ancora in fase di indicizzazione. I risultati potrebbero essere incompleti.",
+      "partial": "Cercato nelle {{searched}} chat più recenti su {{total}}.",
+      "failed": "La ricerca non è riuscita.",
+      "retry": "Riprova",
+      "noMatchFor": "Nessuna chat corrisponde a “{{query}}”.",
+      "noMatchFiltered": "Nessuna chat corrisponde a “{{query}}” con questi filtri.",
+      "inTitle": "Corrisponde al titolo",
+      "you": "Tu",
+      "assistant": "Assistente",
+      "filters": "Filtri di ricerca",
+      "agent": "Agente",
+      "anyAgent": "Qualsiasi agente",
+      "origin": "Da",
+      "anyOrigin": "Ovunque",
+      "originName": {
+        "person": "Le mie chat",
+        "automated": "Add-on e automazioni",
+        "trigger": "Trigger",
+        "connector": "App di messaggistica",
+        "job": "Job",
+        "page": "Pagine"
+      },
+      "when": "Quando",
+      "anyTime": "In qualsiasi momento",
+      "range": {
+        "day": "Ultime 24 ore",
+        "week": "Ultimi 7 giorni",
+        "month": "Ultimi 30 giorni",
+        "year": "Ultimo anno",
+        "custom": "Scegli le date…"
+      },
+      "from": "Dal",
+      "to": "Al",
+      "reset": "Azzera i filtri"
+    },
+    "clearShown": "Svuota le mostrate"
   },
   "message": {
     "you": "You",
@@ -138,7 +195,9 @@
     "failed": "Salvataggio non riuscito. L'interruttore è tornato com'era.",
     "unavailable": "Non disponibile in questa chat",
     "toolCount_one": "{{count}} strumento",
-    "toolCount_other": "{{count}} strumenti"
+    "toolCount_other": "{{count}} strumenti",
+    "optionsOf": "Opzioni di {{name}}",
+    "projectCollections": "Raccolte del progetto: {{names}}."
   },
   "skills": {
     "label": "Skill",
@@ -159,11 +218,13 @@
       "personal": "Personale",
       "shared": "Condivisa",
       "folder": "Area di lavoro",
-      "addon": "{{name}}"
+      "addon": "{{name}}",
+      "addonFrom": "da {{name}}"
     },
     "replacedBy": "Sostituita da {{name}}",
     "fallback_one": "{{skills}} integrata in uso: la skill del componente {{name}} è disattivata o non in esecuzione qui.",
-    "fallback_other": "{{skills}} integrate in uso: le skill del componente {{name}} sono disattivate o non in esecuzione qui."
+    "fallback_other": "{{skills}} integrate in uso: le skill del componente {{name}} sono disattivate o non in esecuzione qui.",
+    "fromProject": "Dal progetto"
   },
   "agent": {
     "label": "Agente",
@@ -190,7 +251,8 @@
     "group": {
       "context": "Contesto",
       "skills": "Skill e agenti",
-      "help": "Aiuto"
+      "help": "Aiuto",
+      "yours": "I tuoi"
     },
     "models": {
       "label": "Modelli",
@@ -243,7 +305,9 @@
       "builtin": "integrata",
       "addon": "add-on",
       "shared": "condivisa",
-      "yours": "tua"
+      "yours": "tua",
+      "prompt": "prompt",
+      "tool": "strumento"
     },
     "collides": "solo con /skill",
     "errors": {
@@ -265,7 +329,13 @@
       "desc": "Imposta un obiettivo su cui la chat continua a lavorare da sola",
       "clearDesc": "Rimuovi l'obiettivo",
       "resumeDesc": "Continua verso l'obiettivo"
-    }
+    },
+    "effort": {
+      "label": "Impegno di ragionamento",
+      "desc": "Scegli quanto ragiona il modello"
+    },
+    "userTool": "Usa lo strumento {{tool}}.",
+    "unavailable": "strumento non disponibile"
   },
   "shortcuts": {
     "onMessage": "Su un messaggio: copia, modifica, rigenera",
@@ -273,8 +343,8 @@
   },
   "files": {
     "title": "File di questa chat",
-    "chip": "File",
-    "chipTitle": "File di questa chat: quelli che hai allegato e quelli che l'assistente ha creato o modificato",
+    "button": "File",
+    "buttonTitle": "File di questa chat: quelli che hai allegato e quelli che l'assistente ha creato o modificato",
     "close": "Chiudi i file",
     "emptyTitle": "Ancora nessun file in questa chat",
     "emptyBody": "Trascina qui i file per allegarli al prossimo messaggio. Anche i file che l'assistente crea o modifica compaiono qui.",
@@ -290,6 +360,9 @@
     "changedTag": "Modificato",
     "changedTitle": "L'assistente ha modificato questo file",
     "download": "Scarica {{name}}",
+    "downloadAll": "Scarica tutti i file come ZIP",
+    "zipName": "file-della-chat.zip",
+    "zipError": "Non è stato possibile scaricare i file come ZIP.",
     "error": "Impossibile leggere i file di questa chat.",
     "workingNote": "Script, dati e log che l'assistente ha creato lungo il percorso. Stanno nella cartella di lavoro di questa chat."
   },
@@ -373,7 +446,10 @@
       "upstream_unreachable": "L'indirizzo dell'upstream non è raggiungibile.",
       "upstream": "Il provider dietro il modello ha restituito un errore.",
       "timeout": "Il modello ha impiegato troppo tempo a rispondere.",
-      "cancelled": "Il turno è stato annullato prima della risposta del modello."
+      "cancelled": "Il turno è stato annullato prima della risposta del modello.",
+      "interrupted": "Il server si è riavviato mentre rispondeva.",
+      "model_backend_outdated": "Il modello \"{{model}}\" non si è potuto avviare: il backend potrebbe essere troppo vecchio.",
+      "model_backend_outdated_anon": "Il modello non si è potuto avviare: il backend potrebbe essere troppo vecchio."
     },
     "hint": {
       "model_backend_missing": "Scegli un altro modello oppure chiedi a un amministratore di installare il backend.",
@@ -386,9 +462,24 @@
       "upstream_unreachable": "Controlla l'indirizzo nelle impostazioni del modello.",
       "upstream": "Riprova tra un attimo. Se continua a fallire, controlla indirizzo e chiave del provider.",
       "timeout": "Riprova, oppure usa un modello più piccolo o più veloce.",
-      "cancelled": "Riprova quando vuoi."
+      "cancelled": "Riprova quando vuoi.",
+      "model_backend_outdated": "Chiedi a un amministratore di aggiornare il backend, poi riprova.",
+      "model_backend_outdated_admin": "Aggiorna il backend dalla pagina Aggiornamenti, poi riprova."
     },
-    "openBackends": "Apri Backend"
+    "openBackends": "Apri Backend",
+    "titleInterrupted": "La risposta è stata interrotta",
+    "resume": {
+      "waiting": "Riprendo tra {{seconds}} secondi (tentativo {{attempt}} di {{max}}).",
+      "resuming": "Riprendo da dove si era fermata.",
+      "server": "Il server riprende da dove si era fermata.",
+      "exhausted": "Non è riuscita a riprendere dopo {{max}} tentativi. Riprova.",
+      "stop": "Smetti di riprovare"
+    },
+    "updateBackend": "Aggiorna {{backend}}",
+    "updateBackendBusy": "Aggiornamento in corso...",
+    "updateBackendStarted": "L'aggiornamento di {{backend}} è iniziato. Riprova quando è finito.",
+    "updateBackendFailed": "Non è stato possibile avviare l'aggiornamento.",
+    "openUpdates": "Apri Aggiornamenti"
   },
   "allChats": {
     "title": "Tutte le chat",
@@ -641,7 +732,9 @@
     "missing": "La cartella di questo agente non esiste più. Scegli un'altra cartella nell'agente.",
     "startError": "La cartella di questo agente manca, quindi la chat non può partire. Scegli un'altra cartella per l'agente.",
     "editAgent": "Modifica agente",
-    "toolsMany": "File: solo {{n}} cartelle: {{list}}. Le cartelle condivise e le skill restano leggibili."
+    "toolsMany": "File: solo {{n}} cartelle: {{list}}. Le cartelle condivise e le skill restano leggibili.",
+    "projectPaused": "Questo agente è in pausa perché il suo progetto è archiviato o eliminato. Apri il progetto e ripristinalo.",
+    "projectChanged": "Questo agente è in pausa perché le cartelle del suo progetto sono cambiate. Apri l’agente e ricollegalo."
   },
   "origin": {
     "banner": "Questa conversazione è stata avviata da {{title}}.",
@@ -653,5 +746,196 @@
       "page": "una pagina",
       "other": "qualcos’altro"
     }
+  },
+  "connector": {
+    "header": "Conversazione di messaggistica",
+    "unknownSender": "Mittente sconosciuto",
+    "people": "Persone in questa conversazione",
+    "inThread": "Thread",
+    "openThread": "Apri nell'app di messaggistica",
+    "where": {
+      "direct": "Messaggio diretto",
+      "channel": "Canale {{name}}",
+      "group": "Canale o gruppo"
+    },
+    "standing": {
+      "owner": "Proprietario",
+      "verified": "Ha un ruolo",
+      "listed": "Persona in elenco",
+      "channel": "Membro del canale",
+      "anyone": "Chiunque"
+    },
+    "standingHelp": {
+      "owner": "Persona verificata: il proprietario controlla questo account.",
+      "verified": "Ha un ruolo a cui il proprietario ha dato dei diritti.",
+      "listed": "Nell'elenco di questa connessione.",
+      "channel": "Ammesso perché il canale o il gruppo è nell'elenco.",
+      "anyone": "Ammesso perché la connessione accetta chiunque."
+    },
+    "threadEarlier": "Prima nel thread ({{count}} messaggi)",
+    "threadCut": "I messaggi più vecchi del thread non sono mostrati.",
+    "note": {
+      "paired": "Verificato con questo bot",
+      "unsupported": "Messaggio non letto",
+      "too_long": "Messaggio troppo lungo",
+      "no_upload": "File non accettati",
+      "rate": "Troppi messaggi",
+      "held_back": "Alcuni strumenti non sono stati offerti a questo mittente",
+      "new_chat": "Nuova chat avviata",
+      "refused": "Messaggio rifiutato",
+      "hold_waiting": "In attesa della conferma di una persona verificata",
+      "hold_confirmed": "Confermata nella chat",
+      "hold_cancelled": "Annullata nella chat",
+      "hold_expired": "Non confermata in tempo",
+      "hold_failed": "Non è stato possibile eseguirla",
+      "other": "Nota",
+      "why": "Perché"
+    }
+  },
+  "connection": {
+    "lost": "Connessione persa. Riconnessione in corso."
+  },
+  "reasoning": {
+    "chip": "Impegno",
+    "title": "Impegno di ragionamento di questa chat",
+    "note": "Si applica dal prossimo turno. Nessuno chiede al modello di non pensare."
+  },
+  "setup": {
+    "chip": "Profilo",
+    "title": "Avvia le nuove chat da un profilo salvato",
+    "edited": "modificato",
+    "menuTitle": "Profili",
+    "empty": "Ancora nessun profilo. Salva come profilo il modello, gli strumenti e l’impegno che usi.",
+    "active": "In uso",
+    "noneOff": "Strumenti predefiniti",
+    "toolsOff_one": "{{count}} spento",
+    "toolsOff_many": "{{count}} spenti",
+    "toolsOff_other": "{{count}} spenti",
+    "effort": "Impegno {{level}}",
+    "saveAs": "Salva il profilo attuale come…",
+    "manage": "Gestisci i profili",
+    "agentReason": "Un agente salvato decide il modello e gli strumenti di questa chat.",
+    "modelMissing": "Il modello “{{model}}” di questo profilo non è installato. Resta il modello attuale.",
+    "line": {
+      "noTools": "Nessuno strumento",
+      "toolCount_one": "{{count}} strumento",
+      "toolCount_many": "{{count}} di strumenti",
+      "toolCount_other": "{{count}} strumenti"
+    },
+    "update": "Aggiorna “{{name}}”",
+    "saveNew": "Salva come nuovo…",
+    "reset": "Reimposta",
+    "nameLabel": "Nome del profilo",
+    "namePlaceholder": "Dai un nome a questo profilo",
+    "save": "Salva",
+    "cancel": "Annulla",
+    "limit": "Puoi avere fino a 50 profili.",
+    "defaultName": "Il mio predefinito",
+    "savedToast": "Profilo di questa chat salvato come “{{name}}”. Le nuove chat partono da qui.",
+    "rename": "Rinomina",
+    "manageTitle": "Gestisci i profili",
+    "manageNote": "Il profilo predefinito è quello da cui partono le nuove chat. Segue il profilo con cui hai inviato l’ultimo messaggio.",
+    "manageEmpty": "Ancora nessun profilo.",
+    "done": "Fatto",
+    "default": "Predefinito",
+    "makeDefault": "Rendi predefinito",
+    "moveUp": "Sposta {{name}} su",
+    "moveDown": "Sposta {{name}} giù",
+    "renameLabel": "Nome del profilo",
+    "remove": "Elimina",
+    "removeConfirm": "Eliminare “{{name}}”?",
+    "removeYes": "Elimina",
+    "noModel": "Nessun modello"
+  },
+  "live": {
+    "button": "Live",
+    "title": "Parla con questa chat senza mani",
+    "mode": "Standard",
+    "waiting": "In attesa della risposta",
+    "reason": {
+      "insecure": {
+        "short": "Richiede HTTPS o localhost",
+        "detail": "Il browser concede l'accesso al microfono solo tramite HTTPS, localhost o 127.0.0.1. Apri questa pagina da uno di questi indirizzi per usare Live."
+      },
+      "no-mic": {
+        "short": "Nessun microfono disponibile",
+        "detail": "Questo browser non offre un microfono a questa pagina. Prova un altro browser per usare Live."
+      }
+    },
+    "state": {
+      "off": "Disattivato",
+      "starting": "In attesa del permesso del browser",
+      "listening": "In ascolto",
+      "hearing": "Ti sta sentendo",
+      "transcribing": "Trascrizione",
+      "thinking": "Sta pensando",
+      "speaking": "Sta parlando",
+      "blocked": "La voce aspetta te",
+      "paused": "In pausa",
+      "error": "Live ha bisogno di attenzione"
+    },
+    "mute": "Disattiva microfono",
+    "unmute": "Riattiva microfono",
+    "stop": "Ferma",
+    "typeInstead": "Scrivi invece",
+    "end": "Termina Live",
+    "retry": "Riprova",
+    "play": "Riproduci",
+    "blocked": "Il browser ha bloccato la voce. Premi Riproduci per sentire la risposta.",
+    "hidden": "Live resta in pausa mentre questa scheda è in secondo piano. Riprende quando torni.",
+    "error": {
+      "denied": "L'accesso al microfono è stato bloccato. Consenti il microfono per questo sito nel browser, poi premi Riprova. Puoi anche scrivere invece.",
+      "unavailable": "Impossibile aprire il microfono. Controlla che sia collegato e non usato da un'altra app, poi premi Riprova.",
+      "transcribe": "Non è stato possibile trasformare la tua voce in testo. Controlla il modello di trascrizione, poi premi Riprova.",
+      "send": "Non è stato possibile inviare il messaggio alla chat. Premi Riprova per ascoltare di nuovo.",
+      "turn": "Non è stato possibile leggere la risposta della chat, quindi non è stata pronunciata. Premi Riprova per ascoltare di nuovo.",
+      "speech": "Non è stato possibile riprodurre la voce della risposta. Controlla il modello vocale, poi premi Riprova.",
+      "generic": "Live non può continuare."
+    },
+    "setup": {
+      "title": "Configura Live",
+      "description": "Live ha bisogno di un modello che trasformi la tua voce in testo e di uno che parli. Entrambi girano su questa istanza di LocalAI.",
+      "part": {
+        "stt": "Voce in testo",
+        "tts": "Voce"
+      },
+      "hint": {
+        "stt": "Trasforma in testo quello che dici.",
+        "tts": "Legge la risposta ad alta voce."
+      },
+      "install": "Installa",
+      "installing": "Installazione in corso",
+      "installLabel": "Installa {{model}}",
+      "retryLabel": "Riprova l'installazione di {{model}}",
+      "installed": "Installato",
+      "progress": "Avanzamento dell'installazione di {{model}}",
+      "failed": "L'installazione di {{model}} non è riuscita.",
+      "failedGeneric": "Non è stato possibile avviare l'installazione.",
+      "adminTitle": "Un amministratore deve installare questi modelli.",
+      "adminNote": "Chiedi a un amministratore di questa istanza di installare i modelli qui sopra. Live funziona quando sono installati entrambi.",
+      "working": "Installazione di {{models}}",
+      "ready": "Entrambi i modelli sono installati. Live è pronto.",
+      "start": "Avvia Live",
+      "close": "Chiudi",
+      "notShown": "Installato, ma il modello non è comparso. Riprova o ricarica la pagina."
+    }
+  },
+  "readAloud": {
+    "read": "Leggi ad alta voce",
+    "stop": "Smetti di leggere",
+    "ask": "Il tuo modello di sintesi vocale predefinito è impostato su \"chiedi ogni volta\". Scegli un modello in Predefiniti per leggere ad alta voce.",
+    "none": "Nessun modello di sintesi vocale è installato.",
+    "missing": "Il tuo modello di sintesi vocale predefinito non è installato. Scegline un altro in Predefiniti.",
+    "failed": "Non è stato possibile leggerlo ad alta voce.",
+    "omitted": {
+      "code": "Blocco di codice omesso.",
+      "table": "Tabella omessa."
+    }
+  },
+  "deleteShownDialog": {
+    "title": "Elimina le chat mostrate",
+    "message_one": "Eliminare la chat mostrata in {{project}} ({{count}})? Non si può annullare.",
+    "message_other": "Eliminare le {{count}} chat mostrate in {{project}}? Non si può annullare.",
+    "confirm": "Elimina le mostrate"
   }
 }

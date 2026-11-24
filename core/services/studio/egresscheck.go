@@ -58,7 +58,7 @@ func (c *egressChats) put(k, id string) {
 func (s *Service) chatForResource(ctx context.Context, p, rid string) (session.ChatRecord, error) {
 	k := p + "\x00" + rid
 	if id, ok := s.egressChats.get(k); ok {
-		rec, err := s.d.Store.GetChat(ctx, p, id)
+		rec, err := s.getChatEffective(ctx, p, id)
 		if err == nil {
 			return rec, nil
 		}
@@ -101,7 +101,7 @@ func (s *Service) egressPolicyOf(ctx context.Context, rec session.ChatRecord, op
 	attended := rec.Origin == "" && rec.Kind != session.KindSubAgent
 	preset := rec.Egress.Preset
 	if rec.Kind == session.KindSubAgent && rec.ParentID != "" {
-		parent, err := s.d.Store.GetChat(ctx, rec.Principal, rec.ParentID)
+		parent, err := s.getChatEffective(ctx, rec.Principal, rec.ParentID)
 		if err != nil {
 			return egressPolicy{}, err
 		}
@@ -132,7 +132,7 @@ func (s *Service) agentNetwork(ctx context.Context, rec session.ChatRecord) egre
 	if rec.AgentID == "" || s.d.Agents == nil {
 		return egress.PresetOff
 	}
-	ag, err := s.d.Agents.Get(ctx, rec.Principal, rec.AgentID)
+	ag, err := s.chatAgent(ctx, rec.Principal, rec.AgentID)
 	if err != nil || !egress.Preset(ag.Network).Valid() {
 		return egress.PresetOff
 	}
@@ -160,6 +160,11 @@ func (s *Service) EgressCheck(ctx context.Context, user, rid, op string, r egres
 	if err != nil {
 		return egress.Verdict{Action: egress.Block, Reason: "chat"}, err
 	}
+	if unattendedEgress(ctx) {
+		// A background job's connection while no turn runs: nobody can
+		// answer a card, so a host that needs the person's yes is blocked.
+		pol.chat.Attended = false
+	}
 	set, err := s.egressSettings(ctx)
 	if err != nil {
 		return egress.Verdict{Action: egress.Block, Reason: "policy_unavailable"}, err
@@ -175,6 +180,19 @@ func (s *Service) EgressCheck(ctx context.Context, user, rid, op string, r egres
 	line.Verdict, line.Reason = v.Action, v.Reason
 	s.auditEgress(ctx, line)
 	return v, err
+}
+
+type unattendedEgressKey struct{}
+
+// WithUnattendedEgress marks an egress check that no turn of the chat waits
+// on: the connection of a background job after the call that started it.
+func WithUnattendedEgress(ctx context.Context) context.Context {
+	return context.WithValue(ctx, unattendedEgressKey{}, true)
+}
+
+func unattendedEgress(ctx context.Context) bool {
+	v, _ := ctx.Value(unattendedEgressKey{}).(bool)
+	return v
 }
 
 // claimGrant ties a late "allow once" to the call that used it first, so it

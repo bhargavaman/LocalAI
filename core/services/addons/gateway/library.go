@@ -50,13 +50,21 @@ type LibraryCall struct {
 	Op string `json:"op"`
 	// ID names the source of update, enable, disable and remove.
 	ID string `json:"id,omitempty"`
-	// Kind, URL, Name, Format and Mirrors describe the source of add; update
+	// Kind, URL, Name, Format and Mirrors describe the source of add (with
+	// Issuer and Identity below); update
 	// takes Mirrors.
 	Kind    string   `json:"kind,omitempty"`
 	URL     string   `json:"url,omitempty"`
 	Name    string   `json:"name,omitempty"`
 	Format  string   `json:"format,omitempty"`
 	Mirrors []string `json:"mirrors,omitempty"`
+	// Issuer and Identity pin the signer of an oci:// add-on library (add
+	// only). IdentityRegex and SourceRepository are the pattern form of the
+	// signer; see library.AddRequest.
+	Issuer           string `json:"issuer,omitempty"`
+	Identity         string `json:"identity,omitempty"`
+	IdentityRegex    string `json:"identityRegex,omitempty"`
+	SourceRepository string `json:"sourceRepository,omitempty"`
 	// Known is the list version the caller holds (list only).
 	Known string `json:"known,omitempty"`
 	// SourceID, Backend and Version name the entry of backend-resolve.
@@ -92,7 +100,9 @@ func (c LibraryCall) valid() bool {
 }
 
 // libraryRead are the library actions that change nothing.
-var libraryRead = map[string]bool{"library-" + LibraryList: true, "library-" + LibraryBackendResolve: true, "library-" + LibraryBackendReleases: true}
+func init() {
+	markRead("library-"+LibraryList, "library-"+LibraryBackendResolve, "library-"+LibraryBackendReleases)
+}
 
 // The error types of a LibraryError. The frontend maps each to the sentinel the
 // owner's own routes would have seen, so both answer with the same status.
@@ -119,6 +129,13 @@ func (e *LibraryError) Error() string { return e.Message }
 type libraryReply struct {
 	Data  json.RawMessage `json:"data,omitempty"`
 	Error *LibraryError   `json:"error,omitempty"`
+}
+
+func (r *libraryReply) open() (json.RawMessage, bool, error) {
+	if r.Error != nil {
+		return nil, true, r.Error
+	}
+	return r.Data, true, nil
 }
 
 // LibraryAdmin is the owner's side of a library call. core/library imports this
@@ -200,6 +217,9 @@ func (g *Gateway) capabilities() Capabilities {
 	if g.HostGrantsOwner != nil {
 		c.Calls = append(c.Calls, CallHostGrants)
 	}
+	if g.OAuthOwner != nil {
+		c.Calls = append(c.Calls, callOAuth)
+	}
 	return c
 }
 
@@ -221,17 +241,7 @@ func (g *Gateway) libraryLocal(ctx context.Context, w http.ResponseWriter, actor
 		return
 	}
 	raw, e := g.Libraries.Library(ctx, actor, call)
-	var le *LibraryError
-	switch {
-	case e == nil:
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(libraryReply{Data: raw})
-	case errors.As(e, &le):
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(libraryReply{Error: le})
-	default:
-		typedError(w, e)
-	}
+	writeReply(w, e, libraryReply{Data: raw}, decided(func(le *LibraryError) any { return libraryReply{Error: le} }))
 }
 
 // capsCache keeps the owner's capabilities for one owner audience.
@@ -285,27 +295,8 @@ func (c *Carrier) Library(ctx context.Context, a contract.Actor, call LibraryCal
 	if !call.valid() {
 		return nil, ErrForbidden
 	}
-	id, e := newResourceOperationID()
-	if e != nil {
-		return nil, ErrUnavailable
-	}
-	resp, e := c.send(ctx, a, wireRequest{Request: contract.Request{OperationID: id, Action: call.wireAction()}, Library: &call})
-	if e != nil {
-		return nil, e
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, e := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
-	var reply libraryReply
-	if e != nil || len(raw) > 2<<20 || decode(bytes.NewReader(raw), &reply) != nil {
-		if mutation(call.wireAction()) {
-			return nil, &OutcomeUnknown{OperationID: id}
-		}
-		return nil, ErrUnavailable
-	}
-	if reply.Error != nil {
-		return nil, reply.Error
-	}
-	return reply.Data, nil
+	oc := ownerCall{action: call.wireAction(), limit: 2 << 20}
+	return forward[json.RawMessage, libraryReply](ctx, c, a, oc, wireRequest{Library: &call})
 }
 
 // LibrarySnapshot asks the owner for the source list that decides the
@@ -332,8 +323,8 @@ func (c *Carrier) LibrarySnapshot(ctx context.Context, known string) (json.RawMe
 	if resp.StatusCode != http.StatusOK {
 		return nil, ErrUnavailable
 	}
-	raw, e := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
-	if e != nil || len(raw) > 2<<20 {
+	raw, ok := readBounded(resp.Body, 2<<20)
+	if !ok {
 		return nil, ErrUnavailable
 	}
 	return raw, nil
@@ -368,13 +359,11 @@ func (c *Carrier) LibrarySystem(ctx context.Context, call LibraryCall) (json.Raw
 	if resp.StatusCode != http.StatusOK {
 		return nil, ErrUnavailable
 	}
-	raw, e := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
+	raw, ok := readBounded(resp.Body, 2<<20)
 	var reply libraryReply
-	if e != nil || len(raw) > 2<<20 || decode(bytes.NewReader(raw), &reply) != nil {
+	if !ok || decode(bytes.NewReader(raw), &reply) != nil {
 		return nil, ErrUnavailable
 	}
-	if reply.Error != nil {
-		return nil, reply.Error
-	}
-	return reply.Data, nil
+	data, _, refusal := reply.open()
+	return data, refusal
 }

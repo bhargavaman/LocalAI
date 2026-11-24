@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  initialSelection, toggleItem, selectAllItems, beginRun, summarize, failedIds, runSequential, canStart,
+  beginRun, summarize, failedIds, runSequential, canStart,
 } from '../../src/utils/bulkUpgrade.js'
 
 const items = [
@@ -10,14 +10,6 @@ const items = [
   { id: 'c', name: 'C', from: '1', to: '2', startable: true },
   { id: 'd', name: 'D', from: '1', to: '2', startable: true },
 ]
-
-test('bulk upgrade: only startable items are selected or selectable', () => {
-  assert.deepEqual([...initialSelection(items)], ['a', 'c', 'd'])
-  assert.deepEqual([...toggleItem(new Set(['a']), items, 'b')], ['a'], 'a blocked item never joins')
-  assert.deepEqual([...toggleItem(new Set(['a']), items, 'c')].sort(), ['a', 'c'])
-  assert.deepEqual([...toggleItem(new Set(['a', 'c']), items, 'a')], ['c'])
-  assert.deepEqual([...selectAllItems(items)], ['a', 'c', 'd'])
-})
 
 test('bulk upgrade: a run needs a selection and never starts twice', () => {
   assert.equal(beginRun(null, items, new Set()), null)
@@ -75,3 +67,18 @@ test('bulk upgrade: a retry runs only the failed items and may start after the r
   assert.deepEqual(again.order, ['a'])
   assert.equal(again.status.c, undefined, 'the retry starts a fresh run')
 })
+
+test('bulk upgrade: an item is upgrading, not done, until its runOne resolves', async () => {
+  const run = beginRun(null, items, new Set(['a']))
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const seen = []
+  const finished = runSequential(run, async () => { await gate; return { ok: true } }, { onUpdate: r => seen.push(r.status.a.phase) })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(seen, ['upgrading'], 'dispatching the work does not make it done')
+  release()
+  const end = await finished
+  assert.equal(end.status.a.phase, 'done')
+  assert.equal(summarize(end).done, 1)
+})
+

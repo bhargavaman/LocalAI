@@ -26,6 +26,21 @@ const (
 	officialSignerPrefix = "https://github.com/mudler/LocalAI/.github/workflows/addons-package.yml@"
 )
 
+// ReleaseAssetHosts are the hosts a library index or an archive download may
+// be redirected to. GitHub answers a release asset URL
+// (github.com/<owner>/<repo>/releases/download/<tag>/<file>) with a 302 to a
+// short-lived signed URL on its object store, so the official index of a
+// release cannot be read without following that hop. Only these https hosts
+// are followed, and the content keeps its own trust anchor: the signature
+// policy and the pinned digests of the entries. It is a variable so a test can
+// add an address it serves.
+var ReleaseAssetHosts = []string{
+	"github.com",
+	"raw.githubusercontent.com",
+	"objects.githubusercontent.com",
+	"release-assets.githubusercontent.com",
+}
+
 // releaseVersionRE matches the version of a tagged build: v<semver>. The
 // output of git describe for a commit after a tag (v1.2.3-14-gabc1234) does not
 // match, so such a build reads the development library.
@@ -76,6 +91,21 @@ func isOfficialAddonURL(url string) bool {
 // IsOfficialAddonURL reports whether url is the index of the official add-on
 // library that LocalAI itself ships: the master index or the index of a release.
 func IsOfficialAddonURL(url string) bool { return isOfficialAddonURL(url) }
+
+// IsOfficialPackage reports whether an installed package came from the
+// official add-on library with its signature checked: the receipt names the
+// official library at an address it has used, and the package was verified
+// with sigstore.
+func IsOfficialPackage(sourceID, sourceURL, verification string) bool {
+	return sourceID == OfficialLibraryID && verification == "sha256+sigstore" && isOfficialAddonURL(sourceURL)
+}
+
+// IsOfficialSource reports whether a library is the official add-on library:
+// it has the official ID and an address that the shipped library has used. The
+// ID alone is not enough, since an administrator names libraries freely.
+func IsOfficialSource(id, url string) bool {
+	return id == OfficialLibraryID && isOfficialAddonURL(url)
+}
 
 const (
 	// OfficialBackendLibraryID is the source ID of the backend library.

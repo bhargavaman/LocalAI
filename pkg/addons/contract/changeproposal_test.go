@@ -11,7 +11,7 @@ import (
 
 var _ = Describe("change proposals", func() {
 	It("names every kind and status once", func() {
-		Expect(ChangeKinds()).To(ConsistOf(ChangeMemory, ChangeProfile, ChangeSkill, ChangePage, ChangeDashboard))
+		Expect(ChangeKinds()).To(ConsistOf(ChangeMemory, ChangeProfile, ChangeSkill, ChangePage, ChangeDashboard, ChangeKnowledge, ChangeVoiceProfile))
 		for _, k := range ChangeKinds() {
 			Expect(ValidChangeKind(string(k))).To(BeTrue(), "kind %s", k)
 		}
@@ -28,6 +28,31 @@ var _ = Describe("change proposals", func() {
 		for _, s := range []ProposalStatus{ProposalApplied, ProposalDismissed, ProposalExpired, ProposalReverted, ProposalStale} {
 			Expect(s.Settled()).To(BeTrue(), "status %s", s)
 		}
+	})
+
+	It("omits proposer and project_node for an own proposal and round-trips them for a shared one", func() {
+		own := ChangeProposal{V: ChangeProposalVersion, ID: "c1", Kind: ChangeMemory, Scope: ScopeProject, Status: ProposalPending}
+		raw, err := json.Marshal(own)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(raw)).NotTo(ContainSubstring("proposer"))
+		Expect(string(raw)).NotTo(ContainSubstring("project_node"))
+		var back ChangeProposal
+		Expect(json.Unmarshal(raw, &back)).To(Succeed())
+		Expect(back.Proposer).To(BeEmpty())
+		shared := own
+		shared.Owner, shared.Proposer, shared.ProjectNode = "owner", "Alex", 42
+		raw, err = json.Marshal(shared)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(raw)).To(ContainSubstring(`"proposer":"Alex"`))
+		Expect(string(raw)).To(ContainSubstring(`"project_node":42`))
+		back = ChangeProposal{}
+		Expect(json.Unmarshal(raw, &back)).To(Succeed())
+		Expect(back).To(Equal(shared))
+		// A record written before the field existed reads with it empty.
+		back = ChangeProposal{}
+		Expect(json.Unmarshal([]byte(`{"v":1,"id":"old","kind":"memory","scope":"user","target":"x","status":"pending"}`), &back)).To(Succeed())
+		Expect(back.Proposer).To(BeEmpty())
+		Expect(back.ProjectNode).To(BeZero())
 	})
 
 	It("keeps the wire version and omits empty fields", func() {

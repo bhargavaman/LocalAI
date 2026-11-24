@@ -1,28 +1,14 @@
-// The state of an "upgrade all" run, as pure functions so the node unit tests
-// drive them without a browser. It knows nothing about add-ons or backends: an
-// item is { id, name, from, to, startable, reason } and the caller supplies the
-// function that upgrades one of them.
+// The state of the node-by-node run of the node dialog (useNodeUpdateRun), as
+// pure functions so the node unit tests drive them without a browser. Every
+// other update is an update run that the server owns (utils/upgradeRun.js).
+// An item is { id, name, from, to, startable, reason } and the caller supplies
+// the function that upgrades one of them.
 //
 // A run is { phase: 'running'|'finished', order, items, status } where
 // status[id] is { phase: 'queued'|'upgrading'|'done'|'failed'|'skipped', message }.
 
 // The items a person may pick: only the ones that can start.
 export const isStartable = (item) => Boolean(item && item.startable)
-
-export function initialSelection(items) {
-  return new Set(items.filter(isStartable).map(i => i.id))
-}
-
-export const selectAllItems = initialSelection
-
-export function toggleItem(selected, items, id) {
-  const item = items.find(i => i.id === id)
-  const next = new Set(selected)
-  if (!isStartable(item)) return next
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  return next
-}
 
 // The ids that would run: selected, startable, in the order of the list.
 function runnable(items, selected) {

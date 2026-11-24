@@ -26,13 +26,15 @@ const sendMessageDescription = "Write a message to a chat of the messaging app, 
 
 const sendMessageSchema = `{"type":"object","properties":{` +
 	`"text":{"type":"string","minLength":1,"maxLength":4000,"description":"The message."},` +
-	`"channel":{"type":"string","description":"The ID of a listed channel. Leave it out to write in this conversation."},` +
+	`"channel":{"type":"string","description":"The name or the ID of a listed channel. Leave it out to write in this conversation."},` +
 	`"thread":{"type":"string","description":"With channel: the ID of a thread in that channel, to answer in it."}},` +
 	`"required":["text"]}`
 
-// registerTalkbackTool registers send_message. The tool is for a chat that a
-// connector started, whose sender holds talkback.channels; the call checks the
-// capability that its target needs again.
+// registerTalkbackTool registers send_message. In a chat that a connector
+// started it is offered when the sender holds talkback.channels, and the call
+// checks the capability that its target needs again. In a chat in Studio, and
+// so in the runs of its loops, it is offered when the owner has a connection
+// that can receive messages (see studioSendTool).
 func (s *Service) registerTalkbackTool() error {
 	return s.builtins.Register(builtins.Tool{
 		ID: SendMessageName, Label: "Send a message", Description: sendMessageDescription, Unlisted: true,
@@ -43,10 +45,21 @@ func (s *Service) registerTalkbackTool() error {
 			switch {
 			case conns == nil:
 				return session.Tool{}, false, "connections to messaging apps are off on this server"
-			case c.Origin != session.OriginConnector || c.SubAgent:
+			case c.SubAgent:
+				return session.Tool{}, false, "only the agent of a messaging app connection writes there"
+			case c.Origin == "":
+				return s.studioSendTool(ctx, c)
+			case c.Origin != session.OriginConnector:
 				return session.Tool{}, false, "only the agent of a messaging app connection writes there"
 			}
-			return session.Tool{Description: sendMessageDescription, Schema: json.RawMessage(sendMessageSchema),
+			desc := sendMessageDescription
+			if conns.o.Store != nil {
+				if b, err := conns.o.Store.GetBinding(ctx, c.OriginID); err == nil {
+					holds, _ := c.Holds(contract.CapTalkbackChannels)
+					desc += channelsNote(b, holds, "With channel it writes in the channel itself, as a new message at the top, not in this thread; without channel it writes in this conversation and thread. Name the channel by its name or its ID.")
+				}
+			}
+			return session.Tool{Description: desc, Schema: json.RawMessage(sendMessageSchema),
 				Run: func(ctx context.Context, raw json.RawMessage) (string, error) {
 					return conns.sendMessageTool(ctx, c, raw)
 				}}, true, ""
@@ -83,6 +96,9 @@ func (c *Connectors) sendMessageTool(ctx context.Context, ch builtins.Chat, raw 
 		}
 		o.Kind, o.Capability, o.Chat, o.Thread = SendReply, contract.CapTalkbackChannels, chat, thread
 	default:
+		if ch, ok := MatchChannel(b, in.Channel); ok {
+			in.Channel = ch.ID
+		}
 		kind, capability, terr := ChannelTarget(b, in.Channel)
 		if terr != nil {
 			return "", terr

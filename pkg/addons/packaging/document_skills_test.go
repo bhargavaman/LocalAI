@@ -45,7 +45,7 @@ var _ = Describe("Sandbox document skills", func() {
 	It("proves every source block and local reference without Git or network", func() {
 		proof, err := os.ReadFile("testdata/document-skills-coverage.json")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fmt.Sprintf("%x", sha256.Sum256(proof))).To(Equal("7a53e69ef316847d2e8a3ce4afe2d4615425def7e8091a3a541343fc746f0f19"))
+		Expect(fmt.Sprintf("%x", sha256.Sum256(proof))).To(Equal("89189a96171b7f8c8da2d6897d89f4f56f4bf4870bb4274ad8aa4020c05592c6"))
 		cmd := exec.Command("python3", "document_skills_coverage.py", "check", "--skills", "../../../addons/sandbox/skills", "--proof", "testdata/document-skills-coverage.json", "--self-test")
 		output, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "%s", output)

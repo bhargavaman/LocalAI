@@ -2,11 +2,12 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
-import { chatChangesApi, filesApi } from '../utils/api'
+import { chatChangesApi, chatMemoryApi, filesApi } from '../utils/api'
+import { downloadFrom } from '../utils/chatThread'
 import { byteText } from '../utils/changeProposal'
-import { allFiles, groupId, groupKind, indexFits, indexUse } from '../utils/memoryFiles'
+import { allFiles, groupId, groupKind, indexFits, indexUse, noteTabs } from '../utils/memoryFiles'
 import Icon from './Icon'
-import { Button, Callout, EmptyState, LoadError, SkeletonRows } from './ui'
+import { Button, Callout, EmptyState, LoadError, SkeletonRows, Tabs } from './ui'
 import './memorytab.css'
 
 const READ_LIMIT = 64 * 1024
@@ -112,7 +113,26 @@ function FileRow({ file, group, t, busy, onDelete, onSaved, setError }) {
 
 function groupTitle(g, t) {
   const kind = groupKind(g)
+  // A group of a saved agent is named by the agent's name, when the host knows it.
+  if (g.label && (kind === 'agent' || kind === 'profile')) return t(`memoryPage.group.${kind}Named`, { name: g.label })
   return t(`memoryPage.group.${kind}`, { key: g.key })
+}
+
+// The tab strip of the notes list: yours, one tab for each agent, the agents
+// that were deleted, and the conversations.
+function NoteTabs({ tabs, active, onPick, t }) {
+  const label = (tb) => (tb.kind === 'agent' ? tb.name : t(`memoryPage.tabs.${tb.kind}`))
+  return (
+    <Tabs
+      label={t('memoryPage.tabs.label')}
+      idPrefix="mt"
+      panelId="mt-tabpanel"
+      value={active}
+      onChange={onPick}
+      testId="memory-tabs"
+      items={tabs.map(tb => ({ id: tb.id, label: label(tb), testId: 'memory-tab-button' }))}
+    />
+  )
 }
 
 // Settings > Memory: the notes the host puts in the prompt of a chat, with
@@ -120,7 +140,7 @@ function groupTitle(g, t) {
 // every source the host knows (the user's, each agent's, each connector
 // conversation's) and the agent profiles. The owner can read, edit and delete
 // them here; a model changes them only through a confirmed proposal.
-export default function MemoryTab({ addToast }) {
+export default function MemoryTab({ addToast, embedded = false }) {
   const { t } = useTranslation('chats')
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
@@ -128,6 +148,8 @@ export default function MemoryTab({ addToast }) {
   const [fail, setFail] = useState('')
   const [busy, setBusy] = useState(false)
   const [clear, setClear] = useState(false)
+  const [tabId, setTabId] = useState(null)
+  const [clearTab, setClearTab] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -165,10 +187,18 @@ export default function MemoryTab({ addToast }) {
 
   const groups = data.groups || []
   const total = allFiles(groups).length
+  const tabs = noteTabs(groups)
+  const tab = tabs.find((tb) => tb.id === tabId) || tabs.find((tb) => tb.groups.length) || tabs[0]
+  const tabFiles = allFiles(tab.groups)
+  const removeTab = async () => {
+    setClearTab(false)
+    await run(async () => { for (const f of tabFiles) await filesApi.remove(path(f.path)) }, t('memoryPage.cleared', { count: tabFiles.length }))
+  }
+  const pick = (id) => { setTabId(id); setClearTab(false) }
   const lim = data.limits || {}
   return (
     <div className="mt-tab" data-testid="memory-tab">
-      <p className="mt-lede">{t('memoryPage.lede')}</p>
+      {!embedded && <p className="mt-lede">{t('memoryPage.lede')}</p>}
       <p className="mt-limits" data-testid="memory-limits">
         {t('memoryPage.limits', { lines: lim.index_lines, index: byteText(lim.index_bytes), profile: byteText(lim.profile_bytes), turn: byteText(lim.turn_bytes) })}
       </p>
@@ -179,19 +209,45 @@ export default function MemoryTab({ addToast }) {
         <EmptyState variant="first-run" icon="memory" title={t('memoryPage.emptyTitle')} body={t('memoryPage.emptyBody')} testId="memory-empty" />
       ) : (
         <>
-          {groups.map((g) => (
-            <section key={groupId(g)} className="mt-group" aria-labelledby={`mt-${groupId(g)}`} data-testid="memory-group" data-group={groupId(g)}>
-              <h3 className="mt-group__title" id={`mt-${groupId(g)}`}>{groupTitle(g, t)}</h3>
-              <Use group={g} t={t} />
-              <ul className="mt-files">
-                {g.files.map((f) => (
-                  <FileRow key={f.path} file={f} group={g} t={t} busy={busy} onDelete={remove} setError={setFail}
-                    onSaved={(file) => { setNote(t('memoryPage.saved', { name: file.name })); load() }} />
-                ))}
-              </ul>
-            </section>
-          ))}
+          {tabs.length > 1 && <NoteTabs tabs={tabs} active={tab.id} onPick={pick} t={t} />}
+          <div id="mt-tabpanel" role={tabs.length > 1 ? 'tabpanel' : undefined} aria-labelledby={tabs.length > 1 ? `mt-tab-${tab.id}` : undefined} className="mt-panelgroup" data-testid="memory-tabpanel" data-tab={tab.id}>
+            {tab.kind === 'deleted' && <p className="mt-lede" data-testid="memory-deleted-note">{t('memoryPage.deletedNote')}</p>}
+            {tab.kind === 'channels' && <p className="mt-lede" data-testid="memory-channels-note">{t('memoryPage.tabs.channelsNote')}</p>}
+            {tab.groups.length === 0 && <p className="mt-lede" data-testid="memory-tab-empty">{t('memoryPage.tabEmpty')}</p>}
+            {tab.groups.map((g) => (
+              <section key={groupId(g)} className="mt-group" aria-labelledby={`mt-${groupId(g)}`} data-testid="memory-group" data-group={groupId(g)}>
+                <h3 className="mt-group__title" id={`mt-${groupId(g)}`}>{groupTitle(g, t)}</h3>
+                <Use group={g} t={t} />
+                <ul className="mt-files">
+                  {g.files.map((f) => (
+                    <FileRow key={f.path} file={f} group={g} t={t} busy={busy} onDelete={remove} setError={setFail}
+                      onSaved={(file) => { setNote(t('memoryPage.saved', { name: file.name })); load() }} />
+                  ))}
+                </ul>
+              </section>
+            ))}
+            {(tab.kind === 'agent' || tab.kind === 'deleted') && tabFiles.length > 0 && (
+              <div className="mt-foot">
+                {tab.kind === 'agent' && (
+                  <Button variant="secondary" size="sm" icon="download" data-testid="memory-tab-export" onClick={() => downloadFrom(chatMemoryApi.exportUrl('agent', tab.groups[0].key))}>{t('memoryPage.tabs.export')}</Button>
+                )}
+                {clearTab ? (
+                  <Callout tone="warn" role="alertdialog" testId="memory-tab-clear-confirm"
+                    actions={(
+                      <>
+                        <Button variant="danger" size="sm" autoFocus busy={busy} data-testid="memory-tab-clear-yes" onClick={removeTab}>{t('memoryPage.clearYes', { count: tabFiles.length })}</Button>
+                        <Button variant="ghost" size="sm" onClick={() => setClearTab(false)}>{t('proposal.cancelEdit')}</Button>
+                      </>
+                    )}
+                  >{t('memoryPage.clearAsk', { count: tabFiles.length })}</Callout>
+                ) : (
+                  <Button variant="danger" size="sm" icon="trash" disabled={busy} data-testid="memory-tab-clear" onClick={() => setClearTab(true)}>{t(tab.kind === 'deleted' ? 'memoryPage.tabs.clearDeleted' : 'memoryPage.tabs.clearAgent')}</Button>
+                )}
+              </div>
+            )}
+          </div>
           <div className="mt-foot">
+            <Button variant="secondary" size="sm" icon="download" data-testid="memory-export" onClick={() => downloadFrom(chatMemoryApi.exportUrl())}>{t('memorySettings.export')}</Button>
             {clear ? (
               <Callout tone="warn" role="alertdialog" testId="memory-clear-confirm"
                 actions={(

@@ -92,6 +92,9 @@ const Pages = page('pages', () => import('./pages/Pages'))
 const PageView = page(null, () => import('./pages/PageView'))
 const SharedPageView = page(null, () => import('./pages/SharedPageView'))
 const Agents = page('agents', () => import('./pages/Agents'))
+const Projects = page('projects', () => import('./pages/Projects'))
+const ProjectPage = page('projects', () => import('./pages/ProjectPage'))
+const SharedProjectPage = page('projects', () => import('./pages/SharedProjectPage'))
 const AgentCreate = page(null, () => import('./pages/AgentCreate'))
 const AgentPage = page(null, () => import('./pages/AgentPage'))
 const Skills = page('skills', () => import('./pages/Skills'))
@@ -107,8 +110,10 @@ const Models = page('models', () => import('./pages/Models'))
 const ManageRedirect = page('manage', () => import('./pages/ManageRedirect'))
 // Referenced only from JSX below — same blind spot as Activity further down.
 // eslint-disable-next-line no-unused-vars
-const OperateOverview = page('operate', () => import('./pages/OperateOverview'))
+const AdminOverview = page('operate', () => import('./pages/AdminOverview'))
 const Backends = page('backends', () => import('./pages/Backends'))
+const Updates = page('updates', () => import('./pages/Updates'))
+const UpdateBackend = page('update-backend', () => import('./pages/UpdateBackend'))
 // Only referenced from JSX below, which eslint cannot see without
 // eslint-plugin-react. Suppressed here rather than left to widen the file's
 // warning count; the surrounding page consts predate the lint baseline.
@@ -117,6 +122,8 @@ const Activity = page('activity', () => import('./pages/Activity'))
 const Settings = page('settings', () => import('./pages/Settings'))
 const Traces = page('traces', () => import('./pages/Traces'))
 const P2P = page('p2p', () => import('./pages/P2P'))
+const P2PSettings = page('p2p', () => import('./pages/P2PSettings'))
+const Federation = page('p2p', () => import('./pages/Federation'))
 const Collections = page('collections', () => import('./pages/Collections'))
 const ModelEditor = page(null, () => import('./pages/ModelEditor'))
 // Rendered by Models, through its <Outlet/>: the list stays mounted behind it.
@@ -125,10 +132,13 @@ const ModelPage = page(null, () => import('./pages/ModelPage'))
 // PipelineEditor removed — the Model Editor with templates handles all model types
 const ImportModel = page(null, () => import('./pages/ImportModel'))
 const BackendLogs = page(null, () => import('./pages/BackendLogs'))
-const Explorer = page(null, () => import('./pages/Explorer'))
 const Login = page(null, () => import('./pages/Login'))
 const Nodes = page('nodes', () => import('./pages/Nodes'))
-const Scheduling = page('scheduling', () => import('./pages/Scheduling'))
+// Placement holds the rules and the failover chains as two views of one page.
+// eslint-disable-next-line no-unused-vars
+const Placement = page('scheduling', () => import('./pages/Placement'))
+// eslint-disable-next-line no-unused-vars
+const FailoverEntry = page('failover', () => import('./pages/Placement').then(m => ({ default: m.FailoverEntry })))
 const NodeBackendLogs = page(null, () => import('./pages/NodeBackendLogs'))
 const NodeDetail = page(null, () => import('./pages/NodeDetail'))
 // eslint-disable-next-line no-unused-vars
@@ -153,8 +163,8 @@ const Prometheus = page(null, () => import('./pages/Prometheus'))
 // eslint-disable-next-line no-unused-vars
 const TracePage = page(null, () => import('./pages/TracePage'))
 const Users = page('users', () => import('./pages/Users'))
+const ApiKeys = page('api-keys', () => import('./pages/ApiKeys'))
 const Middleware = page('middleware', () => import('./pages/Middleware'))
-const Failover = page('failover', () => import('./pages/Failover'))
 const Account = page('account', () => import('./pages/Account'))
 const Addons = page('addons', () => import('./pages/Addons'))
 // Only referenced from JSX below, which eslint cannot see.
@@ -167,11 +177,14 @@ const MCPConnectors = page('mcp-connectors', () => import('./pages/MCPConnectors
 import HubLayout from './components/hub/HubLayout'
 // Only referenced from JSX below, which eslint cannot see.
 // eslint-disable-next-line no-unused-vars
+import AdminLayout from './components/admin/AdminLayout'
+// Only referenced from JSX below, which eslint cannot see.
+// eslint-disable-next-line no-unused-vars
 import { AddonRegistryProvider } from './addons/registry'
 import { useAuth } from './context/AuthContext'
 import { NavigationProvider, useNavigation } from './context/NavigationContext'
 import { bareChatsRedirect, chatsRedirect } from './utils/legacyRoutes'
-import { legacyAddonsHub, operateHub } from './components/hub/hubConfig'
+import { legacyAddonsHub } from './components/hub/hubConfig'
 import { useHubAuth } from './components/hub/useHubAuth'
 
 // The old chat page became the chats and the old agent-jobs pages became the
@@ -243,6 +256,15 @@ function ServerSwitch({ name, to, children }) {
   return children
 }
 
+// The Connections item opens the connectors page. A person who holds chats but
+// not connectors has the MCP servers tab only, so the address leads there.
+function ConnectionsEntry() {
+  const { hasFeature, loading } = useAuth()
+  if (loading) return null
+  if (!hasFeature('connectors') && hasFeature('chats')) return <Navigate to="/app/mcp-connectors" replace />
+  return <Feature feature="connectors"><ChatConnectors /></Feature>
+}
+
 function Feature({ feature, disabled, children }) {
   return <RequireFeature feature={feature} disabled={disabled}>{children}</RequireFeature>
 }
@@ -254,7 +276,7 @@ const appChildren = [
   { path: 'chats/agents', element: <ChatsRedirect /> },
   { path: 'chats/skills', element: <ChatsRedirect /> },
   { path: 'chats/triggers', element: <ChatsRedirect /> },
-  { path: 'chats/connectors', element: <Feature feature="connectors"><ChatConnectors /></Feature> },
+  { path: 'chats/connectors', element: <ConnectionsEntry /> },
   { path: 'chats/conversion', element: <Feature feature="chats"><ChatConversion /></Feature> },
   { path: 'chats/proposals', element: <Feature feature="chats"><Proposals /></Feature> },
   // One route for a new chat and an open one, so the page stays mounted when a
@@ -265,6 +287,9 @@ const appChildren = [
   { path: 'pages', element: <Feature feature="chats"><Feature feature="pages"><Pages /></Feature></Feature> },
   { path: 'pages/:name', element: <Feature feature="chats"><Feature feature="pages"><PageView /></Feature></Feature> },
   { path: 'pages/shared/:folder/:name', element: <Feature feature="chats"><Feature feature="pages"><SharedPageView /></Feature></Feature> },
+  { path: 'projects', element: <Feature feature="chats"><Projects /></Feature> },
+  { path: 'projects/shared/:ref', element: <Feature feature="chats"><SharedProjectPage /></Feature> },
+  { path: 'projects/:id', element: <Feature feature="chats"><ProjectPage /></Feature> },
   { path: 'agents', element: <Feature feature="agents"><Agents /></Feature> },
   { path: 'agents/new', element: <Feature feature="agents"><AgentCreate /></Feature> },
   { path: 'agents/:id/edit', element: <Feature feature="agents"><AgentCreate /></Feature> },
@@ -306,14 +331,16 @@ const appChildren = [
   { path: 'agent-jobs/*', element: <ChatsRedirect /> },
   { path: 'agent-jobs', element: <ChatsRedirect /> },
 
-  // Operate hub (admin): one tab bar over the runtime, cluster, traffic and
-  // settings pages.
+  // Administration (admin): its own sidebar (components/admin) lists the
+  // runtime, cluster, traffic, access and settings pages.
   {
-    element: <HubLayout config={operateHub} />,
+    element: <AdminLayout />,
     children: [
-      { path: 'operate', element: <Admin><OperateOverview /></Admin> },
+      { path: 'operate', element: <Admin><AdminOverview /></Admin> },
       { path: 'backends', element: <Admin><Backends /></Admin> },
       { path: 'activity', element: <Admin><Activity /></Admin> },
+      { path: 'updates', element: <Admin><Updates /></Admin> },
+      { path: 'updates/backend/:name', element: <Admin><UpdateBackend /></Admin> },
       { path: 'settings', element: <Admin><Settings /></Admin> },
       { path: 'traffic', element: <Admin><TrafficOverview /></Admin> },
       { path: 'traffic/models', element: <Admin><TrafficModels /></Admin> },
@@ -324,16 +351,20 @@ const appChildren = [
       { path: 'backend-logs', element: <Admin><BackendLogs /></Admin> },
       { path: 'backend-logs/:modelId', element: <Admin><BackendLogs /></Admin> },
       { path: 'p2p', element: <Admin><P2P /></Admin> },
+      { path: 'p2p/settings', element: <Admin><P2PSettings /></Admin> },
+      { path: 'p2p/federation', element: <Admin><Federation /></Admin> },
       { path: 'nodes', element: <Admin><Nodes /></Admin> },
       { path: 'nodes/add', element: <Admin><AddNode /></Admin> },
       { path: 'nodes/:id', element: <Admin><NodeDetail /></Admin> },
-      { path: 'scheduling', element: <Admin><Scheduling /></Admin> },
+      { path: 'scheduling', element: <Admin><Placement view="rules" /></Admin> },
+      { path: 'scheduling/failover', element: <Admin><Placement view="failover" /></Admin> },
       { path: 'node-backend-logs/:nodeId/:modelId', element: <Admin><NodeBackendLogs /></Admin> },
       { path: 'usage', element: <Usage /> },
       { path: 'users', element: <RequireAuthEnabled><Admin><Users /></Admin></RequireAuthEnabled> },
+      { path: 'api-keys', element: <RequireAuthEnabled><Admin><ApiKeys /></Admin></RequireAuthEnabled> },
       { path: 'chats-admin', element: <Admin><ServerSwitch name="chats" to="/app/operate"><ChatsAdmin /></ServerSwitch></Admin> },
       { path: 'middleware', element: <Admin><Middleware /></Admin> },
-      { path: 'failover', element: <Admin><Failover /></Admin> },
+      { path: 'failover', element: <Admin><FailoverEntry /></Admin> },
     ],
   },
 
@@ -361,10 +392,6 @@ export const router = createBrowserRouter([
   {
     path: '/invite/:code',
     element: <Login />,
-  },
-  {
-    path: '/explorer',
-    element: <Explorer />,
   },
   {
     path: '/app',

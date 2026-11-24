@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,9 +15,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
+	"github.com/mudler/LocalAI/pkg/atomicfile"
 	"github.com/mudler/xlog"
 
 	"github.com/mudler/LocalAI/core/services/addons/apps"
@@ -85,6 +85,13 @@ const (
 	// CauseDowngradeRefused: the file holds an older version and the request
 	// did not confirm the downgrade.
 	CauseDowngradeRefused = "downgrade_refused"
+	// CauseInstalledIncompatible: the installed package was built for an API,
+	// protocol or data format this host no longer runs. It cannot be turned
+	// on; an upgrade to a compatible release can.
+	CauseInstalledIncompatible = "installed_incompatible"
+	// CauseNeedsNewerHost: the add-on needs a higher feature level than this
+	// host has (see contract.HostFeatureLevel).
+	CauseNeedsNewerHost = "needs_newer_host"
 )
 
 // FailureCause is the typed cause of a failed operation. Its text is fixed and
@@ -121,7 +128,11 @@ type Manager struct {
 	upgradeActive, upgradeClosing bool
 	// opMu serializes Submit and Reconcile as whole operations, so mu can be
 	// released around a slow fetch without letting another operation in.
-	opMu                    sync.Mutex
+	opMu sync.Mutex
+	// stageMu keeps Reconcile from cleaning the stage folder while a host
+	// access preview stages a package. A preview holds it for reading and
+	// never opMu, so a slow preview download does not hold back an install.
+	stageMu                 sync.RWMutex
 	toolCache               map[string]toolDeclaration
 	config                  OwnerConfig
 	catalog                 catalog.Catalog
@@ -165,6 +176,8 @@ type Manager struct {
 	autoFailures map[string]string
 	// heldUpgrades holds, per add-on, an upgrade that waits for approval.
 	heldUpgrades map[string]heldUpgrade
+	// previews keeps the verified answer of the host access preview per release.
+	previews previewCache
 	// skillSync keeps the chats' skill layer in step with the installed
 	// packages. Nil until the chats' files exist (see SetSkillSync).
 	skillSync SkillSync
@@ -190,6 +203,8 @@ type Manager struct {
 	// uploads holds the zip files waiting for an install. Nil means the owner
 	// does not install from a file.
 	uploads atomic.Pointer[uploads.Store]
+	// view is the copy of the journal that reads use; see readview.go.
+	view atomic.Pointer[readView]
 }
 
 // SetAuthority sets the Authority that admission and the apps list ask. The
@@ -548,7 +563,7 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 			return op.Status, e
 		}
 	} else if !resumed {
-		op = journalOperation{Command: cmd, Actor: actor, Status: OperationStatus{OperationID: cmd.OperationID, AddonID: cmd.AddonID, Phase: string(lifecycleIntent)}}
+		op = journalOperation{Command: cmd, Actor: actor, StartedAt: time.Now().UTC().Format(time.RFC3339), Status: OperationStatus{OperationID: cmd.OperationID, AddonID: cmd.AddonID, Phase: string(lifecycleIntent)}}
 		m.journal.Operations[cmd.OperationID] = op
 		if e := m.persist(string(lifecycleIntent)); e != nil {
 			return op.Status, e
@@ -564,6 +579,11 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 		op.Status.Stage = m.journal.Operations[cmd.OperationID].Status.Stage
 		op.Status.Phase = string(lifecycleFailed)
 		op.Status.FailureCode = "upgrade_failed"
+		if ctx.Err() != nil {
+			// A fetch stopped by a cancel reports a fetch error, not the
+			// cancel; the context says what happened.
+			op.Status.FailureCode = "interrupted"
+		}
 		for _, c := range cause {
 			if errors.Is(c, context.Canceled) || errors.Is(c, context.DeadlineExceeded) {
 				op.Status.FailureCode = "interrupted"
@@ -630,9 +650,11 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 			// available, and opMu keeps every other operation out.
 			var r catalog.Release
 			var resolveErr error
-			if e := m.upgradeStage(cmd.OperationID, "preparing-package"); e != nil {
+			if e := m.upgradeStage(cmd.OperationID, stagePreparing); e != nil {
 				return op.Status, e
 			}
+			report := installProgressFrom(ctx)
+			report(InstallProgress{Phase: InstallPhaseResolving, Cancellable: true})
 			m.mu.Unlock()
 			fromFile := cmd.SourceID == zipformat.SourceID
 			var staged packages.StagedPackage
@@ -648,7 +670,7 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 					r, resolveErr = m.resolveRelease(ctx, cmd)
 				}
 				if resolveErr == nil {
-					staged, stageErr = m.installer.Stage(ctx, r, nil)
+					staged, stageErr = m.installer.Stage(ctx, r, stageProgress(report))
 				}
 			}
 			m.mu.Lock()
@@ -658,6 +680,10 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 			if stageErr != nil {
 				if errors.Is(stageErr, uploads.ErrNotFound) {
 					return fail(stageErr, &FailureCause{Code: CauseFileMissing, detail: stageErr})
+				}
+				var level *contract.FeatureLevelRefusal
+				if errors.As(stageErr, &level) {
+					return fail(stageErr, &FailureCause{Code: CauseNeedsNewerHost, detail: stageErr})
 				}
 				return fail(stageErr, &FailureCause{Code: CausePackageFetch, detail: stageErr})
 			}
@@ -705,32 +731,43 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 			if release != nil {
 				// An explicit upgrade never changes the trusted identity,
 				// the library or the channel, whatever the add-on holds.
-				if last, ok := lastReceipt(m.journal.Addons[cmd.AddonID]); !ok || recovery.CheckCompatible(last, staged.Receipt()) != nil || staged.Receipt().Digest != cmd.CandidateDigest {
-					return fail()
+				last, ok := lastReceipt(m.journal.Addons[cmd.AddonID])
+				if !ok {
+					return fail(logOnly("the add-on has no installed generation to upgrade"))
+				}
+				if e := recovery.CheckCompatible(last, staged.Receipt()); e != nil {
+					return fail(logOnly("the candidate is not compatible with the installed generation: " + e.Error()))
+				}
+				if staged.Receipt().Digest != cmd.CandidateDigest {
+					return fail(logOnly("the candidate digest is not the one that was reviewed"))
 				}
 			}
 			if m.recovery != nil && m.recovery.HasData(cmd.AddonID) {
 				// Retained data is only handed to the same trusted identity
 				// and never to an older data format: this holds for an
 				// upgrade and for a reinstall alike.
-				if last, ok := lastReceipt(m.journal.Addons[cmd.AddonID]); ok && recovery.CheckCompatible(last, staged.Receipt()) != nil {
-					return fail()
+				if last, ok := lastReceipt(m.journal.Addons[cmd.AddonID]); ok {
+					if e := recovery.CheckCompatible(last, staged.Receipt()); e != nil {
+						return fail(logOnly("the package is not compatible with the retained data: " + e.Error()))
+					}
 				}
 				if cmd.Action != "upgrade" {
 					// A reinstall has no running generation to back up, and
 					// the candidate would migrate the retained data when it
 					// starts. Only an upgrade takes a verified backup first.
 					if last, ok := lastReceipt(m.journal.Addons[cmd.AddonID]); ok && recovery.FormatChanged(last, staged.Receipt()) {
-						return fail()
+						return fail(logOnly("a reinstall cannot migrate the retained data without a backup, and the package changes the data format"))
 					}
 				}
 				if cmd.Action == "upgrade" {
+					report(InstallProgress{Phase: InstallPhaseStarting})
 					return m.upgradeWithRecovery(ctx, cmd, op, &next, staged, fail)
 				}
 			}
-			if e = m.upgradeStage(cmd.OperationID, "committing-package"); e != nil {
+			if e = m.upgradeStage(cmd.OperationID, stageCommitting); e != nil {
 				return op.Status, e
 			}
+			report(InstallProgress{Phase: InstallPhaseCommitting})
 			receipt, e = m.installer.Commit(ctx, staged)
 			if e != nil {
 				return fail(&FailureCause{Code: CauseInstallStorage, detail: fmt.Errorf("commit: %w", e)})
@@ -754,6 +791,10 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 		// it replaces the last good one in the journal. When it cannot, the
 		// last good generation runs again and the operation fails.
 		if cmd.Action == "upgrade" {
+			if e := m.upgradeStage(cmd.OperationID, stageStarting); e != nil {
+				return op.Status, e
+			}
+			installProgressFrom(ctx)(InstallProgress{Phase: InstallPhaseStarting})
 			if e := m.startCandidate(ctx, cmd.AddonID, m.journal.Addons[cmd.AddonID], receipt, next.Generation); e != nil {
 				if ctx.Err() != nil {
 					// The caller went away, which says nothing about the
@@ -765,7 +806,7 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 					m.canceled[cmd.OperationID] = receipt
 					return op.Status, e
 				}
-				return fail()
+				return fail(startCause(e))
 			}
 		}
 	case "enable":
@@ -774,7 +815,14 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 		}
 		// Data that needs recovery is not served: it is restored or purged first.
 		if m.dataBlocked(cmd.AddonID) {
-			return fail()
+			return fail(logOnly("the retained data needs recovery before the add-on can be served"))
+		}
+		// A package the host cannot run would only fail to start and leave
+		// the add-on off with no reason. Say so, and keep the upgrade open.
+		if r, ok := currentReceipt(m.journal.Addons[cmd.AddonID]); ok && m.installer != nil {
+			if contract.ValidateManifest(r.Manifest, m.installer.Host) != nil {
+				return fail(&FailureCause{Code: CauseInstalledIncompatible})
+			}
 		}
 		next.DesiredEnabled = true
 	case "disable":
@@ -815,15 +863,48 @@ func (m *Manager) submit(ctx context.Context, actor contract.Actor, cmd Lifecycl
 	return result, m.syncFor(ctx, cmd.AddonID)
 }
 
+// logOnly is a cause that only the owner log shows. It has no wire code, so
+// the answer to the client stays the generic failure. It does not unwrap, so
+// no typed handling in fail() applies to the text.
+type logOnly string
+
+func (c logOnly) Error() string { return string(c) }
+
+// maxCauseText bounds one cause in the log, in runes.
+const maxCauseText = 400
+
+var (
+	causeURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
+	causeSecretPair  = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:token|secret|password|passwd|apikey|api_key|authorization|credential)[a-z0-9_.-]*)\s*[=:]\s*\S+`)
+)
+
+// boundCause makes the text of an error fit one log field: one line, no
+// credentials in URLs or in key=value pairs, at most maxCauseText runes.
+func boundCause(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	text = causeURLUserinfo.ReplaceAllString(text, "${1}[redacted]@")
+	text = causeSecretPair.ReplaceAllString(text, "${1}=[redacted]")
+	if r := []rune(text); len(r) > maxCauseText {
+		text = string(r[:maxCauseText]) + "..."
+	}
+	return text
+}
+
+// startCause is the log cause of a candidate generation that did not start or
+// did not complete its handshake. The previous generation was restored.
+func startCause(e error) error {
+	return logOnly("the new generation did not start; the previous generation was kept: " + boundCause(addonruntime.Cause(e)))
+}
+
 // describeCauses is the text of the errors a failed operation had, for the log.
 func describeCauses(causes []error) string {
 	var parts []string
 	for _, c := range causes {
 		var typed *FailureCause
 		if errors.As(c, &typed) && typed.detail != nil {
-			parts = append(parts, typed.Code+": "+typed.detail.Error())
+			parts = append(parts, typed.Code+": "+boundCause(addonruntime.Cause(typed.detail)))
 		} else if c != nil {
-			parts = append(parts, c.Error())
+			parts = append(parts, boundCause(addonruntime.Cause(c)))
 		}
 	}
 	if len(parts) == 0 {
@@ -895,7 +976,12 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		return e
 	}
 	m.uncertain = false
-	if e := m.cleanStages(); e != nil {
+	// A preview stages under stageMu only, so it does not wait for an
+	// install; the stage folder is cleaned only when no preview stages.
+	m.stageMu.Lock()
+	e := m.cleanStages()
+	m.stageMu.Unlock()
+	if e != nil {
 		return e
 	}
 	for id, op := range m.journal.Operations {
@@ -954,6 +1040,12 @@ func syncPackage(root string) error {
 			return e
 		}
 		e = f.Sync()
+		if e != nil && atomicfile.SyncDenied(e) {
+			// Windows: a Sync through a read-only handle fails (FlushFileBuffers
+			// needs a writable handle) even though the data is durable; the
+			// immutable 0400 files of an installed package are read-only.
+			e = nil
+		}
 		return errors.Join(e, f.Close())
 	})
 	if e != nil {
@@ -965,87 +1057,16 @@ func syncPackage(root string) error {
 		if e != nil {
 			return e
 		}
-		e = f.Sync()
+		// The established directory-sync helper: on Windows the directory
+		// handle's Sync fails with "Access is denied" and the file data is
+		// already durable.
+		e = atomicfile.SyncDirTolerant(f)
 		e = errors.Join(e, f.Close())
 		if e != nil {
 			return e
 		}
 	}
 	return nil
-}
-
-// Only unpublished Installer staging is collectible. An unreferenced published
-// package may be the result of a crash before prepared; retain it for inspection.
-func (m *Manager) cleanStages() error {
-	root, e := openPackageRoot(m.installer.Root)
-	if os.IsNotExist(e) {
-		return nil
-	}
-	if e != nil {
-		return e
-	}
-	defer func() { _ = root.Close() }()
-	entries, e := fs.ReadDir(root.FS(), ".")
-	if e != nil {
-		return e
-	}
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "stage-") {
-			continue
-		}
-		if e = fs.WalkDir(root.FS(), entry.Name(), func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			// Descriptor chmod avoids following a link swapped in after WalkDir.
-			f, err := root.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
-			if err != nil {
-				return err
-			}
-			return errors.Join(f.Chmod(0700), f.Close()) // #nosec G122 -- the tree is owned by this process and locked; the walk only normalises its own files
-		}); e != nil {
-			return e
-		}
-		if e = root.RemoveAll(entry.Name()); e != nil {
-			return e
-		}
-	}
-	return nil
-}
-
-// Pin each ancestor and reject links, including the package root, before any
-// enumeration or mutation. Root operations keep later path races contained.
-func openPackageRoot(path string) (*os.Root, error) {
-	root, err := os.OpenRoot(string(filepath.Separator))
-	if err != nil {
-		return nil, err
-	}
-	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator)), string(filepath.Separator)) {
-		info, e := root.Lstat(part)
-		if e != nil {
-			_ = root.Close()
-			return nil, e
-		}
-		if !info.IsDir() {
-			_ = root.Close()
-			return nil, ErrConfiguration
-		}
-		next, e := root.OpenRoot(part)
-		_ = root.Close()
-		if e != nil {
-			return nil, e
-		}
-		pinned, e := next.Stat(".")
-		if e != nil || !os.SameFile(info, pinned) {
-			_ = next.Close()
-			return nil, ErrConfiguration
-		}
-		root = next
-	}
-	return root, nil
 }
 
 // AttachRuntime is owner-only. Durable reconciliation precedes process execution.
@@ -1073,6 +1094,20 @@ func (m *Manager) syncFor(ctx context.Context, id string) error {
 		return e
 	}
 	return m.startFailed[id]
+}
+
+// StartFailure is the reason, for people, why an enabled add-on is not
+// running, when its last start gave one (WSL 2 cannot run an add-on that
+// needs it, for one). It is empty otherwise, also for a failure whose text is
+// not meant for people. It is an observation of this owner process.
+func (m *Manager) StartFailure(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var r *addonruntime.StartRefusal
+	if errors.As(m.startFailed[id], &r) {
+		return r.Reason
+	}
+	return ""
 }
 
 // startCandidate stops the running generation of an enabled add-on and starts
@@ -1119,6 +1154,7 @@ func (m *Manager) startCandidate(ctx context.Context, id string, prev Status, re
 		// Recorded so that the next command on this add-on, with any
 		// operation ID, tries the journaled generation again.
 		m.startFailed[id] = be
+		xlog.Warn("Addon previous generation did not restart after a failed upgrade", "addonId", id, "generation", g.Number, "cause", boundCause(addonruntime.Cause(be)))
 	}
 	return e
 }
@@ -1215,6 +1251,7 @@ func (m *Manager) syncRuntime(ctx context.Context, target string) error {
 				continue
 			}
 			m.startFailed[l.id] = l.err
+			xlog.Warn("An add-on did not start", "addon", l.id, "error", l.err)
 			continue
 		}
 		delete(m.startFailed, l.id)
@@ -1248,7 +1285,14 @@ func (m *Manager) Runtime(ctx context.Context, id string) (addonruntime.Instance
 // ConnectorKind is a kind of connector binding that a running add-on serves.
 type ConnectorKind struct {
 	AddonID string
+	// AuthKind is contract.CredentialKindOAuth2 when the add-on's credential
+	// slot is an OAuth login, and empty otherwise.
+	AuthKind string
 	contract.ConnectorKind
+	// Translations is the manifest's i18n text of this kind, by language tag.
+	// It is display text only and is never part of the kind that the add-on
+	// registers.
+	Translations map[string]contract.KindText `json:"translations,omitempty"`
 }
 
 // ConnectorKinds lists the connector kinds of the add-ons that run now. An
@@ -1272,8 +1316,20 @@ func (m *Manager) ConnectorKinds(ctx context.Context) ([]ConnectorKind, error) {
 		if r.Capabilities.Connector == nil {
 			continue
 		}
+		var manifest contract.Manifest
+		if st, ok := m.journal.Addons[r.AddonID]; ok {
+			if receipt, ok := currentReceipt(st); ok {
+				manifest = receipt.Manifest
+			}
+		}
+		auth := ""
+		for _, slot := range r.Capabilities.Credentials {
+			if slot.Kind == contract.CredentialKindOAuth2 {
+				auth = contract.CredentialKindOAuth2
+			}
+		}
 		for _, k := range r.Capabilities.Connector.Kinds {
-			out = append(out, ConnectorKind{AddonID: r.AddonID, ConnectorKind: k})
+			out = append(out, ConnectorKind{AddonID: r.AddonID, AuthKind: auth, ConnectorKind: k, Translations: manifest.KindTranslations(k.ID)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AddonID+"/"+out[i].ID < out[j].AddonID+"/"+out[j].ID })
@@ -1293,6 +1349,49 @@ func (m *Manager) Connector(ctx context.Context, addonID string, req contract.Co
 	return cr.Connector(ctx, req)
 }
 
+// clientRuntime returns the running add-on as one that serves client routes.
+// An add-on that is not running, or declared none, is not one.
+func (m *Manager) clientRuntime(ctx context.Context, addonID string) (contract.ClientCaller, contract.ClientRouteSource, error) {
+	instance, e := m.Runtime(ctx, addonID)
+	if e != nil {
+		return nil, nil, e
+	}
+	cc, ok := instance.Client.(contract.ClientCaller)
+	src, ok2 := instance.Client.(contract.ClientRouteSource)
+	if !ok || !ok2 {
+		return nil, nil, addonruntime.ErrRuntime
+	}
+	return cc, src, nil
+}
+
+// ClientRoutes lists the client routes of a running add-on.
+func (m *Manager) ClientRoutes(ctx context.Context, addonID string) ([]contract.ClientRoute, error) {
+	_, src, e := m.clientRuntime(ctx, addonID)
+	if e != nil {
+		return nil, e
+	}
+	return src.ClientRoutes(), nil
+}
+
+// Client calls a client route of a running add-on that does not stream, on
+// behalf of the actor of a client (see contract.ClientCaller).
+func (m *Manager) ClientCall(ctx context.Context, addonID string, actor contract.Actor, req contract.ClientRequest) (contract.ClientResponse, error) {
+	cc, _, e := m.clientRuntime(ctx, addonID)
+	if e != nil {
+		return contract.ClientResponse{}, e
+	}
+	return cc.ClientCallAs(ctx, actor, req)
+}
+
+// ClientStream opens a client route of a running add-on that streams.
+func (m *Manager) ClientStream(ctx context.Context, addonID string, actor contract.Actor, req contract.ClientRequest) (io.ReadCloser, error) {
+	cc, _, e := m.clientRuntime(ctx, addonID)
+	if e != nil {
+		return nil, e
+	}
+	return cc.ClientStreamAs(ctx, actor, req)
+}
+
 // OperationStatus only observes lifecycle intent. It never resumes a command or
 // infers runtime completion from a completed journal publication.
 func (m *Manager) OperationStatus(ctx context.Context, actor contract.Actor, id string) (OperationStatus, error) {
@@ -1307,7 +1406,7 @@ func (m *Manager) OperationStatus(ctx context.Context, actor contract.Actor, id 
 		if m.admin == nil || m.admin(ctx, actor) != nil {
 			return OperationStatus{}, ErrForbidden
 		}
-		if view.Actor != actor {
+		if !sameOperationOwner(view.Actor, actor) {
 			return OperationStatus{}, ErrOperationNotFound
 		}
 		if err := ctx.Err(); err != nil {
@@ -1333,7 +1432,7 @@ func (m *Manager) OperationStatus(ctx context.Context, actor contract.Actor, id 
 		return OperationStatus{}, ErrForbidden
 	}
 	op, ok := m.journal.Operations[id]
-	if !ok || op.Actor.UserID == "" || op.Actor.CredentialID == "" || (op.Actor.Mode != "named-user" && op.Actor.Mode != "local-owner") || op.Actor != actor {
+	if !ok || op.Actor.UserID == "" || op.Actor.CredentialID == "" || (op.Actor.Mode != "named-user" && op.Actor.Mode != "local-owner") || !sameOperationOwner(op.Actor, actor) {
 		return OperationStatus{}, ErrOperationNotFound
 	}
 	result := OperationStatus{OperationID: id, AddonID: op.Status.AddonID, Phase: op.Status.Phase, Generation: op.Status.Generation, RuntimeState: "not-observed", HostOperations: copyRequestSummary(op.Status.HostOperations)}
@@ -1345,6 +1444,14 @@ func (m *Manager) OperationStatus(ctx context.Context, actor contract.Actor, id 
 
 var ErrOperationNotFound = errors.New("addon lifecycle operation not found")
 
+// sameOperationOwner says whether a reader owns an operation. The owner is the
+// user, not the credential: a browser session id changes at every login, so
+// comparing it would hide the operation of an earlier session from the same
+// administrator. Another user still gets the answer for a missing operation.
+func sameOperationOwner(owner, reader contract.Actor) bool {
+	return owner.Mode == reader.Mode && owner.UserID == reader.UserID
+}
+
 // Apps returns the apps the actor may see. The owner decides who is an
 // administrator from its own check, never from the request; a check that
 // cannot answer yields the reader's view, which has fewer rights.
@@ -1355,17 +1462,14 @@ var ErrOperationNotFound = errors.New("addon lifecycle operation not found")
 // per-resource ACLs on every call. An administrator also sees installed addons
 // that are disabled, so a stopped addon can be started.
 func (m *Manager) Apps(ctx context.Context, actor contract.Actor) ([]apps.App, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if e := m.check(ctx); e != nil {
+	// A read never waits for a lifecycle operation: see readView.
+	v, e := m.readStateLive(ctx)
+	if e != nil {
 		return nil, e
 	}
-	if m.uncertain || m.runtimeRecoveryRequired {
-		return nil, ErrRecoveryRequired
-	}
 	isAdmin := m.admin != nil && m.admin(ctx, actor) == nil
-	snaps := make([]apps.Snapshot, 0, len(m.journal.Addons))
-	for id, st := range m.journal.Addons {
+	snaps := make([]apps.Snapshot, 0, len(v.addons))
+	for id, st := range v.addons {
 		receipt, ok := currentReceipt(st)
 		if !ok {
 			continue
@@ -1387,6 +1491,7 @@ func (m *Manager) Apps(ctx context.Context, actor contract.Actor) ([]apps.App, e
 				snap.UpdatePending = true
 			}
 		}
+		snap.Operation = v.operationFor(id)
 		snaps = append(snaps, snap)
 	}
 	return apps.Build(snaps, isAdmin), nil
@@ -1396,16 +1501,12 @@ func (m *Manager) Apps(ctx context.Context, actor contract.Actor) ([]apps.App, e
 // not, sorted. It is for the host's own housekeeping (the pin sweep); it takes
 // no actor and returns no detail.
 func (m *Manager) InstalledIDs(ctx context.Context) ([]string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if e := m.check(ctx); e != nil {
+	v, e := m.readStateLive(ctx)
+	if e != nil {
 		return nil, e
 	}
-	if m.uncertain || m.runtimeRecoveryRequired {
-		return nil, ErrRecoveryRequired
-	}
-	out := make([]string, 0, len(m.journal.Addons))
-	for id, st := range m.journal.Addons {
+	out := make([]string, 0, len(v.addons))
+	for id, st := range v.addons {
 		if st.Installed {
 			out = append(out, id)
 		}
@@ -1544,11 +1645,17 @@ func (m *Manager) DeclaredCapabilities(ctx context.Context, id string, generatio
 		return contract.Capabilities{}, ErrForbidden
 	}
 	c := receipt.Manifest.Capabilities
-	out := contract.Capabilities{Service: c.Service, Tools: append([]string(nil), c.Tools...), AdminTools: append([]string(nil), c.AdminTools...), Actions: c.Actions, Undo: c.Undo}
+	out := contract.Capabilities{Service: c.Service, Tools: append([]string(nil), c.Tools...), AdminTools: append([]string(nil), c.AdminTools...), Actions: c.Actions, OwnerData: c.OwnerData, Undo: c.Undo}
 	out.ToolDefinitions = append([]contract.ToolDefinition(nil), c.ToolDefinitions...)
 	out.SkillDefinitions = append([]contract.SkillDefinition(nil), c.SkillDefinitions...)
 	out.ContextFiles = append([]contract.ContextFile(nil), c.ContextFiles...)
 	out.Credentials = slices.Clone(c.Credentials)
+	out.Provides = slices.Clone(c.Provides)
+	if c.ModelSearch != nil {
+		ms := *c.ModelSearch
+		ms.Sorts, ms.Filters = slices.Clone(ms.Sorts), slices.Clone(ms.Filters)
+		out.ModelSearch = &ms
+	}
 	for _, us := range c.UserSettings {
 		us.Values = slices.Clone(us.Values)
 		out.UserSettings = append(out.UserSettings, us)
@@ -1556,6 +1663,10 @@ func (m *Manager) DeclaredCapabilities(ctx context.Context, id string, generatio
 	if c.ExecutionProvider != nil {
 		p := *c.ExecutionProvider
 		p.Tools = slices.Clone(p.Tools)
+		if p.Jobs != nil {
+			j := *p.Jobs
+			p.Jobs = &j
+		}
 		out.ExecutionProvider = &p
 	}
 	if c.HostOperations != nil {

@@ -215,8 +215,9 @@ type tgMessage struct {
 	// only the start of a reply chain.
 	Topic bool `json:"is_topic_message"`
 	Chat  struct {
-		ID   int64  `json:"id"`
-		Type string `json:"type"`
+		ID    int64  `json:"id"`
+		Type  string `json:"type"`
+		Title string `json:"title"`
 	} `json:"chat"`
 	From struct {
 		ID        int64  `json:"id"`
@@ -312,10 +313,14 @@ func (t *API) updates(ctx context.Context, token string, offset int64, timeoutSe
 			m.Text, m.Entities = m.Caption, m.CaptionEntities
 		}
 		u.Chat, u.Direct = strconv.FormatInt(m.Chat.ID, 10), m.Chat.Type == "private"
+		if !u.Direct {
+			u.ChatName = m.Chat.Title // a group names itself in every update
+		}
 		u.SenderID = strconv.FormatInt(m.From.ID, 10)
 		u.SenderName = strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
 		u.SenderUsername, u.Text = m.From.Username, m.Text
 		u.Media = mediaRefs(m)
+		u.MediaKinds = mediaKinds(u.Media)
 		u.Unsupported = m.Text == "" && len(u.Media) == 0
 		if m.ID != 0 {
 			u.MessageID = strconv.FormatInt(m.ID, 10)
@@ -358,10 +363,21 @@ func (t *API) addressed(ctx context.Context, token string, m tgMessage) (bool, s
 	// Entity offsets count UTF-16 units.
 	units := utf16.Encode([]rune(m.Text))
 	for _, e := range m.Entities {
-		if e.Type != "mention" || e.Offset < 0 || e.Length < 1 || e.Offset+e.Length > len(units) {
+		if e.Offset < 0 || e.Length < 1 || e.Offset+e.Length > len(units) {
 			continue
 		}
 		at := string(utf16.Decode(units[e.Offset : e.Offset+e.Length]))
+		// A command with the name of the bot ("/new@Bot") is a message to it.
+		// The text stays as it is: the host reads the command.
+		if e.Type == "bot_command" {
+			if _, to, ok := strings.Cut(at, "@"); ok && strings.EqualFold(to, name) {
+				return true, m.Text
+			}
+			continue
+		}
+		if e.Type != "mention" {
+			continue
+		}
 		if strings.EqualFold(at, "@"+name) {
 			rest := append(append([]uint16{}, units[:e.Offset]...), units[e.Offset+e.Length:]...)
 			return true, strings.Join(strings.Fields(string(utf16.Decode(rest))), " ")
@@ -538,6 +554,11 @@ func (t *API) edit(ctx context.Context, token string, chatID, messageID int64, t
 		return nil
 	}
 	return err
+}
+
+// Delete removes a message the bot sent.
+func (t *API) Delete(ctx context.Context, token string, chatID, messageID int64) error {
+	return t.call(ctx, token, "deleteMessage", map[string]any{"chat_id": chatID, "message_id": messageID}, 0, nil)
 }
 
 // Typing shows "typing" in a chat, or in a topic of it, for a few seconds.

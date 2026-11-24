@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	. "github.com/mudler/LocalAI/core/services/studio/workspace"
+	"github.com/mudler/LocalAI/core/services/studio/workspace/workfiles"
 
 	"context"
 	"errors"
@@ -40,6 +41,37 @@ func (w *writer) moveNode(src nodeRow, to []string) (nodeRow, error) {
 	return w.apply(src.id, src.kind, OpMove, ns)
 }
 
+// checkGrantsMove refuses to move or rename a folder that holds a grant, on
+// itself or on a folder below it, when workfiles.GrantsMayMove refuses the
+// move: a grant moves with its node, so it would reach another home or a
+// folder that LocalAI manages. apply calls it, so a move, an undo and an
+// upper layer all meet it. The administrator moves anything.
+func (w *writer) checkGrantsMove(id int64, kind Kind, cur, ns state, from string) error {
+	if kind != KindDir || cur.deleted || ns.deleted || (ns.parent == cur.parent && ns.name == cur.name) || w.s.isAdmin(w.actor) {
+		return nil
+	}
+	dir, err := pathOf(w.ctx, w.tx, ns.parent)
+	if err != nil {
+		return err
+	}
+	if workfiles.GrantsMayMove(from, JoinChild(dir, ns.name)) {
+		return nil
+	}
+	var n int
+	err = w.tx.QueryRowContext(w.ctx, `WITH RECURSIVE sub(id) AS (
+			SELECT id FROM studio_ws_nodes WHERE id = ?
+			UNION ALL
+			SELECT n.id FROM studio_ws_nodes n JOIN sub ON n.parent_id = sub.id WHERE n.deleted = 0)
+		SELECT COUNT(*) FROM studio_ws_grants g JOIN sub ON g.node_id = sub.id`, id).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrSharedMove
+	}
+	return nil
+}
+
 // checkParentWrite requires write access on the parent of n: changing a
 // directory entry needs write on the folder that holds it. A root of the
 // actor's fence is read only there, so a fenced actor cannot take its own
@@ -59,7 +91,7 @@ func (w *writer) checkParentWrite(n nodeRow) error {
 }
 
 func (w *writer) move(from, to string) (nodeRow, error) {
-	src, err := w.s.find(w.ctx, w.tx, w.actor, from, ModeWrite)
+	src, err := w.s.find(w.ctx, w.tx, w.actor, from, ModeData)
 	if err != nil {
 		return nodeRow{}, err
 	}
@@ -93,7 +125,7 @@ func (w *writer) deleteNode(n nodeRow) error {
 }
 
 func (w *writer) delete(p string) error {
-	n, err := w.s.find(w.ctx, w.tx, w.actor, p, ModeWrite)
+	n, err := w.s.find(w.ctx, w.tx, w.actor, p, ModeData)
 	if err != nil {
 		return err
 	}

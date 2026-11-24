@@ -23,7 +23,7 @@ const EXPECTED = [
 const ROUTES = [
   '/app', '/app/chats/all', '/app/chats/skills', '/app/chats/agents', '/app/chats/triggers', '/app/chats/connectors',
   '/app/chats/conversion', '/app/files', '/app/collections', '/app/build', '/app/operate', '/app/models',
-  '/app/settings', '/app/usage', '/app/account', '/app/activity', '/app/traces', '/app/backends',
+  '/app/settings', '/app/usage', '/app/account', '/app/activity', '/app/traces', '/app/backends', '/app/updates',
 ]
 
 const PHONE = { width: 390, height: 844 }
@@ -74,8 +74,15 @@ test.describe('Removed pages', () => {
 test.describe('Theme and language', () => {
   test('the theme choice sticks across a reload', async ({ page }) => {
     await page.goto('/app')
+    const html = page.locator('html')
+    const read = () => page.evaluate(() => document.documentElement.getAttribute('data-theme') || document.documentElement.className)
+    const before = await read()
     await page.getByRole('button', { name: /Switch to (dark|light) mode/ }).click()
-    const after = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || document.documentElement.className)
+    // The switch runs inside a view transition and the choice is stored in an
+    // effect, so wait for both to land before reading it and reloading.
+    await expect(html).not.toHaveAttribute('data-theme', before)
+    const after = await read()
+    await page.waitForFunction(v => localStorage.getItem('localai.theme') === v, after)
     await page.reload()
     const again = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || document.documentElement.className)
     expect(again).toBe(after)

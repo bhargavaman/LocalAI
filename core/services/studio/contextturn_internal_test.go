@@ -3,7 +3,6 @@ package studio
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -137,11 +136,14 @@ var _ = Describe("context files in the prompt of a chat", func() {
 		svc.SetConnectors(c)
 	})
 
-	It("adds nothing and no tool while no source is registered", func() {
-		put("Memory/index.md", "- home: Rome\n")
+	It("serves the notes of the host without a registered source or an add-on", func() {
 		tt, _ := turn(CreateInput{Model: "m"}, Origin{})
-		Expect(tt.Prompt).NotTo(ContainSubstring(contextfiles.Header))
-		Expect(tool(tt, contextfiles.ToolName)).To(BeNil())
+		Expect(tt.Prompt).NotTo(ContainSubstring(contextfiles.Header), "no note yet, no block")
+		put("Memory/index.md", "- home: Rome\n")
+		tt, _ = turn(CreateInput{Model: "m"}, Origin{})
+		Expect(tt.Prompt).To(ContainSubstring(contextfiles.Header))
+		Expect(tt.Prompt).To(ContainSubstring("home: Rome"))
+		Expect(tool(tt, contextfiles.ToolName)).NotTo(BeNil())
 	})
 
 	Describe("a plain chat", func() {
@@ -223,6 +225,7 @@ var _ = Describe("context files in the prompt of a chat", func() {
 
 		It("tells the model how to save once a writer is plugged in", func() {
 			svc.SetContextWriter(saver{})
+			put("Memory/index.md", "- home: Rome\n")
 			tt, _ := turn(CreateInput{Model: "m"}, Origin{})
 			Expect(tt.Prompt).To(ContainSubstring("Save new facts with propose_change."))
 		})
@@ -332,15 +335,15 @@ var _ = Describe("context files in the prompt of a chat", func() {
 
 	Describe("files an add-on declares", func() {
 		memory := func(running bool) AddonContextSet {
-			return AddonContextSet{AddonID: "memory", Running: running, Files: []contract.ContextFile{
-				{Scope: contract.ScopeUser, Path: "Memory/index.md"},
-				{Scope: contract.ScopeAgent, Path: "Memory/agents/{agent}/index.md"},
-				{Scope: contract.ScopeChannel, Path: "Memory/channels/{channel}/index.md"},
+			return AddonContextSet{AddonID: "pack-notes", Running: running, Files: []contract.ContextFile{
+				{Scope: contract.ScopeUser, Path: "Pack/index.md"},
+				{Scope: contract.ScopeAgent, Path: "Pack/agents/{agent}/index.md"},
+				{Scope: contract.ScopeChannel, Path: "Pack/channels/{channel}/index.md"},
 			}}
 		}
 		BeforeEach(func() {
-			put("Memory/index.md", "- home: lives in Rome -> home.md\n")
-			put("Memory/home.md", "user detail")
+			put("Pack/index.md", "- home: lives in Rome -> home.md\n")
+			put("Pack/home.md", "user detail")
 		})
 
 		It("loads the index and serves context_read while the add-on runs", func() {
@@ -359,18 +362,22 @@ var _ = Describe("context files in the prompt of a chat", func() {
 				"absent":  func() CreateInput { br.set(); return CreateInput{Model: "m"} },
 				"switched off": func() CreateInput {
 					br.set(memory(true))
-					return CreateInput{Model: "m", Switches: Switches{AddonsOff: []string{"memory"}}}
+					return CreateInput{Model: "m", Switches: Switches{AddonsOff: []string{"pack-notes"}}}
 				},
 				"unavailable": func() CreateInput {
 					br.set(memory(true))
-					br.reasons = map[string]string{"memory": "files are off"}
+					br.reasons = map[string]string{"pack-notes": "files are off"}
 					return CreateInput{Model: "m"}
 				},
 			} {
 				in := setup()
 				tt, _ := turn(in, Origin{})
 				Expect(tt.Prompt).NotTo(ContainSubstring(contextfiles.Header), name)
-				Expect(tool(tt, contextfiles.ToolName)).To(BeNil(), name)
+				if mr := tool(tt, contextfiles.ToolName); mr != nil {
+					// The host's own notes are served; the add-on's are not.
+					_, err := mr.Run(ctx, json.RawMessage(`{"topic":"home"}`))
+					Expect(err).To(HaveOccurred(), name)
+				}
 				br.reasons = nil
 			}
 		})
@@ -390,9 +397,9 @@ var _ = Describe("context files in the prompt of a chat", func() {
 			br.set(memory(true))
 			plain, err := svc.SaveAgentWithFolder(ctx, "alice", agents.Agent{Name: "Plain", Model: "m"}, nil)
 			Expect(err).NotTo(HaveOccurred())
-			granted, err := svc.SaveAgentWithFolder(ctx, "alice", agents.Agent{Name: "Granted", Model: "m", Addons: []string{"memory"}}, nil)
+			granted, err := svc.SaveAgentWithFolder(ctx, "alice", agents.Agent{Name: "Granted", Model: "m", Addons: []string{"pack-notes"}}, nil)
 			Expect(err).NotTo(HaveOccurred())
-			put("Memory/agents/"+granted.ID+"/index.md", "- style: GRANTEDSTYLE\n")
+			put("Pack/agents/"+granted.ID+"/index.md", "- style: GRANTEDSTYLE\n")
 			no, _ := turn(CreateInput{Model: "m", AgentID: plain.ID}, Origin{})
 			Expect(no.Prompt).NotTo(ContainSubstring(contextfiles.Header))
 			yes, _ := turn(CreateInput{Model: "m", AgentID: granted.ID}, Origin{})
@@ -404,16 +411,19 @@ var _ = Describe("context files in the prompt of a chat", func() {
 			list, err := svc.ListContextFiles(ctx, "alice")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(list.Groups).To(HaveLen(1))
-			Expect(list.Groups[0].Source).To(Equal("memory"))
+			Expect(list.Groups[0].Source).To(Equal("pack-notes"))
 		})
 
 		It("reads back what propose_change writes, with the files the Memory add-on ships", func() {
-			raw, err := os.ReadFile("../../../addons/memory/manifest.json")
-			Expect(err).NotTo(HaveOccurred())
-			m, err := contract.ParseManifest(raw)
-			Expect(err).NotTo(HaveOccurred())
-			br.set(AddonContextSet{AddonID: m.ID, Running: true, Files: m.Capabilities.ContextFiles})
-			ag, err := svc.SaveAgentWithFolder(ctx, "alice", agents.Agent{Name: "Bot", Model: "m", Addons: []string{m.ID}, Builtins: []string{"memory.write"}}, nil)
+			// The files a Memory add-on declares: one index for each scope.
+			const id = "memory"
+			files := []contract.ContextFile{
+				{Scope: contract.ScopeUser, Path: "Memory/index.md"},
+				{Scope: contract.ScopeAgent, Path: "Memory/agents/{agent}/index.md"},
+				{Scope: contract.ScopeChannel, Path: "Memory/channels/{channel}/index.md"},
+			}
+			br.set(AddonContextSet{AddonID: id, Running: true, Files: files})
+			ag, err := svc.SaveAgentWithFolder(ctx, "alice", agents.Agent{Name: "Bot", Model: "m", Addons: []string{id}, Builtins: []string{"memory.write"}}, nil)
 			Expect(err).NotTo(HaveOccurred())
 			rec, err := svc.CreateAs(ctx, "alice", CreateInput{Model: "m", AgentID: ag.ID}, Origin{Kind: session.OriginConnector, ID: "b-tg"})
 			Expect(err).NotTo(HaveOccurred())
@@ -426,6 +436,8 @@ var _ = Describe("context files in the prompt of a chat", func() {
 				_, err = svc.Changes().Confirm(ctx, "alice", p.ID)
 				Expect(err).NotTo(HaveOccurred(), scope)
 			}
+			// The owner's notes are read only for a paired sender.
+			svc.access.set(rec.ID, turnGrant{Binding: "b-tg", Kind: "telegram", Senders: []string{"owner"}, Direct: true, Paired: true})
 			x, err := svc.ChatAccess(ctx, "alice", rec.ID)
 			Expect(err).NotTo(HaveOccurred())
 			tt, err := svc.chatTools(ctx, x)
@@ -436,7 +448,7 @@ var _ = Describe("context files in the prompt of a chat", func() {
 		})
 
 		It("refuses a declaration the loader would refuse", func() {
-			br.set(AddonContextSet{AddonID: "memory", Running: true, Files: []contract.ContextFile{{Scope: contract.ScopeUser, Path: "../secrets.md"}}})
+			br.set(AddonContextSet{AddonID: "pack-notes", Running: true, Files: []contract.ContextFile{{Scope: contract.ScopeUser, Path: "../secrets.md"}}})
 			tt, _ := turn(CreateInput{Model: "m"}, Origin{})
 			Expect(tt.Prompt).NotTo(ContainSubstring(contextfiles.Header))
 		})

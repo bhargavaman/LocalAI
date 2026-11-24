@@ -1,6 +1,7 @@
 package studio
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/mudler/LocalAI/core/services/studio/agents"
 	"github.com/mudler/LocalAI/core/services/studio/builtins"
+	"github.com/mudler/LocalAI/core/services/studio/contextfiles"
 	"github.com/mudler/LocalAI/core/services/studio/files"
+	"github.com/mudler/LocalAI/core/services/studio/resourcesets"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/store"
 )
@@ -52,6 +55,20 @@ func (s *Service) SaveAgentWithFolders(ctx context.Context, user string, a agent
 	p := principal(user)
 	keepOff, keepOn, keepGrants := a.BuiltinsOff == nil, a.BuiltinsOn == nil, a.Builtins == nil
 	keepConnections := a.Connections == nil
+	// The resources are kept the same way: only a client that sends the field
+	// changes what the agent may use.
+	keepResources := a.Resources == nil
+	// A write without the memory choice keeps the stored one: a client that
+	// does not know the field cannot widen what the agent reads or saves.
+	keepMemory := a.Memory == ""
+	// The save rule of the agent is kept the same way, so an older client
+	// cannot drop a stricter rule. A client that knows it writes use_mine to
+	// clear it.
+	keepMemorySave := a.MemorySave == ""
+	if a.MemorySave == agents.MemorySaveUseMine {
+		a.MemorySave = ""
+	}
+	keepProject := a.ProjectID == ""
 	grants, err := cleanGrants(a.Builtins, false)
 	if err != nil {
 		return agents.Agent{}, fmt.Errorf("%w: %w", agents.ErrInvalid, err)
@@ -67,7 +84,8 @@ func (s *Service) SaveAgentWithFolders(ctx context.Context, user string, a agent
 	if err := agents.Validate(a); err != nil {
 		return agents.Agent{}, err
 	}
-	if err := s.checkConnections(ctx, p, a.Connections); err != nil {
+	a.Resources = resourcesets.Normalize(a.Resources)
+	if err := s.checkReferences(ctx, p, a); err != nil {
 		return agents.Agent{}, err
 	}
 	a.BuiltinsOff, a.BuiltinsOn = s.agentGroups(a.BuiltinsOff, false), s.agentGroups(a.BuiltinsOn, true)
@@ -77,6 +95,16 @@ func (s *Service) SaveAgentWithFolders(ctx context.Context, user string, a agent
 		}
 	}
 	a.Principal, a.Name = p, trimName(a.Name)
+	if a.ID == "" && a.ProjectID != "" {
+		// A project agent is made in a project of its owner that takes new work.
+		if _, err := s.usableProject(ctx, user, a.ProjectID); err != nil {
+			if errors.Is(err, session.ErrInvalid) {
+				err = fmt.Errorf("%w: %w", agents.ErrInvalid, err)
+			}
+			return agents.Agent{}, err
+		}
+	}
+	replacing := a.ID != ""
 	now := time.Now().UTC()
 	a.Updated = now
 	if a.ID == "" {
@@ -84,8 +112,17 @@ func (s *Service) SaveAgentWithFolders(ctx context.Context, user string, a agent
 	} else {
 		old, err := s.d.Agents.Get(ctx, p, a.ID)
 		if err != nil {
-			return agents.Agent{}, err
+			return agents.Agent{}, s.ownerOnly(ctx, user, a.ID, err)
 		}
+		// The project is set at creation: a write may repeat it or leave it
+		// out, never change or add one.
+		if keepProject {
+			a.ProjectID = old.ProjectID
+		} else if a.ProjectID != old.ProjectID {
+			return agents.Agent{}, fmt.Errorf("%w: the project of an agent cannot be changed", agents.ErrInvalid)
+		}
+		// Only a move changes the time of the last move.
+		a.MovedAt = old.MovedAt
 		if folders == nil {
 			a.Folders, a.FolderID, a.FolderMode = old.Folders, old.FolderID, old.FolderMode
 		}
@@ -106,16 +143,65 @@ func (s *Service) SaveAgentWithFolders(ctx context.Context, user string, a agent
 		if keepConnections {
 			a.Connections = old.Connections
 		}
+		if keepResources {
+			a.Resources = old.Resources
+		}
+		if keepMemory {
+			a.Memory = old.Memory
+		}
+		if keepMemorySave {
+			a.MemorySave = old.MemorySave
+		}
+	}
+	// A project agent is fenced to its project: the project must take agents
+	// now, and the folders it keeps are the project's files and memory folders.
+	if a.ProjectID != "" {
+		fenced, err := s.checkProjectAgent(ctx, a, folders == nil && replacing)
+		if err != nil {
+			return agents.Agent{}, projectUnavailableErr(err)
+		}
+		a = fenced
 	}
 	// The grant saved_agents is the opt-in group of the same name: the chats of
 	// the agent start with it on.
 	if slices.Contains(a.Builtins, builtins.GrantSavedAgents) && s.builtins.IsGroup(builtins.GroupSavedAgents) && !slices.Contains(a.BuiltinsOn, builtins.GroupSavedAgents) {
 		a.BuiltinsOn = append(slices.Clone(a.BuiltinsOn), builtins.GroupSavedAgents)
 	}
+	// Likewise the grant history.read and the opt-in group history.
+	if slices.Contains(a.Builtins, builtins.GrantHistoryRead) && s.builtins.IsGroup(builtins.GroupHistory) && !slices.Contains(a.BuiltinsOn, builtins.GroupHistory) {
+		a.BuiltinsOn = append(slices.Clone(a.BuiltinsOn), builtins.GroupHistory)
+	}
 	if err := s.d.Agents.Put(ctx, a); err != nil {
 		return agents.Agent{}, err
 	}
 	return s.d.Agents.Get(ctx, p, a.ID)
+}
+
+// checkReferences is the part of a save that judges what the agent names: its
+// connections and its MCP servers.
+func (s *Service) checkReferences(ctx context.Context, p string, a agents.Agent) error {
+	if err := s.checkConnections(ctx, p, a.Connections); err != nil {
+		return err
+	}
+	return s.checkMCPServers(ctx, p, a)
+}
+
+// CheckImportedAgent runs the definition checks of a save on an agent that
+// came from a file, without saving it, so that a caller can refuse before it
+// makes anything else (a project) for the import. The folders and the name
+// are not judged here: they are chosen and renamed by the import itself.
+func (s *Service) CheckImportedAgent(ctx context.Context, user string, a agents.Agent) error {
+	if s.d.Agents == nil {
+		return ErrAgentsOff
+	}
+	a.Builtins, _ = cleanGrants(a.Builtins, true)
+	if a.MemorySave == agents.MemorySaveUseMine {
+		a.MemorySave = ""
+	}
+	if err := agents.Validate(a); err != nil {
+		return err
+	}
+	return s.checkReferences(ctx, principal(user), a)
 }
 
 // Agent returns a saved agent of the user.
@@ -140,8 +226,91 @@ func (s *Service) DeleteAgent(ctx context.Context, user, id string) error {
 	if s.d.Agents == nil {
 		return ErrAgentsOff
 	}
-	return s.d.Agents.Delete(ctx, principal(user), id)
+	ag, err := s.d.Agents.Get(ctx, principal(user), id)
+	if err != nil {
+		return s.ownerOnly(ctx, user, id, err)
+	}
+	if err := s.d.Agents.Delete(ctx, principal(user), id); err != nil {
+		return err
+	}
+	s.forgetAgentShares(ctx, principal(user), ag)
+	return nil
 }
+
+// OwnAgent returns a saved agent of the user for an action that is the
+// owner's alone, such as an export. An agent that is only shared with the
+// user is ErrAgentNotOwner.
+func (s *Service) OwnAgent(ctx context.Context, user, id string) (agents.Agent, error) {
+	return s.ownAgent(ctx, user, id)
+}
+
+// What happens to the notes of an agent that is deleted.
+const (
+	// AgentNotesKeep leaves the notes where they are. They show on the Memory
+	// page under Deleted agents until the person deletes them. The default.
+	AgentNotesKeep = "keep"
+	// AgentNotesExport returns the notes as a zip file and then moves them to
+	// the Trash.
+	AgentNotesExport = "export"
+	// AgentNotesDelete moves the notes to the Trash.
+	AgentNotesDelete = "delete"
+)
+
+// ValidAgentNotes reports whether v says what to do with the notes of a
+// deleted agent. Empty is keep.
+func ValidAgentNotes(v string) bool {
+	switch v {
+	case "", AgentNotesKeep, AgentNotesExport, AgentNotesDelete:
+		return true
+	}
+	return false
+}
+
+// DeleteAgentWithNotes removes a saved agent and does with its own notes
+// (Memory/agents/<id>/) what notes says: keep, export or delete. For export it
+// returns the zip of the notes, built before anything is removed, so a failure
+// leaves the agent and its notes as they were; the zip is nil when the agent
+// has no notes. The notes go to the Trash, as the Memory page does, so a
+// mistake can be undone from the Files page. The agent is deleted first; when
+// the notes then cannot be moved they stay, listed under Deleted agents, and
+// the error says so.
+func (s *Service) DeleteAgentWithNotes(ctx context.Context, user, id, notes string) ([]byte, error) {
+	if !ValidAgentNotes(notes) {
+		return nil, fmt.Errorf("%w: memory must be keep, export or delete", ErrInvalidSettings)
+	}
+	if s.d.Agents == nil {
+		return nil, ErrAgentsOff
+	}
+	ag, err := s.d.Agents.Get(ctx, principal(user), id)
+	if err != nil {
+		return nil, s.ownerOnly(ctx, user, id, err)
+	}
+	var zipped []byte
+	if notes == AgentNotesExport {
+		var buf bytes.Buffer
+		switch _, err := s.ExportMemory(ctx, user, &buf, string(contextfiles.ScopeAgent), id); {
+		case errors.Is(err, ErrNoNotes):
+		case err != nil:
+			return nil, err
+		default:
+			zipped = buf.Bytes()
+		}
+	}
+	if err := s.d.Agents.Delete(ctx, principal(user), id); err != nil {
+		return nil, err
+	}
+	s.forgetAgentShares(ctx, principal(user), ag)
+	if notes == AgentNotesExport || notes == AgentNotesDelete {
+		if err := s.d.Files.DeleteHome(ctx, principal(user), "Memory/agents/"+id); err != nil {
+			return zipped, fmt.Errorf("%w: %v", ErrAgentNotesKept, err)
+		}
+	}
+	return zipped, nil
+}
+
+// ErrAgentNotesKept means the agent was deleted but its notes could not be
+// moved to the Trash. They stay, under Deleted agents on the Memory page.
+var ErrAgentNotesKept = errors.New("studio: the agent was deleted, but its notes could not be removed")
 
 func trimName(n string) string { return strings.TrimSpace(n) }
 
@@ -167,11 +336,18 @@ func (s *Service) ImportAgent(ctx context.Context, user string, a agents.Agent, 
 // ImportAgentFolders is ImportAgent for a file that lists several folders. A
 // folder that is not found in the importing user's files stays in the list as
 // a row that is not chosen, so the person can see which one to fix.
+//
+// For a project agent (a.ProjectID set by the caller from the request, never
+// from the file) the folders are the project-relative entries of the file:
+// see ProjectImportFilesMode. The agent gets the project's own two folders.
 func (s *Service) ImportAgentFolders(ctx context.Context, user string, a agents.Agent, folders []AgentFolderWrite) (agents.Agent, error) {
 	a.ID, a.FolderID, a.FolderMode, a.Folders = "", 0, "", nil
 	// A file from a server that has more grants still imports; the grants
 	// this server does not declare are dropped.
 	a.Builtins, _ = cleanGrants(a.Builtins, true)
+	if a.ProjectID != "" {
+		return s.importProjectAgent(ctx, user, a, folders)
+	}
 	if len(folders) > agents.MaxFolders {
 		return agents.Agent{}, folderRefused("an agent may have at most %d folders", agents.MaxFolders)
 	}
@@ -212,6 +388,37 @@ func (s *Service) ImportAgentFolders(ctx context.Context, user string, a agents.
 		}
 	}
 	a.Folders = list
+	return s.saveRenamed(ctx, user, a)
+}
+
+// importProjectAgent saves an imported agent as a project agent. The project
+// must be one of the user's own that takes new work; the folders are the
+// project's files and memory folders, the files one at the mode the file
+// chose. The save goes through SaveAgent, so every rule of a project agent
+// applies.
+func (s *Service) importProjectAgent(ctx context.Context, user string, a agents.Agent, folders []AgentFolderWrite) (agents.Agent, error) {
+	a.Principal = principal(user)
+	if _, err := s.usableProject(ctx, user, a.ProjectID); err != nil {
+		if errors.Is(err, session.ErrInvalid) {
+			err = fmt.Errorf("%w: %w", agents.ErrInvalid, err)
+		}
+		return agents.Agent{}, err
+	}
+	f, err := s.fenceOfAgent(ctx, a)
+	if err != nil {
+		return agents.Agent{}, projectUnavailableErr(err)
+	}
+	mode, _, err := ProjectImportFilesMode(folders)
+	if err != nil {
+		return agents.Agent{}, err
+	}
+	a.Folders = projectFolders(f, mode)
+	return s.saveRenamed(ctx, user, a)
+}
+
+// saveRenamed saves an imported agent as a new one: a name the user already
+// has gets " (2)", " (3)" and so on, up to maxImportRenames names.
+func (s *Service) saveRenamed(ctx context.Context, user string, a agents.Agent) (agents.Agent, error) {
 	name := trimName(a.Name)
 	for n := 1; n <= maxImportRenames; n++ {
 		a.Name = name
@@ -224,6 +431,40 @@ func (s *Service) ImportAgentFolders(ctx context.Context, user string, a agents.
 		}
 	}
 	return agents.Agent{}, agents.ErrNameTaken
+}
+
+// ProjectImportFilesMode reads the folder entries of an agent file for an
+// import into a project. The entries are project-relative: files (or a path
+// below it) chooses the files mode; memory is always read and needs no entry.
+// A file without folder entries gets the files mode write, the default of a
+// project agent. Otherwise the files mode is write only when a files entry
+// says write and none says read: an entry that is only memory, or that says
+// read, gives read, so a file never widens access. An entry that is neither
+// files nor memory (such as a path of the exporter's files) is ignored, and
+// the warnings say how many. A mode that is not read or write is refused, as
+// for any other folder.
+func ProjectImportFilesMode(folders []AgentFolderWrite) (mode string, warnings []string, err error) {
+	write, read, ignored := false, false, 0
+	for _, f := range folders {
+		if f.Mode != agents.FolderRead && f.Mode != agents.FolderWrite {
+			return "", nil, folderRefused("the mode must be read or write")
+		}
+		rel := strings.Trim(f.Path, "/")
+		switch {
+		case rel == "files" || strings.HasPrefix(rel, "files/"):
+			write, read = write || f.Mode == agents.FolderWrite, read || f.Mode == agents.FolderRead
+		case rel == "memory" || strings.HasPrefix(rel, "memory/"):
+		default:
+			ignored++
+		}
+	}
+	if ignored > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d folder entries of the file are not folders of the project and were ignored. The agent works in the files and memory of its project.", ignored))
+	}
+	if len(folders) == 0 || (write && !read) {
+		return agents.FolderWrite, warnings, nil
+	}
+	return agents.FolderRead, warnings, nil
 }
 
 // maxImportRenames is how many names an import tries before it gives up.
@@ -239,7 +480,9 @@ func (s *Service) CreateAgentFromTemplate(ctx context.Context, user, id, name st
 	if strings.TrimSpace(name) == "" {
 		name = t.Name
 	}
-	return s.SaveAgent(ctx, user, agents.Agent{Name: name, Description: t.Description, Instructions: t.Instructions})
+	// A new agent starts with the default choice of notes: it reads yours and
+	// its own, and saves to its own.
+	return s.SaveAgent(ctx, user, agents.Agent{Name: name, Description: t.Description, Instructions: t.Instructions, Memory: agents.MemoryMineAndOwn})
 }
 
 // AgentRun is a chat that ran with a saved agent: one the person had with it,
@@ -262,8 +505,9 @@ const maxHistoryScan = 5000
 
 // AgentRuns returns the chats of the user that ran with the agent, newest
 // first, up to limit, and counts all that are in the newest maxHistoryScan.
+// For an agent shared with the user these are the user's own chats with it.
 func (s *Service) AgentRuns(ctx context.Context, user, id string, limit int) (AgentHistory, error) {
-	if _, err := s.Agent(ctx, user, id); err != nil {
+	if _, _, err := s.SharedAgent(ctx, user, id); err != nil {
 		return AgentHistory{}, err
 	}
 	p := principal(user)

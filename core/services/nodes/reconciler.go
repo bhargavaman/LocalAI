@@ -9,9 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/services/advisorylock"
 	"github.com/mudler/LocalAI/core/services/nodes/prefixcache"
 	"github.com/mudler/LocalAI/core/services/workerctl"
+	grpc "github.com/mudler/LocalAI/pkg/grpc"
 	"github.com/mudler/xlog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,6 +35,10 @@ const (
 	// ProbeUnreachable: nothing is listening (connection refused), or the
 	// backend answered and affirmatively reported itself unhealthy.
 	ProbeUnreachable
+	// ProbeUnknown: the probe could not get a stream to the backend, because
+	// the transport failed. Nothing was learned about the backend, so it is not
+	// a vote to reap and not a proof of life.
+	ProbeUnknown
 )
 
 // ModelProber checks the state of a model's backend process.
@@ -43,7 +49,7 @@ type ModelProber interface {
 }
 
 // NodeProcessLister asks a worker which model backend processes it currently
-// has running. Implemented by RemoteUnloaderAdapter over NATS.
+// has running. NodeControl carries it.
 //
 // This is the sounder liveness signal: the worker owns the process table, so
 // its answer does not depend on whether a backend is busy. A health probe
@@ -67,6 +73,9 @@ func (g grpcModelProber) Probe(ctx context.Context, nodeID, address string) Prob
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	ok, err := client.HealthCheck(probeCtx)
+	if !ok && grpc.TransportFailureOf(client) != nil {
+		return ProbeUnknown
+	}
 	return classifyProbeOutcome(ok, err)
 }
 
@@ -121,8 +130,8 @@ type ReplicaReconciler struct {
 	registry       *NodeRegistry
 	scheduler      ModelScheduler // interface for scheduling new models
 	unloader       NodeCommandSender
-	adapter        *RemoteUnloaderAdapter // NATS sender for pending-op drain
-	prober         ModelProber            // health probe for model gRPC addrs
+	adapter        NodeControl // sender for pending-op drain
+	prober         ModelProber // health probe for model gRPC addrs
 	db             *gorm.DB
 	interval       time.Duration
 	scaleDownDelay time.Duration
@@ -207,14 +216,21 @@ type ReplicaReconcilerOptions struct {
 	Registry  *NodeRegistry
 	Scheduler ModelScheduler
 	Unloader  NodeCommandSender
-	// Adapter is the NATS sender used to retry pending backend ops. When nil,
+	// Adapter is the control carrier used to retry pending backend ops. When nil,
 	// the state-reconciler pending-drain pass is a no-op (single-node mode).
-	Adapter *RemoteUnloaderAdapter
-	// RegistrationToken is used by the default gRPC prober when probing model
-	// addresses. Matches the worker's token so HealthCheck auth succeeds.
+	Adapter NodeControl
+	// RegistrationToken is the data plane token (workerctl.WorkerAuthToken). The
+	// default gRPC prober presents it when probing model addresses. It matches
+	// the token of the worker, so that the HealthCheck auth succeeds. The name is
+	// older than the split between the registration token and the data plane
+	// token.
 	RegistrationToken string
 	// Prober overrides the default gRPC health probe (used by tests).
 	Prober ModelProber
+	// ClientFactory builds the clients of the default prober, so probes dial
+	// the way the router does. When nil it dials the address directly with
+	// RegistrationToken.
+	ClientFactory BackendClientFactory
 	// ProcessLister overrides the default worker process query. When nil and
 	// no Adapter is set, the worker-authoritative pass is skipped entirely and
 	// only the port probe runs.
@@ -253,7 +269,11 @@ func NewReplicaReconciler(opts ReplicaReconcilerOptions) *ReplicaReconciler {
 	}
 	prober := opts.Prober
 	if prober == nil {
-		prober = grpcModelProber{clients: &tokenClientFactory{token: opts.RegistrationToken}}
+		clients := opts.ClientFactory
+		if clients == nil {
+			clients = &tokenClientFactory{token: opts.RegistrationToken}
+		}
+		prober = grpcModelProber{clients: clients}
 	}
 	pressureThreshold := opts.PressureThreshold
 	if pressureThreshold == 0 {
@@ -409,26 +429,23 @@ func (rc *ReplicaReconciler) drainPendingBackendOp(ctx context.Context, op Pendi
 	case OpBackendUpgrade:
 		// Pending-op drain for admin upgrade — fires backend.upgrade so
 		// the slow re-pull doesn't head-of-line-block install traffic on
-		// the same worker. Falls back to the legacy backend.install
-		// Force=true path on ErrNoRoute for old workers that
-		// don't subscribe to backend.upgrade yet (rolling-update window).
+		// the same worker. A worker with no route for it is an error of the
+		// op, handled below like any other op with no route.
 		// Reconciler retries are background reconciliation with no live
 		// admin watching a progress bar, so opID/onProgress are empty —
 		// the adapter skips the progress subscription entirely.
 		reply, err := rc.adapter.UpgradeBackend(op.NodeID, op.Backend, string(op.Galleries), "", "", "", 0, "", nil)
 		if err != nil {
-			if errors.Is(err, ErrNoRoute) {
-				instReply, instErr := rc.adapter.installWithForceFallback(op.NodeID, op.Backend, string(op.Galleries), "", "", "", 0, "", nil)
-				if instErr != nil {
-					applyErr = instErr
-				} else if !instReply.Success {
-					applyErr = fmt.Errorf("upgrade (legacy fallback) failed: %s", instReply.Error)
-				}
-			} else {
-				applyErr = err
+			applyErr = err
+		} else if applyErr = UpgradeReplyError(reply); gallery.UpgradeRolledBack(applyErr) {
+			// The worker runs its previous build again: a retry would
+			// download the same build and fail the same way.
+			xlog.Warn("Reconciler: queued backend upgrade rolled back on the worker; dropping it",
+				"backend", op.Backend, "node", op.NodeID, "error", applyErr)
+			if err := rc.registry.DeletePendingBackendOp(ctx, op.ID); err != nil {
+				xlog.Warn("Reconciler: failed to delete rolled back op row", "id", op.ID, "error", err)
 			}
-		} else if !reply.Success {
-			applyErr = fmt.Errorf("upgrade failed: %s", reply.Error)
+			return
 		}
 	default:
 		xlog.Warn("Reconciler: unknown pending op", "op", op.Op, "id", op.ID)
@@ -543,6 +560,12 @@ func (rc *ReplicaReconciler) probeLoadedModels(ctx context.Context) {
 			// Bump updated_at so we don't probe this row again immediately.
 			_ = rc.registry.db.WithContext(ctx).Model(&NodeModel{}).
 				Where("id = ?", m.ID).Update("updated_at", time.Now()).Error
+			continue
+		case ProbeUnknown:
+			// The transport failed. This is neither a vote to reap nor proof of
+			// life, so the streak stays as it is.
+			xlog.Debug("Reconciler: model probe could not reach the backend, not counting it",
+				"node", m.NodeID, "model", m.ModelName, "replica", m.ReplicaIndex, "address", m.Address)
 			continue
 		case ProbeBusy:
 			// Reachable but mid-request. Proof of life, so clear the streak.
@@ -1205,10 +1228,21 @@ func (rc *ReplicaReconciler) scaleDownIdle(ctx context.Context, cfg ModelSchedul
 		Order("replica_index DESC, last_used ASC").
 		Find(&idleModels)
 
+	// Keep at least one idle loaded replica. When no loaded replica is idle,
+	// allReplicasBusy triggers a scale-up, so removing the last idle replica
+	// would be undone on the next tick by loading the model again. Count the
+	// idle replicas of all loaded ones, not only the candidates past the
+	// delay, and remove a candidate only while more than one idle replica
+	// remains.
+	var idleLoaded int64
+	currentModelRevision(rc.registry.db.WithContext(ctx).Model(&NodeModel{})).
+		Where("node_models.model_name = ? AND node_models.state = ? AND node_models.in_flight = 0", cfg.Target(), "loaded").
+		Count(&idleLoaded)
+
 	toRemove := current - floor
 	removed := 0
 	for _, nm := range idleModels {
-		if removed >= toRemove {
+		if removed >= toRemove || idleLoaded <= 1 {
 			break
 		}
 		// Remove this specific replica row from registry (sibling replicas of
@@ -1223,6 +1257,7 @@ func (rc *ReplicaReconciler) scaleDownIdle(ctx context.Context, cfg ModelSchedul
 		}
 		xlog.Info("Reconciler: scaled down idle replica", "model", cfg.Target(), "node", nm.NodeID, "replica", nm.ReplicaIndex)
 		removed++
+		idleLoaded--
 	}
 }
 

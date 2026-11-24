@@ -1,3 +1,5 @@
+//go:build !windows
+
 // SPDX-License-Identifier: MIT
 package cluster
 
@@ -36,7 +38,7 @@ func (c *Config) AppOptions(role string) ([]config.AppOption, error) {
 	addon := config.AddonConfig{
 		Enabled: true, InstanceID: role, OwnerID: Owner, OwnerAddress: c.OwnerAddress(), StorageID: "disk",
 		Root: node.Root, Transport: transport,
-		Host: contract.HostCompatibility{Host: 1, API: contract.HostAPIVersion, Protocol: 1, SDK: 1, DataFormat: 1, OS: runtime.GOOS, Arch: runtime.GOARCH},
+		Host: contract.HostCompatibility{Host: 1, API: contract.HostAPIVersion, Protocol: 1, SDK: 1, DataFormat: 1, FeatureLevel: contract.HostFeatureLevel, OS: runtime.GOOS, Arch: runtime.GOARCH},
 	}
 	if role == Owner {
 		addon.ListenAddress = node.CarrierAddr
@@ -180,3 +182,4 @@ func (c *Config) ControlServer(app *application.Application) (*http.Server, erro
 
 // StateDir is where one instance keeps its models, data and generated files.
 func (c *Config) StateDir(role string) string { return filepath.Join(c.Nodes[role].Dir, "state") }
+

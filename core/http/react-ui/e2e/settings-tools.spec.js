@@ -1,6 +1,6 @@
 import { test, expect } from './coverage-fixtures.js'
 import { mockSettings } from './settings-fixtures.js'
-import { ADMIN, installedAddon, release, sessionFor, mockAddons } from './addons-fixtures.js'
+import { ADMIN, installedAddon, release, sessionFor, mockAddons, stubInstallQueue } from './addons-fixtures.js'
 
 // Settings > Tools lists the built-in chat tools an add-on may replace, and the
 // install dialog warns when an add-on replaces a tool another one already
@@ -69,6 +69,25 @@ test.describe('Settings > Tools', () => {
     await expect(page.getByTestId('settings-tools-web-test-summary')).toContainText('No provider answered. no search provider works. Tried duckduckgo')
   })
 
+  test('the LocalAI client and admin groups are rows with their own settings, switched like the web tools', async ({ page }) => {
+    const group = (id, label, setting, enabled = true) => ({
+      id, label, description: 'x', group: id, setting, enabled, provider: enabled ? 'builtin' : '', candidates: [], options: [],
+    })
+    const state = await openTools(page, [
+      group('localai_client', 'LocalAI client', 'chats_localai_client'),
+      group('localai_admin', 'LocalAI admin', 'chats_localai_admin'),
+    ])
+    const client = page.getByTestId('settings-tools-row-localai_client')
+    const admin = page.getByTestId('settings-tools-row-localai_admin')
+    await expect(client).toContainText('LocalAI client tools')
+    await expect(client).toContainText('chats_localai_client')
+    await expect(admin).toContainText('LocalAI admin tools')
+    await expect(admin).toContainText('chats_localai_admin')
+    await page.getByTestId('settings-tools-localai_admin-switch').click()
+    await page.getByRole('button', { name: 'Apply' }).click()
+    await expect.poll(() => state.posts).toEqual([{ chats_localai_admin: false }])
+  })
+
   test('switching bash off saves off', async ({ page }) => {
     const state = await openTools(page, [bash()])
     await page.getByTestId('settings-tools-bash-switch').click()
@@ -105,15 +124,16 @@ test.describe('Settings > Tools', () => {
 test.describe('Install of an add-on that replaces a built-in tool', () => {
   test('warns when another installed add-on already replaces it, and still installs', async ({ page }) => {
     await page.route('**/api/auth/status', route => route.fulfill({ json: sessionFor(ADMIN) }))
-    await mockAddons(page, {
+    const addons = await mockAddons(page, {
       installed: [installedAddon({ id: 'sandbox', title: 'Sandbox', shadows: ['bash'] })],
       releases: [release('runner', { name: 'Runner', toolCount: 1, tools: ['bash'], shadows: ['bash'] })],
     })
+    await stubInstallQueue(page, addons)
     await page.goto('/app/addons?tab=browse')
     await page.getByRole('button', { name: 'Install Runner' }).click()
     const warning = page.getByTestId('install-shadow-warning')
     await expect(warning).toHaveText('This add-on replaces the built-in bash. Another add-on (Sandbox) already does. Only one can be active; you choose which in Settings > Tools. Until you choose, the one installed first serves.')
-    await expect(page.getByTestId('install-dialog').getByRole('button', { name: 'Install and turn on' })).toBeEnabled()
+    await expect(page.getByTestId('install-dialog').getByRole('button', { name: 'Add to queue' })).toBeEnabled()
     await shot(page, 'install-shadow-warning')
   })
 })
@@ -152,17 +172,18 @@ test.describe('Settings > Tools: skills that add-ons replace', () => {
 test.describe('Install of an add-on that provides a document skill', () => {
   test('says which document skills it provides, warns when another add-on already does, and still installs', async ({ page }) => {
     await page.route('**/api/auth/status', route => route.fulfill({ json: sessionFor(ADMIN) }))
-    await mockAddons(page, {
+    const addons = await mockAddons(page, {
       installed: [installedAddon({ id: 'sheets', title: 'Sheets', skillShadows: ['xlsx'] })],
       releases: [release('office', { name: 'Office', skillShadows: ['xlsx', 'docx'] })],
     })
+    await stubInstallQueue(page, addons)
     await page.goto('/app/addons?tab=browse')
     await page.getByRole('button', { name: 'Install Office' }).click()
     const warnings = page.getByTestId('install-skill-warning')
     await expect(warnings).toHaveCount(2)
     await expect(warnings.nth(0)).toHaveText('This add-on provides the xlsx skill. Another add-on (Sheets) also provides it. Only one can be active; choose in Settings > Tools. Without a choice, the one installed first serves.')
     await expect(warnings.nth(1)).toHaveText('This add-on provides the docx skill.')
-    await expect(page.getByTestId('install-dialog').getByRole('button', { name: 'Install and turn on' })).toBeEnabled()
+    await expect(page.getByTestId('install-dialog').getByRole('button', { name: 'Add to queue' })).toBeEnabled()
     await shot(page, 'install-skill-warning')
   })
 })

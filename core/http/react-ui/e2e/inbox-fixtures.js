@@ -1,8 +1,9 @@
 import { mockChat } from './chat-fixtures.js'
 
-// The chat page with a fake inbox. The server is a small stateful inbox kept
+// The app with a fake inbox (the entry is in the shell, so any page works). The server is a small stateful inbox kept
 // in `inbox.rows`; the notification stream is a fake EventSource the spec
-// drives with window.__inboxEmit(name). `inbox.fail` makes the list read
+// drives with window.__inboxEmit(name); window.__inboxStreams() counts the
+// notification streams (other pages open streams of their own). `inbox.fail` makes the list read
 // answer 500 while it is true. `inbox.calls` records the deletes, and
 // `inbox.reads` the mark-read bodies.
 
@@ -22,19 +23,22 @@ export async function stubInbox(page, inbox) {
   await mockChat(page)
   await page.addInitScript(() => {
     const sources = []
+    let opened = 0
     window.EventSource = class {
-      constructor() { this.listeners = {}; sources.push(this); setTimeout(() => this.onopen && this.onopen(), 0) }
+      constructor(url) { this.listeners = {}; this.live = true; this.inbox = /\/notifications\/events/.test(String(url)); if (this.inbox) opened += 1; sources.push(this); setTimeout(() => this.onopen && this.onopen(), 0) }
       addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn) }
-      close() {}
+      close() { this.live = false }
     }
-    window.__inboxEmit = (name) => sources.forEach(s => (s.listeners[name] || []).forEach(fn => fn({})))
+    window.__inboxEmit = (name) => sources.forEach(s => s.live && (s.listeners[name] || []).forEach(fn => fn({})))
+    // How many streams are open now, and how many were ever opened.
+    window.__inboxStreams = () => ({ open: sources.filter(s => s.live && s.inbox).length, opened })
   })
   await page.route(/\/api\/chats(\?.*)?$/, route => route.fulfill({ json: { conversations: [detail], persistent: true, files: true } }))
   await page.route('**/api/chats/c1/messages*', route => route.fulfill({ json: { messages: [] } }))
   await page.route('**/api/chats/c1', route => route.fulfill({ json: detail }))
   await page.route('**/api/chats/agents*', route => route.fulfill({ json: { agents: [] } }))
-  await page.route('**/api/chats/push/**', route => route.fulfill({ status: 409, json: { error: { message: 'off' } } }))
-  await page.route(/\/api\/chats\/notifications(\?.*)?$/, async (route) => {
+  await page.route('**/api/notifications/push/**', route => route.fulfill({ status: 409, json: { error: { message: 'off' } } }))
+  await page.route(/\/api\/notifications(\?.*)?$/, async (route) => {
     const req = route.request()
     const unread = () => inbox.rows.filter(r => !r.read).length
     if (req.method() === 'DELETE') {
@@ -53,7 +57,7 @@ export async function stubInbox(page, inbox) {
     const rows = only ? inbox.rows.filter(r => !r.read) : inbox.rows
     return route.fulfill({ json: { notifications: rows.slice(0, limit), unread: unread(), total: inbox.rows.length } })
   })
-  await page.route('**/api/chats/notifications/read', async (route) => {
+  await page.route('**/api/notifications/read', async (route) => {
     const body = route.request().postDataJSON()
     inbox.reads.push(body)
     inbox.rows.forEach((r) => { if (body.all || (body.ids || []).includes(r.id)) r.read = true })
@@ -61,8 +65,10 @@ export async function stubInbox(page, inbox) {
   })
 }
 
+// The trigger that is on screen: the sidebar entry, or on a phone the bell of
+// the header (the sidebar entry of a closed drawer is hidden).
 export function inboxButton(page) {
-  return page.getByTestId('chat-inbox').getByRole('button', { name: /^Notifications/ })
+  return page.locator('[data-testid="nav-inbox"]:visible, [data-testid="mobile-inbox"]:visible')
 }
 
 export async function openInbox(page) {

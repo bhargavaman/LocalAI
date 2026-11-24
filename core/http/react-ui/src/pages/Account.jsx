@@ -1,15 +1,18 @@
 /* eslint-disable no-unused-vars -- components used only inside JSX look unused to this config, which has no eslint-plugin-react */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useOutletContext, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAuth } from '../context/AuthContext'
 import { profileApi, usageApi } from '../utils/api'
 import { totalsOf, groupUsage, compactCount } from '../utils/traffic'
 import { timeUntil, initialOf } from '../utils/access'
-import { Button, Callout, EmptyState, LoadError, PageHeader, SkeletonRows, useLoad } from '../components/ui'
+import { Button, Callout, EmptyState, LoadError, Page, PageHeader, SkeletonRows, Tabs, useLoad } from '../components/ui'
 import ApiKeysPanel from '../components/users/ApiKeysPanel'
-import { AboutYouTab, AppearanceTab } from '../components/wellknown/SettingsTabs'
+import { AboutYouTab, AppearanceTab, NavigationTab, SlotsTab, StringsTab } from '../components/wellknown/SettingsTabs'
+import DefaultsTab from '../components/wellknown/DefaultsTab'
+import SoundTab from '../components/wellknown/SoundTab'
 import MemoryTab from '../components/MemoryTab'
+import MemorySettings from '../components/MemorySettings'
 import './access.css'
 
 const TABS = [
@@ -20,10 +23,15 @@ const TABS = [
   { id: 'about', labelKey: 'account.tabs.about', files: true },
   { id: 'memory', labelKey: 'account.tabs.memory', files: true },
   { id: 'appearance', labelKey: 'account.tabs.appearance', files: true },
+  { id: 'defaults', labelKey: 'account.tabs.defaults', files: true },
+  { id: 'navigation', labelKey: 'account.tabs.navigation', files: true },
+  { id: 'slots', labelKey: 'account.tabs.slots', files: true },
+  { id: 'strings', labelKey: 'account.tabs.strings', files: true },
+  { id: 'sound', labelKey: 'account.tabs.sound', files: true },
 ]
 
-// Wide tabs hold two cards side by side.
-const WIDE_TABS = new Set(['about'])
+// Wide tabs hold two cards side by side, or a form and its preview.
+const WIDE_TABS = new Set(['about', 'appearance', 'defaults', 'navigation', 'slots', 'strings', 'sound'])
 
 const WINDOW_WORDS = { '1m': 'minute', '5m': '5 minutes', '1h': 'hour', '6h': '6 hours', '1d': 'day', '7d': 'week', '30d': '30 days' }
 
@@ -81,7 +89,7 @@ function ProfileTab({ addToast }) {
         </span>
       </div>
       <div className="ac-actions">
-        <Button type="submit" variant="primary" icon="save" busy={saving} disabled={!name.trim() || !hasChanges}>
+        <Button type="submit" variant="primary" busy={saving} disabled={!name.trim() || !hasChanges}>
           {saving ? t('account.profile.saving') : t('account.profile.save')}
         </Button>
       </div>
@@ -252,57 +260,41 @@ export default function Account() {
   const tabs = TABS.filter(x => (authEnabled || x.files) && (!x.files || filesTabs))
   const first = tabs[0]?.id
   const tab = tabs.some(x => x.id === params.get('tab')) ? params.get('tab') : first
-  const refs = useRef({})
 
   if (tabs.length === 0) {
     return (
-      <div className="page page--content ac-page">
+      <Page className="ac-page">
         <EmptyState variant="unavailable" icon="user-settings" title={t('account.unavailable')} body={t('account.unavailableText')} />
-      </div>
+      </Page>
     )
   }
 
-  const select = (id, focus = false) => {
-    setParams(id === first ? {} : { tab: id }, { replace: true })
-    if (focus) refs.current[id]?.focus()
-  }
-  const onKey = (e) => {
-    const i = tabs.findIndex(x => x.id === tab)
-    if (e.key === 'ArrowRight') { e.preventDefault(); select(tabs[(i + 1) % tabs.length].id, true) }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); select(tabs[(i + tabs.length - 1) % tabs.length].id, true) }
-    else if (e.key === 'Home') { e.preventDefault(); select(tabs[0].id, true) }
-    else if (e.key === 'End') { e.preventDefault(); select(tabs[tabs.length - 1].id, true) }
-  }
+  const select = (id) => setParams(id === first ? {} : { tab: id }, { replace: true })
 
   return (
-    <div className={`page page--content ac-page${WIDE_TABS.has(tab) ? ' ac-page--wide' : ''}`} data-testid="account-page">
+    <Page className={`ac-page${WIDE_TABS.has(tab) ? ' ac-page--wide' : ''}`} data-testid="account-page">
       <PageHeader
         title={t('account.title')}
         supporting={t(authEnabled ? 'account.subtitle' : 'account.subtitleLocal')}
         actions={authEnabled ? <span className="ac-me">{user?.name || user?.email} · {user?.role}</span> : null}
       />
 
-      <div className="dk-tabs" role="tablist" aria-label={t('account.title')} onKeyDown={onKey}>
-        {tabs.map(x => (
-          <button
-            key={x.id} ref={el => { refs.current[x.id] = el }} type="button" role="tab" id={`ac-tab-${x.id}`}
-            className="dk-tab" aria-selected={tab === x.id} aria-controls={`ac-panel-${x.id}`} tabIndex={tab === x.id ? 0 : -1}
-            onClick={() => select(x.id)}
-          >
-            {t(x.labelKey)}
-          </button>
-        ))}
-      </div>
+      <Tabs label={t('account.title')} idPrefix="ac" value={tab} onChange={select} items={tabs.map(x => ({ id: x.id, label: t(x.labelKey) }))} />
 
       <div className="dk-tabpanel" role="tabpanel" id={`ac-panel-${tab}`} aria-labelledby={`ac-tab-${tab}`}>
         {tab === 'profile' && <ProfileTab addToast={addToast} />}
         {tab === 'security' && <SecurityTab addToast={addToast} />}
-        {tab === 'keys' && <ApiKeysPanel addToast={addToast} intro={t('keys.accountIntro')} />}
+        {tab === 'keys' && <ApiKeysPanel addToast={addToast} intro={t('keys.accountIntro')} connect />}
         {tab === 'usage' && <UsageTab />}
         {tab === 'about' && <AboutYouTab />}
-        {tab === 'memory' && <MemoryTab addToast={addToast} />}
+        {tab === 'memory' && <MemorySettings addToast={addToast}><MemoryTab addToast={addToast} embedded /></MemorySettings>}
         {tab === 'appearance' && <AppearanceTab />}
+        {tab === 'defaults' && <DefaultsTab />}
+        {tab === 'navigation' && <NavigationTab />}
+        {tab === 'slots' && <SlotsTab />}
+        {tab === 'strings' && <StringsTab />}
+        {tab === 'sound' && <SoundTab />}
       </div>
-    </div>
+    </Page>
   )
 }

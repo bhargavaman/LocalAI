@@ -62,7 +62,7 @@ var skillKind = proposals.Kind{
 			}
 			return files.AgentSkillsDir(a.Agent) + "/" + a.Target + "/" + skills.SkillFile, nil
 		}
-		return "", fmt.Errorf("%w: a skill is for the user (personal) or for this agent, not for a channel", proposals.ErrBadTarget)
+		return "", fmt.Errorf("%w: a skill is for the user (personal) or for this agent, not for a channel or a project", proposals.ErrBadTarget)
 	},
 	Check: func(in proposals.CheckInput) error {
 		name, _, err := skills.Parse([]byte(in.Content))
@@ -232,7 +232,7 @@ func clipText(s string, n int) string {
 
 // registerChangeKinds adds the kinds that go beyond a file name to the host.
 func (c *Changes) registerChangeKinds() error {
-	for _, k := range []proposals.Kind{skillKind, pageKind, dashboardKind} {
+	for _, k := range []proposals.Kind{skillKind, pageKind, dashboardKind, c.knowledgeKind(), c.voiceProfileKind()} {
 		if err := c.kinds.Register(k); err != nil {
 			return err
 		}

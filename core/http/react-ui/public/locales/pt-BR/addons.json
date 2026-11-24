@@ -66,6 +66,13 @@
     "loadError": {
       "title": "Os complementos não estão disponíveis agora.",
       "paused": "Páginas e ferramentas dos complementos ficam pausadas até ele voltar."
+    },
+    "busy": {
+      "upgrading": "O servidor de complementos está ocupado (atualizando {{names}})",
+      "generic": "O servidor de complementos está ocupado",
+      "unreachable": "Não foi possível alcançar o servidor de complementos",
+      "reason": "Mostrando o último estado conhecido. A página tenta de novo sozinha.",
+      "retry": "Tentar agora"
     }
   },
   "browse": {
@@ -93,7 +100,14 @@
     "alias": "Alias",
     "kindLabel": "Kind",
     "installedOn": "{{name}} is installed and on.",
-    "installedChip": "Instalado"
+    "installedChip": "Instalado",
+    "category": {
+      "label": "Categoria",
+      "all": "Todos",
+      "chat": "Apps de chat",
+      "tools": "Ferramentas",
+      "models": "Modelos"
+    }
   },
   "catalog": {
     "allLibraries": "Todas as bibliotecas",
@@ -104,6 +118,9 @@
     "emptyBody": "Esta lista está vazia.",
     "emptyFiltered": "Nada corresponde à pesquisa. Mude as palavras ou a biblioteca.",
     "emptyTitle": "Nada para mostrar",
+    "failedBody": "As bibliotecas que foram carregadas estão listadas abaixo.",
+    "failedTitle_one": "Não foi possível ler uma biblioteca.",
+    "failedTitle_other": "Não foi possível ler {{count}} bibliotecas.",
     "libraries": "Bibliotecas",
     "loading": "Carregando resultados",
     "next": "Próxima página",
@@ -135,10 +152,13 @@
   "errors": {
     "auth": "Você saiu da conta. Entre novamente.",
     "denied": "O servidor recusou. Você pode não ter permissão, ou o complemento mudou. A lista foi atualizada.",
+    "operationNotFound": "O status desta atualização não está mais disponível. Confira a versão do complemento.",
     "invalid": "O servidor não pôde aceitar esta solicitação.",
     "network": "Não foi possível alcançar o servidor. Verifique sua conexão.",
     "unavailable": "Os complementos não estão disponíveis agora. Tente de novo em instantes.",
-    "unknownOutcome": "Não foi possível confirmar o resultado. Verifique o estado antes de tentar de novo."
+    "unknownOutcome": "Não foi possível confirmar o resultado. Verifique o estado antes de tentar de novo.",
+    "busy": "O servidor de complementos está ocupado e não respondeu a tempo. Tente de novo em instantes.",
+    "needsNewerHost": "Este add-on precisa de um LocalAI mais novo. Atualize o LocalAI e tente de novo. Nada foi instalado."
   },
   "installed": {
     "disabled": "Desativado",
@@ -163,6 +183,7 @@
       "urlCredentials": "O endereço não deve conter nome de usuário nem senha.",
       "urlQuery": "O endereço não deve conter string de consulta nem fragmento.",
       "either": "Use the exact identity or the pattern, not both.",
+      "sourceRepository": "Enter an https address, such as https://github.com/owner/repo.",
       "urlEmpty": "Enter the address of the index.",
       "mirrors": "Each mirror must start with https://, http://, github:, oci:// or file://, and at most 8 are allowed."
     },
@@ -176,6 +197,7 @@
       "requireSignature": "Exigir assinatura",
       "url": "URL do catálogo",
       "identityRegex": "Signer identity pattern (optional)",
+      "sourceRepository": "Source repository (optional)",
       "kind": "Kind",
       "format": "Index format",
       "mirrors": "Mirrors"
@@ -185,13 +207,16 @@
       "reference": "O nome de uma credencial que um administrador configurou neste servidor. Nunca cole um token ou senha aqui.",
       "url": "Um endereço https sem credenciais nem string de consulta.",
       "identityRegex": "An anchored pattern, from ^ to $, used instead of the exact identity. Backend libraries use it so builds from master and from tags both verify.",
+      "sourceRepository": "The https address of the repository the signature must be made for, such as https://github.com/owner/repo. LocalAI compares it exactly with the signing certificate.",
       "format": "A library index uses the shared library entry shape. A gallery index is a model or backend gallery, as the gallery flags name it.",
       "mirrors": "Fallback addresses, one per line, tried in order when the main address cannot be fetched."
     },
+    "lastGood": "Último carregamento {{when}}",
     "lastRefresh": "Atualizada {{when}}, {{count}} entradas",
     "lead": "Uma biblioteca é um índice que lista complementos, backends ou modelos. Credenciais nunca são digitadas aqui: uma biblioteca privada de complementos indica uma credencial que um administrador configurou neste servidor.",
     "listLabel": "Bibliotecas",
     "loading": "Carregando bibliotecas",
+    "neverLoaded": "Nunca carregada",
     "notRefreshed": "Ainda não atualizada",
     "reference": "Referência de credencial: {{name}}",
     "refresh": "Atualizar",
@@ -351,7 +376,8 @@
     "starting": "Iniciando",
     "stopped": "Desativado",
     "update-pending": "Atualização pendente",
-    "updateTo": "Atualização {{version}}"
+    "updateTo": "Atualização {{version}}",
+    "needsSetup": "Precisa de configuração"
   },
   "supporting": "Software que você instala para dar ao LocalAI novas páginas e ferramentas de chat. Cada um roda separado e só pede o que declara.",
   "tabs": {
@@ -376,6 +402,7 @@
     "platform": "Plataforma",
     "selection": "Selecionado como",
     "signatureRequired": "Assinatura obrigatória",
+    "sourceRepository": "Source repository",
     "verification": "Verificação",
     "version": "Versão"
   },
@@ -561,7 +588,8 @@
       "protocol-version": "A versão do protocolo não se encaixa",
       "sdk-version": "A versão do SDK da interface não se encaixa",
       "data-format": "O formato dos dados não se encaixa",
-      "digest-changed": "O digest desta versão mudou"
+      "digest-changed": "O digest desta versão mudou",
+      "feature-level": "Este add-on precisa de um LocalAI mais novo."
     },
     "class": {
       "source-unavailable": "A biblioteca não pode ser acessada.",
@@ -588,7 +616,6 @@
     },
     "progress": "Atualizando {{name}}. Seus dados são copiados primeiro.",
     "done": "Atualizado para a versão {{version}}.",
-    "browseUpdate": "A atualização {{version}} está disponível. Gerencie em Instalados.",
     "errors": {
       "stale_installed": "A versão instalada mudou desde a verificação. Verifique as atualizações novamente.",
       "candidate_changed": "A biblioteca não oferece mais a versão verificada. Verifique as atualizações novamente.",
@@ -601,8 +628,34 @@
       "unknownOutcome": "O resultado da atualização é desconhecido. Leia o estado dela de novo; não inicie outra.",
       "auth": "Entre novamente para continuar.",
       "denied": "Somente um administrador pode fazer isso na própria sessão do navegador.",
+      "operationNotFound": "O status desta atualização não está mais disponível. Confira a versão do complemento.",
       "network": "A rede não está acessível.",
-      "unavailable": "O serviço de complementos não está disponível. Tente de novo."
+      "unavailable": "O serviço de complementos não está disponível. Tente de novo.",
+      "download": "Não foi possível baixar a nova versão",
+      "verify": "A nova versão não passou na verificação de integridade",
+      "swap": "Não foi possível colocar a nova versão no lugar",
+      "start": "A nova versão não iniciou",
+      "not_installed": "Não está mais instalado",
+      "no_update": "Não há mais uma versão mais nova",
+      "stale": "Saiu uma versão mais nova depois da revisão. Procure atualizações de novo",
+      "held": "A atualização aguarda sua aprovação",
+      "unknown": "A atualização falhou",
+      "unconfirmed": "Não foi possível confirmar o resultado da atualização",
+      "run_active": "Há uma rodada de atualizações em andamento. Esta página a mostra",
+      "source_unchecked": "A verificação de atualizações não está disponível. Verifique de novo",
+      "run_not_finished": "A rodada ainda não terminou",
+      "nothing_to_retry": "Nada nesta rodada pode ser tentado de novo",
+      "not_cancellable": "Esta atualização não pode mais ser cancelada",
+      "run_finished": "A rodada já terminou",
+      "invalid": "A solicitação não era válida",
+      "not_found": "O servidor não conhece mais esta rodada",
+      "edited_keys": "Você editou configurações deste modelo. Use Atualizar na linha dele para escolher o que manter",
+      "run_not_human_surface": "Esta atualização precisa da sua confirmação no navegador.",
+      "forbidden": "Sua conta não pode atualizar complementos.",
+      "run_unavailable": "As rodadas de atualizações não estão disponíveis neste servidor.",
+      "in_run": "Já está na rodada de atualizações em andamento",
+      "installs_disabled": "A instalação de backends está desativada neste servidor",
+      "interrupted": "Uma reinicialização interrompeu a atualização. Verifique de novo"
     },
     "upgradeNamed": "Atualizar {{name}}",
     "why": {
@@ -616,16 +669,18 @@
       "unpinned": "A biblioteca informa uma atualização, mas não indica qual build instalar, então não é possível atualizar daqui. Verifique novamente mais tarde."
     },
     "checkAll": "Verificar atualizações",
+    "notCheckedYet": "As atualizações ainda não foram verificadas.",
     "checkingAll": "Verificando...",
-    "checkAllDone": "{{count}} complementos verificados.",
-    "checkAllFailed": "{{count}} não puderam ser verificados.",
     "checkResult": {
       "done": "Verificado.",
       "failed": "A verificação não foi concluída.",
       "justNow": "Verificado agora mesmo."
     },
     "waitingService": "O serviço de complementos está iniciando. O LocalAI pergunta de novo sobre a atualização em {{seconds}} s.",
-    "checkAgain": "Verificar agora"
+    "checkAgain": "Verificar agora",
+    "open": "Abrir Atualizações",
+    "cancelledNote": "A atualização de {{name}} foi cancelada. A versão {{version}} continua em execução.",
+    "cancelling": "Cancelando…"
   },
   "install": {
     "stepsLabel": "Install steps",
@@ -663,7 +718,12 @@
     "openNamed": "Open {{name}}",
     "removeTitle": "Remove {{name}}?",
     "removeBody": "{{name}} turns off and is removed from this server. Its data is kept, so installing it again picks it up. Nothing is deleted.",
-    "removeNamed": "Remover {{name}}…"
+    "removeNamed": "Remover {{name}}…",
+    "setUp": "Configurar",
+    "setUpNamed": "Configurar {{name}}",
+    "review": "Revisar",
+    "reviewNamed": "Revisar {{name}}",
+    "updateTo": "Atualizar para {{version}}"
   },
   "preview": {
     "screenshots": "Screenshots",
@@ -695,7 +755,8 @@
     "skillShadow": "Este complemento substitui a habilidade integrada {{skill}}.",
     "skillShadowWarning": "Este complemento substitui a habilidade integrada {{skill}}. Outro complemento ({{name}}) já faz isso. Só um pode estar ativo; você escolhe qual em Configurações > Ferramentas. Até você escolher, o que foi instalado primeiro o fornece.",
     "skillProvides": "Este complemento fornece a habilidade {{skill}}.",
-    "skillProvidesWarning": "Este complemento fornece a habilidade {{skill}}. Outro complemento ({{name}}) também a fornece. Apenas um pode estar ativo; escolha em Configurações > Ferramentas. Sem uma escolha, o instalado primeiro será usado."
+    "skillProvidesWarning": "Este complemento fornece a habilidade {{skill}}. Outro complemento ({{name}}) também a fornece. Apenas um pode estar ativo; escolha em Configurações > Ferramentas. Sem uma escolha, o instalado primeiro será usado.",
+    "background": "Isto roda em segundo plano. Você pode fechar esta janela; fechá-la não o interrompe."
   },
   "family": {
     "pages": "Procurando páginas que você ou um agente criou? Elas estão em <go>Páginas</go>."
@@ -722,7 +783,11 @@
     "toolsOff_other": "Suas {{count}} ferramentas de chat ficam desligadas até ele rodar de novo.",
     "pageOff": "A página dele fica indisponível até ele rodar de novo.",
     "updateTitle": "{{name}} {{version}} está disponível.",
-    "updateBody": "Você tem {{current}}. Você vê o que muda e confirma antes de qualquer substituição."
+    "updateBody": "Você tem {{current}}. Você vê o que muda e confirma antes de qualquer substituição.",
+    "title_one": "{{count}} complemento precisa de configuração",
+    "title_other": "{{count}} complementos precisam de configuração",
+    "connectionBody_one": "tem {{count}} conexão que ainda não consegue responder. {{reason}}",
+    "connectionBody_other": "tem {{count}} conexões que ainda não conseguem responder. {{reason}}"
   },
   "meta": {
     "builtin": "Integrado",
@@ -759,7 +824,8 @@
       "action": "Aprovar e atualizar",
       "body": "A versão {{current}} de {{name}} continua rodando. Se você aprovar, a nova versão pode executar estas ações. As novas estão marcadas.",
       "done": "{{name}} foi atualizado.",
-      "title": "Aprovar o acesso ao host de {{name}} {{version}}"
+      "title": "Aprovar o acesso ao host de {{name}} {{version}}",
+      "running": "A atualização roda em segundo plano. Você pode fechar esta janela; fechá-la não a interrompe. Escolha Cancelar para interrompê-la."
     },
     "asksNothing": "Este add-on não pede acesso ao host.",
     "blanket": {
@@ -856,12 +922,14 @@
     "keepOwnNamed": "Manter como minhas as permissões gerais de {{name}}",
     "loadError": "O acesso ao host não carregou",
     "loading": "Lendo o que este add-on pede...",
+    "loadingSlow": "Ainda em andamento. O pacote está sendo baixado e sua assinatura verificada antes de mostrar as permissões. Um add-on grande pode demorar um pouco.",
     "loadingPage": "Carregando o acesso ao host",
     "locked": "A implantação desativou mudanças no acesso ao host. Você pode ler esta página, mas não alterá-la.",
     "lockedNoAuth": "O login está desativado, então qualquer pessoa que alcance este servidor poderia alterar isto; o administrador define no arquivo de política.",
     "newOptional": "A nova versão também pede {{ops}}. São opcionais e não permitidas.",
     "noLongerRequested": "Esta versão não pede mais. Você pode desligar.",
-    "notOfficial": "Este add-on vem de {{library}}, não da biblioteca oficial.",
+    "notOfficialWarning": "Este add-on vem de {{library}}, não da biblioteca oficial. Ele roda como código confiável neste servidor e pode usar as credenciais que recebe. Instale-o só se você confiar no autor.",
+    "signedNotReviewed": "Assinado por {{signer}}. Não revisado pelo LocalAI. Ele roda como código confiável neste servidor e pode usar as credenciais que receber. Instale somente se você confiar em quem assinou.",
     "op": {
       "alreadyAllowed": "Já permitido",
       "blocked": "Bloqueado pela política do administrador",
@@ -895,8 +963,63 @@
       "body": "A nova versão pede um acesso ao host que a atual não tem. A versão {{current}} continua rodando até você aprovar. Operações adicionadas: {{count}}.",
       "review": "Revisar e aprovar",
       "reviewNamed": "Revisar e aprovar o acesso ao host de {{name}}",
-      "title": "{{name}} {{version}} aguarda sua aprovação"
+      "title": "{{name}} {{version}} aguarda sua aprovação",
+      "updatingTitle": "Atualizando {{name}} para {{version}}",
+      "queuedBody": "Ela está na fila e roda em segundo plano.",
+      "cancellingTitle": "Cancelando a atualização de {{name}}",
+      "failedTitle": "A atualização de {{name}} para {{version}} falhou",
+      "reviewAgain": "Revisar de novo"
     }
+  },
+  "oauthClient": {
+    "title": "Login da conta",
+    "intro": "As pessoas conectam este add-on à própria conta em um serviço. Registre no serviço o endereço de retorno abaixo, informe o cliente que ele fornecer e aprove o login. Antes disso ninguém pode conectar.",
+    "status": {
+      "unconfigured": "Ainda não aprovado. Ninguém pode conectar.",
+      "changed": "O login deste add-on mudou desde a aprovação. Ninguém pode conectar nem renovar um login até você aprová-lo de novo.",
+      "approved": "Aprovado em {{when}}.",
+      "approvedBy": "Aprovado por {{who}} em {{when}}."
+    },
+    "sentTo": "As pessoas fazem login em",
+    "hosts": "Hosts permitidos",
+    "required": "Sempre solicitados",
+    "optional": "As pessoas podem adicionar",
+    "none": "Nenhum",
+    "tokens": "Os tokens vêm de",
+    "revoke": "Desconectar revoga em",
+    "noRevoke": "Sem endereço: desconectar só esquece o login aqui",
+    "clientAuth": "Autenticação do cliente",
+    "auth": {
+      "basic": "ID e segredo do cliente, enviados no cabeçalho da requisição",
+      "post": "ID e segredo do cliente, enviados no corpo da requisição",
+      "none": "Sem segredo (cliente público)",
+      "other": "Outro"
+    },
+    "params": "Parâmetros extras de login",
+    "callback": "Endereço de retorno",
+    "callbackHint": "Registre este endereço no serviço como endereço de redirecionamento do cliente.",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "baseUrlRequired": "Este servidor não conhece o próprio endereço público, então não há endereço de retorno e ninguém pode conectar. Defina a URL base externa do servidor e recarregue esta página.",
+    "clientId": "ID do cliente",
+    "clientSecret": "Segredo do cliente",
+    "secretHint": "Somente gravação: é guardado selado e nunca mais é mostrado.",
+    "secretSaved": "Há um segredo salvo. Deixe o campo vazio para mantê-lo.",
+    "secretKeepPlaceholder": "Salvo (oculto)",
+    "noSecret": "Este login não usa segredo de cliente.",
+    "approve": "Aprovar e salvar",
+    "saved": "Salvo. O login está aprovado.",
+    "stale": "O login deste add-on mudou enquanto você revisava. Nada foi salvo.",
+    "refresh": "Mostrar o novo login",
+    "loadFailed": "Não foi possível ler o login deste add-on",
+    "errors": {
+      "unavailable": "Não foi possível acessar o add-on. Tente mais tarde.",
+      "needsApproval": "O add-on não está aprovado.",
+      "baseUrlRequired": "Este servidor não conhece o próprio endereço público. Defina a URL base externa do servidor.",
+      "approvalStale": "O login deste add-on mudou. Mostre o novo login.",
+      "save": "Não foi possível salvar o cliente."
+    },
+    "unknownLibrary": "uma biblioteca desconhecida"
   },
   "file": {
     "button": "Instalar de um arquivo",
@@ -929,6 +1052,81 @@
       "downgradeTitle": "Versão mais antiga",
       "downgrade": "Isto instala a versão {{version}}, que é mais antiga que a versão instalada {{installed}}. Uma versão mais antiga pode não ler dados escritos por uma mais nova.",
       "downgradeConfirm": "Quero instalar a versão mais antiga"
+    },
+    "progress": "Instalando {{name}} a partir de um arquivo. Ele roda em segundo plano.",
+    "failedTitle": "Falha ao instalar {{name}} a partir de um arquivo",
+    "failedHint": "O arquivo fica guardado por uma hora. Escolha Tentar de novo para usá-lo outra vez."
+  },
+  "notice": {
+    "enableFailedTitle": "Não foi possível ativar {{name}}",
+    "incompatibleTitle": "Não é possível ativar {{name}}: incompatível com este servidor",
+    "noUpgrade": "Ainda não há uma versão mais nova na lista. Deixe-o desativado ou remova-o."
+  },
+  "operation": {
+    "kind": {
+      "install": "Instalando…",
+      "upgrade": "Atualizando…",
+      "uninstall": "Removendo…",
+      "enable": "Iniciando…",
+      "disable": "Parando…",
+      "working": "Trabalhando…"
+    },
+    "label": "Em andamento: {{operation}}",
+    "phase": {
+      "queued": "aguardando",
+      "downloading": "baixando e verificando",
+      "backing-up": "copiando os dados",
+      "installing": "instalando",
+      "migrating": "migrando os dados",
+      "starting": "iniciando",
+      "working": "em andamento"
     }
+  },
+  "groups": {
+    "chat": "Apps de chat",
+    "tools": "Ferramentas e serviços",
+    "models": "Mídia e modelos",
+    "builtin": "Integrado"
+  },
+  "connection": {
+    "title": "Conexões",
+    "none": "Ainda não há conexões.",
+    "answersAs": "Responde como {{name}}",
+    "noAgent": "Nenhum agente escolhido",
+    "manage": "Gerenciar conexões",
+    "acceptsListed_one": "Aceita {{count}} pessoa",
+    "acceptsListed_other": "Aceita {{count}} pessoas",
+    "accepts": {
+      "anyone": "Aceita qualquer pessoa",
+      "nobody": "Ainda não aceita ninguém"
+    },
+    "state": {
+      "running": "Em execução",
+      "off": "Desligada",
+      "attention": "Precisa de configuração"
+    }
+  },
+  "queue": {
+    "title": "Fila de instalação",
+    "select": "Adicionar à fila",
+    "selectNamed": "Adicionar {{name}} à fila de instalação",
+    "inQueue": "Na fila",
+    "selectionLabel": "Complementos selecionados para instalar",
+    "selected": "Selecionados: {{count}}",
+    "reviewPicked": "Revisar e enfileirar",
+    "clear": "Limpar",
+    "position": "Complemento {{number}} de {{total}}.",
+    "batchNote": "Nada entra na fila até você terminar o último.",
+    "confirmBody": "A versão {{version}} da fonte {{library}} é adicionada à fila de instalação. Ela é baixada em segundo plano e verificada antes de ser instalada. Ela não é ativada.",
+    "add": "Adicionar à fila",
+    "acceptNext": "Aceitar e seguir",
+    "acceptLast": "Aceitar e enfileirar tudo",
+    "skip": "Pular",
+    "unpinned": "Esta entrada de desenvolvimento não está presa a um pacote. Ela instala o que a fonte serve agora.",
+    "reviewTitle": "Revisão necessária.",
+    "reviewBody": "O pacote pede mais acesso ao host do que você aprovou. Confira a lista de novo antes da instalação.",
+    "refused": "{{name}} não entrou na fila. {{reason}}",
+    "noAnswer": "O servidor não respondeu sobre este complemento.",
+    "notInLibrary": "Este complemento não está mais nas suas bibliotecas."
   }
 }

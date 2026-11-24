@@ -122,7 +122,7 @@ const docTemplate = `{
         },
         "/api/addons/apps": {
             "get": {
-                "description": "Returns the installed addons that are enabled, for every authenticated caller who holds the addons feature. The owner decides what a caller sees; hiding an entry is never the control, because every call the entry leads to is authorized again. Each app has its title, description, icon URL, version and installed generation, a process state (running, starting, failed or stopped; the state is an observation, separate from the enabled flag), the path of its main page when its manifest declares a valid one, and a bounded tool summary. A headless addon is listed without a main page. Administrators additionally see installed addons that are disabled and, per app, the start and stop controls and the management link. An app carries update update-pending, separate from state, only when the owner's cached update check says an update is available for the installed package; the list never evaluates a check and never reaches a library.",
+                "description": "Returns the installed addons that are enabled, for every authenticated caller who holds the addons feature. The owner decides what a caller sees; hiding an entry is never the control, because every call the entry leads to is authorized again. Each app has its title, description, icon URL, version and installed generation, a process state (running, starting, failed or stopped; the state is an observation, separate from the enabled flag), the path of its main page when its manifest declares a valid one, and a bounded tool summary. A headless addon is listed without a main page. Administrators additionally see installed addons that are disabled and, per app, the start and stop controls and the management link. An app carries update update-pending, separate from state, only when the owner's cached update check says an update is available for the installed package; the list never evaluates a check and never reaches a library. Text that the manifest translates (ui.title and ui.description language maps) is returned in all languages in titles and descriptions. When the request names a language, each app that translates it also carries language, localizedTitle and localizedDescription, resolved per field with English as the fallback; title and description never change. An add-on that declares a setup text (what the person needs before it works) has setup, setups by language and, with a language, localizedSetup.",
                 "produces": [
                     "application/json"
                 ],
@@ -130,6 +130,20 @@ const docTemplate = `{
                     "Addons"
                 ],
                 "summary": "List the addon apps the caller may use",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Language tag to resolve the text for, such as it or pt-BR. Wins over Accept-Language. An unknown language gives the English text.",
+                        "name": "lang",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Used when lang is absent. Quality values are honored; English or no match adds no localized field.",
+                        "name": "Accept-Language",
+                        "in": "header"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "Apps visible to the caller",
@@ -150,7 +164,7 @@ const docTemplate = `{
                         }
                     },
                     "503": {
-                        "description": "Addons or the owner are unavailable",
+                        "description": "Addons or the owner are unavailable, or the owner did not answer in time (type owner_busy or owner_unavailable)",
                         "schema": {
                             "$ref": "#/definitions/addons.AddonErrorResponse"
                         }
@@ -572,7 +586,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "Stores which resource the authenticated user chose for the conversation and add-on, so that chat tool calls that name no resource use it. The caller must hold at least the viewer role on the resource now; the stored reference is never a bearer and is authorized again at the owner on every use. It is not process-global, not shared between users or conversations, and not part of the chat history. The store is bounded per user and expires unused entries. No MCP tool maps to this route.",
+                "description": "Stores which resource the authenticated user chose for the conversation and add-on, so that chat tool calls that name no resource use it. The caller must hold at least the viewer role on the resource now; the stored reference is never a bearer and is authorized again at the owner on every use. It is not process-global, not shared between users or conversations, and not part of the chat history. The store is bounded per user and expires unused entries. For an add-on whose manifest scopes its resources per agent, a chat of a saved agent can select only a resource on the agent's list. No MCP tool maps to this route.",
                 "consumes": [
                     "application/json"
                 ],
@@ -628,7 +642,7 @@ const docTemplate = `{
                         }
                     },
                     "403": {
-                        "description": "Feature denied, or the resource is unknown or not readable by the caller",
+                        "description": "Feature denied, the resource is unknown or not readable by the caller, or (type resource_not_in_agent_list) the chat's saved agent does not list it",
                         "schema": {
                             "$ref": "#/definitions/addons.AddonErrorResponse"
                         }
@@ -1202,6 +1216,64 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "Addons or the owner are unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/addons/host-grants/queue": {
+            "post": {
+                "description": "Administrators only, from their own browser session (same-origin fetch, X-LocalAI-Confirm equal to \"queue\"). API keys, bearer tokens, MCP sessions and tool calls are refused with 403 not_human_surface. Each item carries what host-grants/install carries for an install from a library: the release, and the approval of its preview (digest, ticked operations, grants revision and the preview nonce). The owner checks each approval now and records it; the install (or, with action upgrade, the upgrade of an installed add-on; the pins of the plain upgrade are optional, both or neither) then runs in the background, in order, on the queue of backend operations and within its limit, as an operation of /api/operations (the owner installs one add-on at a time), with its phase and its downloaded bytes. Cancel it there (POST /api/operations/{jobID}/cancel) while it waits or downloads. The install never turns the add-on on. When the verified package asks for host access that the preview did not show, the install stops and asks for a new review (the operation fails and a notification says so); nothing is granted. Items are answered one by one: a refused item carries the error of host-grants/install and does not stop the others. Queued installs that have not finished when the owner restarts are failed with the code interrupted.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Addons"
+                ],
+                "summary": "Queue add-on installs with the host access the administrator approved (browser session)",
+                "parameters": [
+                    {
+                        "description": "Installs to queue",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/addons.HostGrantsQueueBody"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One answer per item",
+                        "schema": {
+                            "$ref": "#/definitions/addons.HostGrantsQueueResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Malformed request",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not a human surface (not_human_surface) or administration denied",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Addons or the operation queue are unavailable",
                         "schema": {
                             "$ref": "#/definitions/addons.AddonErrorResponse"
                         }
@@ -3384,7 +3456,7 @@ const docTemplate = `{
         },
         "/api/addons/{id}/upgrade": {
             "post": {
-                "description": "Administrators only, from their own browser session (same-origin fetch, X-LocalAI-Confirm equal to the operationId). The only action that applies an update. It carries the digest of the installed package the caller saw (expectedDigest) and the digest of the candidate the check resolved (candidateDigest). The owner re-resolves the library the add-on came from and refuses, before it records anything, an installed package that is not the expected one (409 stale_installed), a candidate that is not the one it resolves now (409 candidate_changed), an incompatible candidate (409 incompatible), a rewritten immutable version (409 integrity_error) and the same transition under another operation ID (409 upgrade_conflict). It never changes the library or the channel. The upgrade then follows the lifecycle of an add-on: the candidate is staged and verified, the data is backed up and migrated when the add-on has any, and the new generation is published only when it starts. A failure or cancellation keeps the last good generation or leaves an explicit recovery state; the previous installation is never deleted. Repeating the operationId returns the recorded result and never runs again; after outcome_unknown read operation-status with the same operationId. No MCP tool maps to this route.",
+                "description": "Administrators only, from their own browser session (same-origin fetch, X-LocalAI-Confirm equal to the operationId). The only action that applies an update. With the operation queue (the normal server) the upgrade is recorded and answered at once in the accepted phase, with jobId, the operation of /api/operations that runs it in the background on the queue of backend operations; cancel it there while it waits or downloads. It carries the digest of the installed package the caller saw (expectedDigest) and the digest of the candidate the check resolved (candidateDigest). The owner re-resolves the library the add-on came from and refuses, before it records anything, an installed package that is not the expected one (409 stale_installed), a candidate that is not the one it resolves now (409 candidate_changed), an incompatible candidate (409 incompatible), a rewritten immutable version (409 integrity_error) and the same transition under another operation ID (409 upgrade_conflict). It never changes the library or the channel. The upgrade then follows the lifecycle of an add-on: the candidate is staged and verified, the data is backed up and migrated when the add-on has any, and the new generation is published only when it starts. A failure or cancellation keeps the last good generation or leaves an explicit recovery state; the previous installation is never deleted. Repeating the operationId returns the recorded result and never runs again; after outcome_unknown read operation-status with the same operationId. No MCP tool maps to this route.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4411,7 +4483,7 @@ const docTemplate = `{
                 "summary": "Start a chat.",
                 "parameters": [
                     {
-                        "description": "model and optional title, agent and switches",
+                        "description": "model and optional title, agent (one of yours or one shared with you) and switches",
                         "name": "request",
                         "in": "body",
                         "required": true,
@@ -4649,7 +4721,7 @@ const docTemplate = `{
         },
         "/api/chats/admin/host-exec/events": {
             "get": {
-                "description": "Every command the chats' built-in bash ran directly on this machine: who, in which chat, the command (cut at 4 KiB), the exit code (-1 when it did not exit by itself), how long it took and whether it timed out. The commands had the network of the server, so this is also the record of what they could reach.",
+                "description": "Every command the chats' built-in bash ran directly on this machine: who, in which chat, the kind of line (run, or job_start, job_input, job_kill and job_end for a background job, with its job id), the command or the input (cut at 4 KiB), the exit code (-1 when it did not exit by itself), how long it took and whether it timed out. The commands had the network of the server, so this is also the record of what they could reach.",
                 "tags": [
                     "chats"
                 ],
@@ -4667,6 +4739,100 @@ const docTemplate = `{
                         "description": "The newest commands first",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsHostExecEventList"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/admin/oauth-clients/{addonId}": {
+            "get": {
+                "description": "The client ID, whether a secret is stored (never the secret), the approval and the login the add-on declares, with the callback address to register with the service. No MCP tool reads or writes it.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the OAuth client of an add-on (administrator).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the add-on's id",
+                        "name": "addonId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The client",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsOAuthClient"
+                        }
+                    },
+                    "503": {
+                        "description": "The add-on does not run",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Saving is the approval of the login the add-on declares now: send its current_digest as descriptor_digest. When the login changed since, nothing is saved and the answer is 409 with the new current_digest. client_secret is write-only; absent keeps the stored one. No MCP tool reads or writes it.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Save the OAuth client of an add-on and approve its login (administrator).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the add-on's id",
+                        "name": "addonId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the client",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsOAuthClientWrite"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The client",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsOAuthClient"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The login changed since the form showed it",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsOAuthClientConflict"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/admin/sandbox-profiles": {
+            "get": {
+                "description": "The profiles of the Sandbox add-on with their limits, tools and the state of their images (has_previous says an older image is kept, so a profile can be pinned to it), and the roles a policy can name. The policy is the owner host setting sandbox_profiles (default, access by role and user, memory_mib and disk_mib quota, pin_previous); change it with the add-on host settings.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the sandbox profiles (administrators).",
+                "responses": {
+                    "200": {
+                        "description": "The profiles",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSandboxProfilesAdmin"
                         }
                     }
                 }
@@ -5001,7 +5167,7 @@ const docTemplate = `{
         },
         "/api/chats/admin/tools": {
             "get": {
-                "description": "The built-in tools of the chats (bash, web_search, web_fetch, as this server registers them): label, the per-chat switch group, the runtime setting that switches each off and the ones that configure it, whether it is on, whether it only reads and whether an add-on may replace it, who serves it now (builtin, an add-on's ID, or empty), the add-ons that replace it (oldest install first, with their install times in installed_at), the default one that serves with no pin (default: the oldest running install) and the one pinned with chats_tool_providers, the titles of the candidates, the candidates that are installed but stopped (stopped), a note \"not running\" when an installed add-on replaces the tool but none serves, and for bash the mode of chats_host_exec and why this server cannot run it, if so. skills lists the built-in skills (xlsx, docx, pptx, pdf) that an installed add-on replaces: who serves each now, the add-ons that replace it (the same order, default and installed_at) and the one pinned in the same chats_tool_providers map. Change them with POST /api/settings.",
+                "description": "The built-in tools of the chats (bash, web_search, web_fetch, list_agents and the two LocalAI groups localai_client and localai_admin, as this server registers them): label, the per-chat switch group, the runtime setting that switches each off and the ones that configure it, whether it is on, whether it only reads and whether an add-on may replace it, who serves it now (builtin, an add-on's ID, or empty), the add-ons that replace it (oldest install first, with their install times in installed_at), the default one that serves with no pin (default: the oldest running install) and the one pinned with chats_tool_providers, the titles of the candidates, the candidates that are installed but stopped (stopped), a note \"not running\" when an installed add-on replaces the tool but none serves, and for bash the mode of chats_host_exec and why this server cannot run it, if so. skills lists the built-in skills (xlsx, docx, pptx, pdf) that an installed add-on replaces: who serves each now, the add-ons that replace it (the same order, default and installed_at) and the one pinned in the same chats_tool_providers map. Change them with POST /api/settings.",
                 "tags": [
                     "chats"
                 ],
@@ -5183,13 +5349,14 @@ const docTemplate = `{
         },
         "/api/chats/agents": {
             "get": {
+                "description": "Your own agents come first, then the agents other people shared with you. access says which is which: role owner for yours (with sharedWith, the number of grants), use or viewer for a shared one (with owner, the name of the person who shared it). A shared agent carries its full definition only for viewer, and never the owner's connections, resources or folders: you run it with your own.",
                 "tags": [
                     "chats"
                 ],
-                "summary": "List your saved agents.",
+                "summary": "List your saved agents and the agents shared with you.",
                 "responses": {
                     "200": {
-                        "description": "Your agents, sorted by name",
+                        "description": "Your agents, sorted by name, then the shared ones",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsAgentList"
                         }
@@ -5229,6 +5396,44 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/agents/addons/{addon}/resources": {
+            "get": {
+                "description": "For an add-on whose manifest scopes its resources per agent, returns what the add-on's declared listing gives you now, ordered by ID: the resources you own or were granted, with your role on each, and the add-on's word for them (noun, noun_plural; lang or Accept-Language picks a translation the manifest has). The list is the choice for the agent field resources; a chat of the agent still reaches only what you may use at that moment. An add-on that does not scope its resources per agent, or is not there for you, is 404.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the resources of an add-on that you can give a saved agent.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the add-on's id",
+                        "name": "addon",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Language tag for the nouns, such as it or pt-BR. Wins over Accept-Language. A language the manifest does not translate gives English.",
+                        "name": "lang",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The resources you can give an agent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentResourceChoices"
+                        }
+                    },
+                    "404": {
+                        "description": "No such add-on, or it has no resources to give to an agent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/agents/builtin-grants": {
             "get": {
                 "description": "Each grant has a name (the value for builtins in an agent), a title, a description and sensitive. A sensitive grant changes what the agent may do or reach later (profile, skills, pages, dashboard, new channels, actions of unattended runs); none is on by default. A chat of the agent holds only the grants you may use at that moment.",
@@ -5248,7 +5453,7 @@ const docTemplate = `{
         },
         "/api/chats/agents/import": {
             "post": {
-                "description": "Send the export file (version 1, 2 for an agent with a folder, or 3 for an agent with several) as the JSON body, or as the file field of a multipart form. A bare agent definition (the body of POST /api/chats/agents) is accepted too. The agent is always new: a name you already use gets a number, and a model this server does not have, or you may not use, is dropped with a warning. A folder is looked up by its path in your files; when you have no such folder the agent keeps the mode without a folder (folder state unset) and does not start until you choose one, and a warning says so.",
+                "description": "Send the export file (version 1 to 5) as the JSON body, or as the file field of a multipart form. A bare agent definition (the body of POST /api/chats/agents) is accepted too, but not one that carries project_id or projectRef (400). A version 5 file is a project agent: send project_id (one of your own active projects: 404 for an unknown or another person's, 400 for an archived one) or create_project true (a project is made from the name in the file) as query parameters, or as form fields of a multipart import; never inside the file, whose own project fields are ignored. The query string wins over a form field, and create_project is the value of that one parameter. Without either the answer is 409 with the error type project_required and the project's name in project_name. The agent is made a project agent of that project with its files and memory folders; the file's files entry only chooses the files mode (read or write), memory is always read, and a project id inside the file's agent is ignored. With project_id, a file of an older version is imported as a project agent too, its folders ignored with a warning. The agent is always new: a name you already use gets a number, and a model this server does not have, or you may not use, is dropped with a warning. A folder is looked up by its path in your files; when you have no such folder the agent keeps the mode without a folder (folder state unset) and does not start until you choose one, and a warning says so.",
                 "consumes": [
                     "application/json",
                     "multipart/form-data"
@@ -5272,6 +5477,18 @@ const docTemplate = `{
                         "description": "the agent file (multipart)",
                         "name": "file",
                         "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "one of your own active projects to make the agent a project agent of",
+                        "name": "project_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "make a project from the project name in the file and put the agent in it",
+                        "name": "create_project",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -5279,6 +5496,12 @@ const docTemplate = `{
                         "description": "The new agent and what the import changed",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsAgentImportResult"
+                        }
+                    },
+                    "409": {
+                        "description": "The file is a project agent and no project was chosen (error type project_required)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentProjectRequired"
                         }
                     }
                 }
@@ -5336,10 +5559,11 @@ const docTemplate = `{
         },
         "/api/chats/agents/{id}": {
             "get": {
+                "description": "An agent shared with you carries its full definition only for the role viewer, and never the owner's connections, resources or folders.",
                 "tags": [
                     "chats"
                 ],
-                "summary": "Read a saved agent.",
+                "summary": "Read a saved agent of yours or one shared with you.",
                 "parameters": [
                     {
                         "type": "string",
@@ -5357,7 +5581,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "No such conversation, or it is another user's",
+                        "description": "No such agent, or it is another user's and not shared with you",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -5410,7 +5634,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Chats that ran with it keep their history; their next turn runs without the agent's tools.",
+                "description": "Chats that ran with it keep their history; their next turn runs without the agent's tools. The agent's own memory notes (Memory/agents/{id}) are not part of it: memory says what to do with them. keep (the default) leaves them, listed under Deleted agents on the Memory page until you delete them. delete moves them to the Trash. export answers 200 with a zip file of the notes and then moves them to the Trash (204 when the agent has none). A value that is not one of these is a 400 and nothing is deleted.",
                 "tags": [
                     "chats"
                 ],
@@ -5422,11 +5646,35 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "enum": [
+                            "keep",
+                            "export",
+                            "delete"
+                        ],
+                        "type": "string",
+                        "default": "keep",
+                        "description": "what to do with the agent's own notes",
+                        "name": "memory",
+                        "in": "query"
                     }
                 ],
                 "responses": {
+                    "200": {
+                        "description": "Deleted; a zip file of the agent's notes (memory=export)",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
                     "204": {
                         "description": "Deleted"
+                    },
+                    "400": {
+                        "description": "memory is not keep, export or delete",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
                     },
                     "404": {
                         "description": "No such conversation, or it is another user's",
@@ -5439,7 +5687,7 @@ const docTemplate = `{
         },
         "/api/chats/agents/{id}/export": {
             "get": {
-                "description": "Returns the definition as a JSON file (version, kind localai-agent, agent). It holds no ID, owner or time. An agent with one folder is version 2 and carries folder {path, mode}; an agent with several is version 3 and carries folders [{path, mode}], the folder's home-relative path now (empty when the folder is missing, not chosen, or outside your home, even if readable); importing an empty path preserves the scope as unset with a warning; a server that knows only version 1 refuses it. An agent with switches of built-in tool groups (builtins_off, builtins_on) is version 4. An agent without a folder or switches is version 1. The builtins list (builtin grants) is an extra field of any version: a server that does not know it ignores it, so the agent comes back without the grants. POST /api/chats/agents/import reads it. This replaces the old /api/agents/{name}/export.",
+                "description": "Returns the definition as a JSON file (version, kind localai-agent, agent). It holds no ID, owner or time. An agent of a project is version 5: it carries projectRef (id, name and slug of the project it was made in, a hint only) and folders as the project-relative paths files (with its mode) and memory (read); it holds no node ID and no path of your files, and a server that knows only versions up to 4 refuses it. An agent with one folder is version 2 and carries folder {path, mode}; an agent with several is version 3 and carries folders [{path, mode}], the folder's home-relative path now (empty when the folder is missing, not chosen, or outside your home, even if readable); importing an empty path preserves the scope as unset with a warning; a server that knows only version 1 refuses it. An agent with switches of built-in tool groups (builtins_off, builtins_on) is version 4. An agent without a folder or switches is version 1. The builtins list (builtin grants) is an extra field of any version: a server that does not know it ignores it, so the agent comes back without the grants. POST /api/chats/agents/import reads it. This replaces the old /api/agents/{name}/export.",
                 "tags": [
                     "chats"
                 ],
@@ -5458,6 +5706,129 @@ const docTemplate = `{
                         "description": "The agent file",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsAgentExport"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/agents/{id}/needs": {
+            "get": {
+                "description": "For your agent or an agent shared with you: each thing the agent uses, by label, with its state for you. ok: you have it. missing: it is not shared with you (ask the owner, or use your own). unavailable: this server or your account does not offer it. ask: the agent asks for a network (kind network) or a group of built-in tools (kind tool-group) that your chat starts without; you may turn it on in the chat. Nothing else about a thing you cannot see is returned.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List what an agent needs and whether you have it.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the agent's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "What the agent needs",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentNeedList"
+                        }
+                    },
+                    "404": {
+                        "description": "No such agent, or it is not shared with you",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/agents/{id}/project": {
+            "put": {
+                "description": "The one way to change the project of an agent: a normal save (PUT /api/chats/agents/{id}) refuses a changed project. project_id is an active project of yours, or empty to leave the project. Into a project the agent gets the project's files folder (files_mode read or write, write by default) and the memory folder at read; the grant to write the project's memory is removed, and its waiting project notes are voided. Out of a project, folders (or whole_home true) are required, so the agent never gets all your files by accident. The agent's own notes start empty: the old ones are moved to Memory/Moved agent notes in your files, not deleted. Chats the agent already has keep their history but take no new turn (the answer is 409 agent_moved: start a new chat), and their loops end. The move is refused with 409 agent_move_blocked while a chat of the agent runs a turn, while the agent is shared and enters a project (revoke_shares true removes the grants), or while an enabled file trigger watches a folder outside the new folders (disable_triggers true switches it off). The answer also lists what the new project attaches (attached_new), what the old project attached and the new one does not (attached_old, these stop applying), and project_skills_switch, true when the skills of the old project stop and those of the new one start. With dry_run true nothing is written and the answer lists what the move touches, including the blockers.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Move a saved agent to another project, or out of its project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the agent's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the target project and the options",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentMove"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "What the move did, or would do",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentMoveReport"
+                        }
+                    },
+                    "400": {
+                        "description": "The target or the folders are not valid, or the target is archived",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such agent or project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The move is blocked (agent_move_blocked)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/agents/{id}/references": {
+            "get": {
+                "description": "The add-ons, collections, skills, folders, connections, add-on resources, MCP servers and built-in grants the agent names, with a label each. share says how a reference can be shared with a person you share the agent with; without it the person needs access of their own. Only the owner may call it.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List what your agent uses.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the agent's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The references",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentReferenceList"
+                        }
+                    },
+                    "403": {
+                        "description": "The agent is shared with you, not yours",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such agent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -5490,6 +5861,56 @@ const docTemplate = `{
                         "description": "The runs and the counts",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsAgentHistory"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/agents/{id}/share": {
+            "post": {
+                "description": "Makes the agent's record in the sharing API on the first call and returns it on every call. Share the agent with /api/shares/agent/{id}/grants/{principal}, roles use and viewer, or @everyone. Sharing the agent does not share what it uses: share each collection or connection by itself. Only the owner may call it.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Get the sharing ID of your agent.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the agent's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The sharing ID",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsAgentShareRef"
+                        }
+                    },
+                    "400": {
+                        "description": "The agent belongs to a project; project agents cannot be shared",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "The agent is shared with you, not yours",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such agent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Agents cannot be shared on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -5618,7 +6039,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "Stale, expired or answered",
+                        "description": "Stale, expired, answered, or the person who proposed it can no longer edit the shared project",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -5703,7 +6124,7 @@ const docTemplate = `{
         },
         "/api/chats/connectors": {
             "get": {
-                "description": "A binding connects a bot of a messaging platform (served by a connector add-on, such as Telegram) to one of your saved agents. A person who messages the bot talks to that agent, in a conversation of their own, as you: your quota, your model allowlist and only the agent's grants apply.",
+                "description": "A binding connects a bot of a messaging platform (served by a connector add-on, such as Telegram) to one of your saved agents. A person who messages the bot talks to that agent, in a conversation of their own, as you: your quota, your model allowlist and only the agent's grants apply. shared lists the bindings that other people shared with you, with their name, state and owner only: you may use them in your chats and agents and nothing else. sharing is false when this server cannot share bindings (no named accounts). A binding you shared carries share, with its ID in /api/shares/connection.",
                 "tags": [
                     "chats"
                 ],
@@ -5718,7 +6139,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Needs the kind (the platform), the bot token (kept sealed, never returned) and an agent of yours that names a model. The token is checked with the platform when its add-on runs: a token that the platform refuses is a 400. reply_mode (off, progress, stream; default progress), conversation (sender, chat, window with window_minutes, thread; default sender) and send_files (default true) say how the bot answers. The allowlist is empty at first, so nobody is accepted: add chat IDs, user IDs or @usernames, or set accept_any (anyone who can message the bot then uses the agent's tools; the request that turns it on must also carry confirm_accept_any set to \"accept any message\", or it is a 400). At most 10 bindings.",
+                "description": "// @Description For a kind that lists wildcard_resources, resources may hold owner/* (every resource of one owner) and * (every resource the token reaches); the request that adds * must also carry confirm_any_resource set to \"allow any resource\". A kind that lists token_guards refuses a token with a guarded prefix (a classic GitHub token) unless options sets the guarded option to its allow value in a request that also carries confirm_wider_token set to \"accept wider token\". Needs the kind (the platform), the bot token (kept sealed, never returned) and an agent of yours that names a model. The token is checked with the platform when its add-on runs: a token that the platform refuses is a 400. reply_mode (off, progress, stream, reasoning; default progress; reasoning shows the model's thinking to every sender of the binding), conversation (sender, chat, window with window_minutes, thread; default sender), send_files (default true) and reply_language (auto, en, it, de, es, fr, pt-BR; default auto, the language of the sentences the bot writes itself) say how the bot answers. The allowlist is empty at first, so nobody is accepted: add chat IDs, user IDs or @usernames, or set accept_any (anyone who can message the bot then uses the agent's tools; the request that turns it on must also carry confirm_accept_any set to \"accept any message\", or it is a 400). At most 50 bindings.",
                 "tags": [
                     "chats"
                 ],
@@ -5746,23 +6167,71 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
+                    },
+                    "409": {
+                        "description": "The binding is enabled and is the same bot as another enabled binding of yours (type duplicate_connection, param the name of the other); send confirm_duplicate set to \\\"answer twice\\\" to save it anyway",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
                     }
                 }
             }
         },
         "/api/chats/connectors/kinds": {
             "get": {
-                "description": "The messaging platforms that a running connector add-on serves, with the add-on page that adds and edits their bindings. Empty when no connector add-on is installed.",
+                "description": "The messaging platforms that a running connector add-on serves, with the add-on page that adds and edits their bindings. Empty when no connector add-on is installed. A kind whose manifest translates its text carries titles and descriptions by language and, when the request names a language it translates (lang, else Accept-Language), language, localized_title, localized_description and localized_setup with English as the fallback for each field; title, description and setup stay English. A kind that declares a setup text (what the person needs before a binding works) also has setup, and setups by language.",
                 "tags": [
                     "chats"
                 ],
                 "summary": "List the connector kinds you can bind.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Language tag to resolve the kind text and the capability text for, such as it or pt-BR. Wins over Accept-Language. An unknown language gives the English text.",
+                        "name": "lang",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "The kinds",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsConnectorKindList"
                         }
+                    }
+                }
+            }
+        },
+        "/api/chats/connectors/oauth/callback": {
+            "get": {
+                "description": "The service sends the browser here after the login; register this address with the service as the redirect URI. It needs the session of the person who started the login (with authentication off, the nonce cookie alone binds the login to the browser). It always answers 303 to the page the login started from, with oauth=ok, oauth=denied (you declined; the connection stays as it was) or oauth=error and class=invalid_state, provider_error, exchange_failed, scopes_missing, token_too_large or unavailable. The state works once and for ten minutes. Nothing the service says is shown or logged.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Finish the login of a connection that uses OAuth.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the state of the login",
+                        "name": "state",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "the code the service gave",
+                        "name": "code",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "the error the service gave",
+                        "name": "error",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "303": {
+                        "description": "To the page of the web app, with the outcome in the query"
                     }
                 }
             }
@@ -5792,7 +6261,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "The body replaces every field except the token, which is kept unless the request has a new one, and send_files, which is kept when it is absent. A new token is checked with the platform: a token that the platform refuses is a 400 and nothing is saved.",
+                "description": "The body replaces every field except the token, which is kept unless the request has a new one, and send_files, reply_language and inbound_media, which are kept when absent. A new token is checked with the platform: a token that the platform refuses is a 400 and nothing is saved. A binding that has an agent can only move to an agent of the same project: the connection of a project agent stays in its project, and a connection outside projects cannot use a project agent (400).",
                 "tags": [
                     "chats"
                 ],
@@ -5827,11 +6296,17 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
+                    },
+                    "409": {
+                        "description": "The binding would be the same bot as another enabled binding of yours (type duplicate_connection); see the create endpoint",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
                     }
                 }
             },
             "delete": {
-                "description": "Its offset, sender log and sender-to-chat map go; the chats it made stay.",
+                "description": "Its offset, sender log and sender-to-chat map go; the chats it made stay. A connection that logs in with OAuth asks the service to revoke its login first, as a disconnect does, and is deleted even when the service does not answer.",
                 "tags": [
                     "chats"
                 ],
@@ -5854,7 +6329,7 @@ const docTemplate = `{
         },
         "/api/chats/connectors/{id}/access": {
             "get": {
-                "description": "Runs the permission check the host uses for each turn, for a sender on the allowlist, a paired sender and a sender of each role the kind declares, and lists the latest decisions. A settings page of the add-on can show it.",
+                "description": "Runs the permission check the host uses for each turn, for a sender on the allowlist by ID or name (trusted with every capability that is not sensitive), a sender let in only through a listed channel, a paired sender and a sender of each role the kind declares, and lists the latest decisions. A settings page of the add-on can show it.",
                 "tags": [
                     "chats"
                 ],
@@ -5866,6 +6341,12 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Language tag for localized_message, such as it or pt-BR. Wins over Accept-Language. English or an unknown language adds no localized field.",
+                        "name": "lang",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -5873,6 +6354,53 @@ const docTemplate = `{
                         "description": "The effective permissions",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsConnectorAccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/connectors/{id}/access/preview": {
+            "post": {
+                "description": "Runs the same permission chain as the access view on the state in the request: the server setting, the Tools switch of the agent, the agent permission, the permission of the connection and the trust of the sender, in that order, and reports the first problem of each capability with a code, a plain message, one fix and the links not yet checked. Fields that are absent keep the saved value. Use the id \"new\" with a kind for a connection that is not saved yet. It writes nothing, records no decision, and neither takes nor returns the token. Same sign-in and Connectors feature as the other connector routes.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Preview what each kind of sender may do on a connector binding, before saving.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the binding's id, or new",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Language tag for localized_message, such as it or pt-BR. Wins over Accept-Language. English or an unknown language adds no localized field.",
+                        "name": "lang",
+                        "in": "query"
+                    },
+                    {
+                        "description": "the form state to check",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorAccessPreviewRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The effective permissions of that state",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorAccess"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -5923,6 +6451,96 @@ const docTemplate = `{
                         "description": "The binding",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsConnector"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/connectors/{id}/oauth/disconnect": {
+            "post": {
+                "description": "Asks the service to revoke the login when the add-on declares a revocation address, then removes the login here in any case. revoked says whether the service confirmed it; when it is false, revoke the access at the service too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Disconnect a connection that uses OAuth.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the binding's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Whether the service was told",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorOAuthDisconnected"
+                        }
+                    },
+                    "404": {
+                        "description": "No such binding",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/connectors/{id}/oauth/start": {
+            "post": {
+                "description": "Returns the address of the service's login page; open it in the same browser. The required scopes of the add-on are always asked for, plus the optional ones in scopes. The service sends the browser back to the callback route, which ends on return_to (a page of the web app; default the Connectors page). The response sets an HttpOnly cookie that binds the login to this browser for ten minutes; each login has its own cookie, named localai_oauth_nonce_ and a suffix of eight hex digits of the hash of its state. The callback address is built from LOCALAI_BASE_URL, or from the forwarding headers of a trusted proxy, or from a loopback host; without one of them, or when a trusted proxy forwards plain http for a host that is not loopback, the start is a 409 base_url_required. An administrator must have saved the add-on's client first (409 needs_approval).",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Start the login of a connection that uses OAuth.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the binding's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the optional scopes and the page to come back to",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorOAuthStart"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Where to send the browser",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorOAuthStarted"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "No approved client, or no trusted base URL",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too many logins wait for their callback, or were started in the last minute (too_many_logins)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The add-on owner or the add-on does not answer",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -6046,9 +6664,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/connectors/{id}/share": {
+            "post": {
+                "description": "Returns the ID of the binding in the sharing API: the owner then lists, grants and revokes access with /api/shares/connection/{resource_id}/grants. The only role is use, and a binding is never shared with @everyone. A grantee may use the binding in their chats and agents, and never reads its token or its settings. Only the owner may call it: any other caller gets 404, as for a binding that does not exist. 409 sharing_disabled when this server cannot share bindings.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Make a connector binding shareable.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the binding's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The share of the binding",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConnectorShare"
+                        }
+                    },
+                    "404": {
+                        "description": "Not your binding",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Sharing is not available on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/connectors/{id}/test": {
             "post": {
-                "description": "Asks the platform, through its add-on, for the bot of the stored token. 502 when the platform refuses the token, the add-on does not run or the platform cannot be reached.",
+                "description": "Asks the platform, through its add-on, for the bot of the stored token. 502 when the platform refuses the token, the add-on does not run or the platform cannot be reached. A connection that logs in with OAuth uses its access token, renewed first when it ends soon: 409 not_connected before its login, 409 reconnect_needed when the login ended, 409 needs_approval when an administrator must approve the add-on, 429 rate_limited when the service asked to wait, and 503 unavailable when the login cannot be checked now (also on a frontend, which does not read the add-on's login).",
                 "tags": [
                     "chats"
                 ],
@@ -6067,6 +6723,18 @@ const docTemplate = `{
                         "description": "The bot",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsConnectorTest"
+                        }
+                    },
+                    "409": {
+                        "description": "An OAuth connection that is not connected, must reconnect or waits for an approval",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The login of an OAuth connection cannot be checked now",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -6173,6 +6841,55 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/draft/egress": {
+            "get": {
+                "description": "What GET /api/chats/{id}/egress returns, for a chat that does not exist yet, as GET /api/chats/draft/tools takes it: the preset the chat would start with (the instance default, or the saved agent's, under the administrator's ceiling), the ceiling, the add-on that would run its commands and draw the network controls (addon), and applies, which stays false before the chat exists because no sandbox is bound to it yet and so nothing reports enforcement: use addon, and the profiles of GET /api/chats/sandbox-profiles, to decide whether to offer the presets. It has no rules and no cards. The composer of a new chat shows the presets from it and sets the chosen one with PUT /api/chats/{id}/egress after the chat is created.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the network a new chat would start with.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the model of the new chat",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "a saved agent of yours",
+                        "name": "agent_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The network of the new chat",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsEgress"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Refused",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such agent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/draft/tools": {
             "get": {
                 "description": "What GET /api/chats/{id}/tools lists, for a chat that does not exist yet: a chat on model, with the saved agent agent_id when it is set (the agent's model, when it has one, replaces model). Every switch is in its default state. The composer of a new chat shows it and sends the person's choices in the switches of POST /api/chats.",
@@ -6191,6 +6908,12 @@ const docTemplate = `{
                         "type": "string",
                         "description": "a saved agent of yours",
                         "name": "agent_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "comma-separated add-on IDs the draft switched off; they free room under the limit on add-on tools (tool_cap)",
+                        "name": "addons_off",
                         "in": "query"
                     }
                 ],
@@ -6365,6 +7088,58 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/files/extract": {
+            "post": {
+                "description": "Reads a zip, tar (also tar.gz, tar.bz2, tar.xz, tar.zst and others) or, when an administrator allows it, 7z or RAR archive from your files and writes its files into a folder, as one change set that undo takes back whole. Without dest the folder is new, next to the archive, named like it without the extension (\"name 2\" when taken). A name that is taken in dest keeps the existing file; the new content is saved next to it as a copy and listed in conflicts. Symbolic links, hard links and devices are skipped and listed. Nested archives are written as plain files. The limits (bytes, entries, size of one file, time) are counted on what is really read, and an archive over a limit writes nothing: 413, or 408 for the time limit. A path that leaves the destination refuses the archive (400).",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Extract an archive into a folder of your files.",
+                "parameters": [
+                    {
+                        "description": "the archive and, optionally, the folder",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsExtractRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The folder, the change set and what was skipped",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsExtractResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid, or the archive is damaged or not supported",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "408": {
+                        "description": "The extraction ran past its time limit",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "dest is a file, or files are off",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "The archive expands past a limit",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/files/folders": {
             "post": {
                 "tags": [
@@ -6454,6 +7229,12 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "A shared folder, or a folder with a shared folder in it, would move into another home or into a folder that LocalAI manages (LocalAI, Chats, Memory, pages or a .skills folder). Stop sharing it first.",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -6557,6 +7338,271 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/files/shares": {
+            "get": {
+                "description": "sharing is false when folders cannot be shared on this server (local-owner mode, no accounts). Each folder has its path in your home, the number of grants and whether one of them is to every account. Read-only. No MCP tool maps to this route.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the folders of your home that you share.",
+                "responses": {
+                    "200": {
+                        "description": "Your shared folders, by path",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderShareList"
+                        }
+                    },
+                    "409": {
+                        "description": "Files are off on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Returns the folder's ID for the other sharing routes and how many it is shared with. A folder can be shared when it is inside your home, is not the home itself and is not LocalAI/ or Chats/ or inside them. Any other path gets 403, a missing one too. No MCP tool maps to this route.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Find a folder of your home to share it.",
+                "parameters": [
+                    {
+                        "description": "The folder's path in your home",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderSharePathRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderShare"
+                        }
+                    },
+                    "403": {
+                        "description": "A folder you cannot share, or no such folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled, or files are off",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/files/shares/{id}/grants": {
+            "get": {
+                "description": "Each grant has the account ID (or @everyone), the display name (empty for @everyone) and the role read or write. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the folder ID, no API key, no tool, agent or MCP marker). A folder you cannot share and a missing one get the same 403. No MCP tool maps to this route.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List who a folder of your home is shared with (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Folder ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderGrantList"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a folder you cannot share, or no such folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/files/shares/{id}/grants/{principal}": {
+            "put": {
+                "description": "principal is the account ID that the user picker returned, an active named account, or @everyone for every account, the ones created later too. role is read or write; write lets them change and delete what is in the folder. Lowering write to read takes effect at their next file call on every frontend. Their running chats that hold the folder on the frontend that serves this call are stopped before the answer; the other frontends get the request on the chat bus and stop theirs within seconds. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the folder ID, no API key, no tool, agent or MCP marker). Safe to repeat. No MCP tool maps to this route: sharing is never a tool.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Share a folder of your home, or change the role (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Folder ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Account ID, or @everyone",
+                        "name": "principal",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "The role",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderGrantRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderGrantList"
+                        }
+                    },
+                    "400": {
+                        "description": "A role that is not read or write, or a principal that is not an active account",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a folder you cannot share, or no such folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled, or a limit",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Removes the grant of the principal, an account ID or @everyone. A person's own grant and the grant to everyone are separate. The grantee loses the folder at their next file call on every frontend. Their running chats that hold it on the frontend that serves this call are stopped before the answer; the other frontends get the request on the chat bus and stop theirs within seconds. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the folder ID, no API key, no tool, agent or MCP marker). Safe to repeat. No MCP tool maps to this route.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Stop sharing a folder of your home (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Folder ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Account ID, or @everyone",
+                        "name": "principal",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderGrantList"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a folder you cannot share, or no such folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/files/shares/{id}/users": {
+            "get": {
+                "description": "The same picker as the other kinds of sharing: active named accounts by a prefix of the display name, 3 to 64 characters, at most 20 results, never you. A prefix of an address finds nobody; an account without a display name is found by its whole address only and comes back with an empty display name. Each result is an account ID and a display name and nothing else. Each person may search 20 times at once and then once every 2 seconds; a search over that rate answers 429 rate_limited. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the folder ID, no API key, no tool, agent or MCP marker). No MCP tool maps to this route.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Search the people you can share a folder of your home with (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Folder ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Display name prefix, or a whole address",
+                        "name": "q",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "At most this many results, up to 20",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Matching people",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderShareUserList"
+                        }
+                    },
+                    "400": {
+                        "description": "The search text is not 3 to 64 characters",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a folder you cannot share, or no such folder",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Type rate_limited: too many searches",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -6940,7 +7986,7 @@ const docTemplate = `{
         },
         "/api/chats/mcp-connectors/{id}/test": {
             "post": {
-                "description": "Connects with the stored definition, with the same address and credential checks as a chat, and lists the tools, with the description each one has in tool_details. It works for a connector that is switched off. A server that cannot be used is a 200 with ok false and the reason, which never holds a header value.",
+                "description": "Connects with the stored definition, with the same address and credential checks as a chat, and lists the tools, with the description each one has in tool_details. It works for a connector that is switched off. A server that cannot be used is a 200 with ok false and the reason, which never holds a header value. When a local command fails, output holds the last text it wrote to its error stream, with secrets removed.",
                 "tags": [
                     "chats"
                 ],
@@ -6964,11 +8010,165 @@ const docTemplate = `{
                 }
             }
         },
-        "/api/chats/notifications": {
+        "/api/chats/memory": {
             "get": {
-                "description": "The inbox: one item for each run of a trigger that finished, failed or needs you. Newest first. It also returns the number unread and the total kept.",
+                "description": "Memory is the short notes the assistant reads before it answers and may save. enabled is the switch for all your chats and agents: a private chat (the memory group of a chat, see PUT /api/chats/{id}/builtins), an agent that turns memory off, or this switch off each make memory off in a chat, and the narrowest wins; a saved agent cannot widen your choice. enabled_set is false until you choose; before that memory is on, unless you had disabled the Memory add-on to stop it. save_mode is how a note is saved: auto (save it and tell me), ask (the default), always (always confirm: like ask, nothing can loosen it, and the model cannot undo or forget by itself) or never. It applies as the strictest rule together with the rule of the saved agent (memory_save: always and never only tighten it; auto lets that one agent save at once when your level is ask, while always and never of yours still hold) and the rules of the host. A chat from a messaging app asks, unless messaging_save is paired_private and the sender is paired and the chat is one-to-one; the row cannot loosen always or never. Your notes stay and can be listed, exported and deleted while memory is off.",
                 "tags": [
                     "chats"
+                ],
+                "summary": "Read your memory settings.",
+                "responses": {
+                    "200": {
+                        "description": "Your memory settings",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsMemorySettings"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Sets enabled (memory On or Off for every chat and agent), save_mode (auto, ask, always or never) and messaging_save (ask, paired_private or never). A field left out stays as it is. Off means nothing is put in the prompt, the model has no tool or skill for notes, nothing is proposed or saved (also by triggers and other runs that start by themselves) and the model is told in one line that memory is off. The settings are kept per person with the account, so every frontend of a cluster reads the same answer. 400 for a value that is not allowed.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Change your memory settings.",
+                "parameters": [
+                    {
+                        "description": "the choices to change",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsMemoryRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Your memory settings now in force",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsMemorySettings"
+                        }
+                    },
+                    "400": {
+                        "description": "A value is not allowed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The settings cannot be stored on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Calls the forget tool of the add-on you picked as the provider of your memory. scope (user, agent or channel) and key narrow it to one group; empty forgets everything the provider keeps. resource names the resource the tool works on, when it has one. The change is applied at once, or stored as a proposal that you confirm on the Add-ons page (done is false then). The built-in provider has none: delete its notes in Files. 404 when the provider has no forget, 503 while the host leaves a failing provider alone, 502 when it does not answer.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Forget notes at the provider that serves your memory.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user, agent or channel",
+                        "name": "scope",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "the agent ID or the conversation folder, with scope",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "the resource the forget tool works on",
+                        "name": "resource",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "What the provider did",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsMemoryForget"
+                        }
+                    },
+                    "404": {
+                        "description": "No forget",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "The provider did not answer",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The provider is resting",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/memory/export": {
+            "get": {
+                "description": "The Markdown files of your memory folders (yours, each agent's and each messaging conversation's) with their paths. scope (user, agent or channel) and key (the agent ID or the conversation folder name, as GET /api/chats/context-files lists them) narrow it to one group. It works while memory is off. 404 when there is nothing to export.",
+                "produces": [
+                    "application/zip"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Download your memory notes as a zip file.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "user, agent or channel",
+                        "name": "scope",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "the agent ID or the conversation folder, with scope",
+                        "name": "key",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A zip file of the notes",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "404": {
+                        "description": "No notes",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/notifications": {
+            "get": {
+                "description": "The inbox: backend updates, finished operations, and one item for each run of a trigger that finished, failed or needs you. Newest first. It also returns the number unread and the total kept. Works with the chats on or off; the same routes also answer under /api/chats/notifications while the chats are on.",
+                "tags": [
+                    "notifications"
                 ],
                 "summary": "List your notifications.",
                 "parameters": [
@@ -6997,7 +8197,7 @@ const docTemplate = `{
             "delete": {
                 "description": "Name the ids, or pass all to empty your inbox; with all, read_only keeps the unread ones. Only your own notifications are touched.",
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Delete notifications.",
                 "parameters": [
@@ -7030,7 +8230,7 @@ const docTemplate = `{
         "/api/chats/notifications/count": {
             "get": {
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Count unread notifications.",
                 "responses": {
@@ -7045,12 +8245,12 @@ const docTemplate = `{
         },
         "/api/chats/notifications/events": {
             "get": {
-                "description": "Server-sent events: one notification event for each new inbox item, with the same fields as the list, and a notifications_changed event when notifications were read or deleted, so a client reads the list again. Live only; list the inbox for what came before.",
+                "description": "Server-sent events: one notification event for each new inbox item, with the same fields as the list, and a notifications_changed event when notifications were read or deleted, so a client reads the list again. Live only; list the inbox for what came before. In a cluster the events of every frontend reach every stream.",
                 "produces": [
                     "text/event-stream"
                 ],
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Stream your notifications.",
                 "responses": {
@@ -7067,7 +8267,7 @@ const docTemplate = `{
             "post": {
                 "description": "Name the ids, or pass all. Opening a chat marks its notifications read by itself.",
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Mark notifications read.",
                 "parameters": [
@@ -7174,6 +8374,62 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/pages/shares/search": {
+            "get": {
+                "description": "The same picker as the other kinds of sharing: active named accounts by a prefix of the display name, 3 to 64 characters, at most 20 results, never you. A prefix of an address finds nobody; an account without a display name is found by its whole address only and comes back with an empty display name. Each result is an account ID and a display name and nothing else. Each person may search 20 times at once and then once every 2 seconds; a search over that rate answers 429 rate_limited. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the word pages, no API key, no tool, agent or MCP marker). No MCP tool maps to this route.",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Search the people you can share a page with (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Display name prefix, or a whole address",
+                        "name": "q",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "At most this many results, up to 20",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Matching people",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FolderShareUserList"
+                        }
+                    },
+                    "400": {
+                        "description": "The search text is not 3 to 64 characters",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled (pages cannot be shared here, or an administrator turned page sharing off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Type rate_limited: too many searches",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/pages/{name}": {
             "get": {
                 "description": "The UI shows the HTML in a sandboxed frame. An index.html over 1 MiB is refused.",
@@ -7258,6 +8514,145 @@ const docTemplate = `{
                     },
                     "429": {
                         "description": "Too many messages",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/pages/{name}/consent": {
+            "put": {
+                "description": "Only for a page with others_can_edit: someone else may change its code, so it runs for you only after you allow its hash, as a shared page does. hash is the hash you reviewed; a page that changed since is refused with 409. once allows one visit and returns a token for the bridge calls of that visit. embed is refused with 400: such a page never runs on Home, in a slot or in the dock by itself. A page nobody else may edit needs no consent and answers 404. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the page name, no API key, no tool, agent or MCP marker).",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Allow a version of your own page that others can edit to run.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the version",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.PagesConsentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The consent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PagesConsentResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "embed was asked for",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Type not_human_surface: not your own browser session",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such page, or it needs no consent",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The page changed while you were reviewing it",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Its open frames stop at their next bridge call; the next open shows the trust sheet again. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the page name, no API key, no tool, agent or MCP marker).",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Stop allowing your own page that others can edit.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Revoked"
+                    },
+                    "403": {
+                        "description": "Type not_human_surface: not your own browser session",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/pages/{name}/errors": {
+            "post": {
+                "description": "The UI calls this for an error that the script of the caller's own page threw (window.onerror or an unhandled rejection), caught by the frame. Nothing is added to a chat; the assistant reads the errors with its page_errors tool. The texts are cut, the browser's own noise (such as ResizeObserver loop) is dropped, the same error is counted once, and a page keeps its 10 newest errors until any of its files changes. A page that reports too fast gets 429. Shared pages have no such route: only the owner's own view records.",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Report a runtime error of a page (bridge error capture).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the error",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.PagesErrorRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "recorded is false for noise",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PagesErrorResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "No message",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such page of yours",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too many reports",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -7416,11 +8811,1113 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/pages/{name}/shares": {
+            "get": {
+                "description": "Each grant has the account ID (or @everyone), the display name (empty for @everyone), the role view, use or edit, and, for a named account, whether it allowed the current version of the page (consent: none, allowed or changed). allowedCount is how many named accounts allowed the current version. enabled is false when an administrator turned off the pages that people share: the list still works and you can still take a share back. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the page name, no API key, no tool, agent or MCP marker). A page that is not yours and a page that does not exist get the same 403. No MCP tool maps to this route.",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "List who a page of your home is shared with (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PageShareList"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a page you cannot share, or no such page",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled: pages cannot be shared on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "principal is the account ID that the user picker returned, an active named account, or @everyone for every account, the ones created later too. role is view (run the page and read its data), use (also save data files through the page) or edit (also change its code, in Files and in the page). edit is for named accounts only: @everyone with edit gets 400. The page stays where it is, in your home, and everybody sees the same data. People run the page's code in their own browser with their own rights, after they allow that version; a change of the code asks them again. A page that people share never runs on Home or in a slot by itself. Lowering a role or removing a grant drops the consent of that account and holds from its next call of the page on every frontend. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the page name, no API key, no tool, agent or MCP marker). Safe to repeat. A page that is not yours and a page that does not exist get the same 403. No MCP tool maps to this route: sharing is never a tool.",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Share a page of your home, or change the role (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "The account and the role",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.PageShareRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PageShareList"
+                        }
+                    },
+                    "400": {
+                        "description": "A role that is not view, use or edit, edit for @everyone, or a principal that is not an active account",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a page you cannot share, or no such page",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled (pages cannot be shared here, or an administrator turned page sharing off), or a limit",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/pages/{name}/shares/{principal}": {
+            "delete": {
+                "description": "Removes the grant of the principal, an account ID or @everyone, and drops the consent of that account. A person's own grant and the grant to everyone are separate. The grantee loses the page at their next call of it on every frontend, and the page they have open stops at that call. What they saved in the page's folder stays. It works while an administrator keeps page sharing off. Accepted only from your own browser session (same-origin fetch, X-LocalAI-Confirm equal to the page name, no API key, no tool, agent or MCP marker). Safe to repeat. No MCP tool maps to this route.",
+                "tags": [
+                    "pages"
+                ],
+                "summary": "Stop sharing a page of your home (owner, UI only).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "page name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Account ID, or @everyone",
+                        "name": "principal",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PageShareList"
+                        }
+                    },
+                    "403": {
+                        "description": "Not your own browser session, a page you cannot share, or no such page",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled: pages cannot be shared on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects": {
+            "get": {
+                "description": "A project is a folder under Projects/ in your files, with a manifest, a memory and defaults that its chats start with. The list is read from the folders, so a project you added or edited by hand shows up. chat_count counts up to 500 chats; agent_count is the number of your agents that belong to the project. Another user's projects are never listed.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List your projects.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Your projects, sorted by name",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Makes the folder Projects/\u003cslug\u003e in your files with its manifest and an empty memory, as one change set that one undo removes. The slug comes from the name and is unique among your projects, so two projects can share a name but not a folder name.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Create a project.",
+                "parameters": [
+                    {
+                        "description": "the project",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectWrite"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProject"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The name is taken, or projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/shared": {
+            "get": {
+                "description": "The projects of other people whose folder was shared with you, or with everyone, sorted by name. ref is the only identity: use it in the other shared-project routes and in the list a chat pulls from. mode is read or write. An archived or broken project is listed with its status and is not available. The list is read from the grants on every call, so a revoked share is gone at once. The owner's account, paths and tool lists never appear.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the projects shared with you.",
+                "responses": {
+                    "200": {
+                        "description": "The projects shared with you",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSharedProjectList"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/shared/{ref}": {
+            "get": {
+                "description": "ref is the reference from the list (\"s:12\"; the colon may be sent as %3A). A project that is not shared with you, and one that does not exist, give the same 404.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read a project shared with you.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the reference of the shared project",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSharedProject"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is not shared with you",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/shared/{ref}/memory": {
+            "get": {
+                "description": "Returns the text of index.md and the names of the topic files next to it, read as you through your own grant. It is read only. With a write grant a note is proposed in a chat and confirmed by the owner; with a read grant nothing can be proposed. An archived or broken project, a project that is not shared with you and an unknown one give the same 404.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the memory of a project shared with you.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the reference of the shared project",
+                        "name": "ref",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The index and the topic files",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSharedProjectMemory"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is not shared with you",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}": {
+            "get": {
+                "description": "skills_blocked is true when the project's own skills (the skills folder of the project) are off because another person may write the project folder. attached_blocked is true for the same reason when the project file holds an attached block: the block is ignored and attached comes back empty.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProject"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Removes the project folder, with its files and memory, as one change set that one undo restores. Chats that belonged to it stay and read as having no project.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Delete a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Deleted"
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "description": "A field that is left out keeps its value. The folder keeps its name. The defaults are five lists: skills, add-ons, connectors, MCP servers and collections. For each list, a non-empty value means a new chat in the project has only those on; an empty or missing list is no override. Defaults apply to new chats only; the agents of the project are also limited by them. Attached is five lists of the same shape: the tools the project holds. Every chat of the project, new or old, and every agent of it has them on at each turn, with no per-chat step. A chat cannot switch an attached tool off; detach it from the project. The tools are the owner's own, so a person the project is shared with never gets them, and a chat that starts from a messaging connection gets only the attached skills and collections. The attached block is ignored while another person may write the project folder (attached_blocked on a read). A non-empty defaults list is a limit, and an attached entry outside it, an empty or malformed entry, or a connector in the MCP list is refused with a 400 that names the tool and the limit.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Change a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the fields to change",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectWrite"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProject"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The project changed while it was saved",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/agents": {
+            "get": {
+                "description": "Your saved agents that were created from this project, sorted by name, as brief rows: id, name, description, model, files_mode (read or write), memory_write (the agent holds the grant project.memory.write) and unavailable. An agent is unavailable while its project is archived, deleted or broken, or its folders changed; it works again after a restore or a new save. The list works for an archived project too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the agents of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The agents of the project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectAgentList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/archive": {
+            "post": {
+                "description": "An archived project keeps its folder and takes no new chats.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Archive a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProject"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The project changed while it was saved",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/chats": {
+            "get": {
+                "description": "Your chats whose project is this one, newest first. limit defaults to 50 and is at most 200.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the chats of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "most chats to return",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The chats",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConversationList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/connections": {
+            "get": {
+                "description": "Your messaging connections that are bound to an agent of this project, as brief rows: id, kind, name, agent_id, agent_name and enabled. A token or a list of senders never appears. The list works for an archived project too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the messaging connections of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The connections",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectConnectionList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/loops": {
+            "get": {
+                "description": "Your loops that have not ended, in chats that use an agent of this project (a loop that ended is history and is left out), as brief rows: id, chat_id, chat_title, prompt (cut to 200 characters) and state. While the project is archived its loops skip their runs; state does not change. The list works for an archived project too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the loops of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The loops",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectLoopList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/memory": {
+            "get": {
+                "description": "Returns the text of index.md and the topic files next to it. The memory is the folder memory/ of the project.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the memory of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The index and the topic files",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectMemory"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/memory/{file}": {
+            "put": {
+                "description": "This is your own edit, so it is written as you, as one change set that undo restores. file is a name such as index.md or food.md: lowercase letters, digits, dot, dash and underscore, ending in .md, at most 64 characters. The content is at most 16 KiB, the same as a note the model proposes. The edit is accepted for an archived project too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Write a memory file of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the file name, for example index.md",
+                        "name": "file",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the new content",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectMemoryWrite"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Written"
+                    },
+                    "400": {
+                        "description": "The file name or the body is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "The content is too large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/restore": {
+            "post": {
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Restore an archived project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The project",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProject"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The project changed while it was saved",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/projects/{id}/triggers": {
+            "get": {
+                "description": "Your triggers that run an agent of this project, as brief rows: id, name, kind, agent_id, agent_name, schedule, folder, enabled, proposed and next (the next run of an enabled schedule trigger). While the project is archived its agents do not start, so its triggers skip their runs; enabled does not change. The list works for an archived project too.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the triggers of a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the project's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The triggers",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProjectTriggerList"
+                        }
+                    },
+                    "400": {
+                        "description": "user_id is not a well-formed user id",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/providers": {
+            "get": {
+                "description": "A provider slot is a job the host does itself and lets an add-on do in its place (memory is the first). Each slot lists the built-in provider, every installed add-on that declares the slot in capabilities.provides, and Off when the slot allows it, with the choice in force. resolution.active is what serves now: builtin, an add-on ID or off. A picked add-on that is stopped, disabled or removed does not fall back to the built-in provider: the slot is off, with resolution.code provider_unavailable and the add-on named, until you pick again. Only the add-on you picked has its context files, skills and role tools in your chats.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the provider slots and their providers.",
+                "responses": {
+                    "200": {
+                        "description": "The slots and their providers",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProviderSlots"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/providers/{slot}": {
+            "get": {
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read one provider slot.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the slot, such as memory",
+                        "name": "slot",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The slot with its providers and your choice",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProviderSlot"
+                        }
+                    },
+                    "404": {
+                        "description": "Unknown slot",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Sets your provider for the slot: builtin, off (when the slot allows it) or the ID of an add-on that declares the slot and runs now. The choice is kept with your account, so every frontend of a cluster reads the same answer. 400 for a provider the slot does not list, 409 for an add-on that cannot serve now.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Pick the provider of a slot.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the slot, such as memory",
+                        "name": "slot",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the provider to pick",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProviderRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The slot as it stands now",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsProviderSlot"
+                        }
+                    },
+                    "400": {
+                        "description": "The slot does not list this provider",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Unknown slot",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The add-on cannot serve now",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The choice cannot be stored on this server",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/push/key": {
             "get": {
                 "description": "The VAPID public key a browser needs to subscribe to push for your notifications. 409 when the server cannot keep subscriptions (no database and no data path).",
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Get the browser push key.",
                 "responses": {
@@ -7437,7 +9934,7 @@ const docTemplate = `{
             "post": {
                 "description": "Pass the endpoint and keys of a browser PushSubscription. A notification is then pushed to that browser with its title and link only. The endpoint must be an https address on the public internet. At most 10 browsers per user; the oldest go first.",
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Subscribe a browser to push.",
                 "parameters": [
@@ -7465,7 +9962,7 @@ const docTemplate = `{
             },
             "delete": {
                 "tags": [
-                    "chats"
+                    "notifications"
                 ],
                 "summary": "Unsubscribe a browser from push.",
                 "parameters": [
@@ -7492,9 +9989,26 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/sandbox-profiles": {
+            "get": {
+                "description": "The profiles of the Sandbox add-on that runs your commands, whether you may use each one, and the administrator's default. Empty when no add-on with profiles runs commands. Use it for the sandbox_profile of a saved agent.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "List the sandbox profiles you may pick.",
+                "responses": {
+                    "200": {
+                        "description": "The profiles",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSandboxProfileChoices"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/search": {
             "get": {
-                "description": "Finds chats whose title or messages contain the text, ignoring case. The newest chats come first. It reads the newest 500 chats.",
+                "description": "Finds the messages and titles of your chats that hold every word of the text (a phrase in double quotes counts as one word), ignoring case. It searches all your chats, not only the newest, except the runs of sub-agents. The best match comes first: whole words, the whole phrase and newer messages rank higher. By default each chat appears once, with its best line; group=message returns every matching line. A hit has the line (seq), who wrote it, when, a snippet and the parts of the snippet that match (highlights, UTF-16 offsets). Messages written before the search index existed are added in the background after an upgrade (indexing is true meanwhile). A server that keeps chats in files has no index: it scans for a few seconds and says when it stopped early (partial).",
                 "tags": [
                     "chats"
                 ],
@@ -7502,15 +10016,51 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "text to find",
+                        "description": "text to find: words that must all be in the message",
                         "name": "q",
                         "in": "query",
                         "required": true
                     },
                     {
                         "type": "integer",
-                        "description": "most chats to return (default 50, at most 200)",
+                        "description": "most hits to return (default 50, at most 200)",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "only chats of this saved agent",
+                        "name": "agent",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "only chats of one origin: person, automated, trigger, connector, job or page",
+                        "name": "origin",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "only lines written by user or assistant",
+                        "name": "role",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "only lines at or after this date (YYYY-MM-DD) or time (RFC 3339)",
+                        "name": "since",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "only lines before this time, or on or before this date (YYYY-MM-DD)",
+                        "name": "until",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "chat (default): one hit per chat; message: every matching line",
+                        "name": "group",
                         "in": "query"
                     }
                 ],
@@ -7519,6 +10069,12 @@ const docTemplate = `{
                         "description": "The matching chats",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsChatSearchResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -7580,7 +10136,7 @@ const docTemplate = `{
         },
         "/api/chats/shared-pages": {
             "get": {
-                "description": "A shared folder is a folder outside your home that an administrator gave you access to. Its pages are the folders pages/\u003cname\u003e/ with an index.html. Each page has its folder, its author (the account that last wrote index.html), the hash of its code and your consent: none, allowed (this version) or changed (you allowed an earlier one). enabled is false when an administrator turned shared pages off.",
+                "description": "A shared folder is a folder outside your home that an administrator gave you access to. Its pages are the folders pages/\u003cname\u003e/ with an index.html. A page that another person shared from their own home is listed too: it has user_shared set (no administrator checked it), the role view, use or edit, and owner_name, and it has no folder or path. Each page has its author (the account that last wrote index.html), the hash of its code and your consent: none, allowed (this version) or changed (you allowed an earlier one). enabled is false when an administrator turned shared pages off. user_shares_enabled is false when an administrator turned off the pages that people share: those pages have turned_off set, are listed and do not open.",
                 "tags": [
                     "pages"
                 ],
@@ -7632,7 +10188,7 @@ const docTemplate = `{
                         }
                     },
                     "403": {
-                        "description": "Shared pages are off on this server",
+                        "description": "Shared pages are off on this server, or type user_page_shares_off: an administrator turned off the pages that people share",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -7702,7 +10258,7 @@ const docTemplate = `{
         },
         "/api/chats/shared-pages/{folder}/{name}/consent": {
             "put": {
-                "description": "hash is the hash you reviewed; a page that changed since is refused with 409. once allows one visit: the answer has a token that the bridge calls of that visit send. Each consent and revoke is audited.",
+                "description": "hash is the hash you reviewed; a page that changed since is refused with 409. once allows one visit: the answer has a token that the bridge calls of that visit send. embed is a lasting consent that also lets the version run on Home and in the slots of ui.json, where it starts without a click; it cannot go with once (400), and a page that a person shared (user_shared) never gets it (400). A lasting consent to the same version keeps embed. Each consent and revoke is audited.",
                 "tags": [
                     "pages"
                 ],
@@ -7834,7 +10390,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "With your own grant on the folder: a read grant is refused with 403. A page writes data files only: code and document files (.js .mjs .cjs .css .html .htm .svg .xml .xhtml .wasm, index, page.json) are refused with 403.",
+                "description": "With your own grant on the folder: a read grant (role view) is refused with 403. A page writes data files only: code and document files (.js .mjs .cjs .css .html .htm .svg .xml .xhtml .wasm, index, page.json and the code_files of the page) are refused with 403, whatever the grant. With the role use or edit the write goes into the owner's page folder, so everybody who has the page sees it; two writes to the same file: the last one wins, unless base is the version you read.",
                 "tags": [
                     "pages"
                 ],
@@ -7927,7 +10483,7 @@ const docTemplate = `{
         },
         "/api/chats/skills": {
             "get": {
-                "description": "Skills from every layer: .skills folders of your files, your personal skills, the shared ones, the ones of the add-ons you may use now (addon, with the add-on in addon and addon_title) and the built-in ones. A chat with a saved agent also lists the skills of that agent (agent). The nearest wins; a skill that another overrides says so in shadowed. With chat set, the chat's switches are applied.",
+                "description": "Skills from every layer: .skills folders of your files, the skills of the chat's project (project), your personal skills, the shared ones, the ones of the add-ons you may use now (addon, with the add-on in addon and addon_title) and the built-in ones. A chat with a saved agent also lists the skills of that agent (agent). The nearest wins; a skill that another overrides says so in shadowed. With chat set, the chat's switches are applied. A skill of the active memory provider says provider \"memory\" and locked: the host grants it to a chat that reads the notes, so an agent does not list it.",
                 "tags": [
                     "chats"
                 ],
@@ -7944,6 +10500,18 @@ const docTemplate = `{
                         "description": "true: add the skills of your saved agents (layer agent), for the Skills page; ignored with chat",
                         "name": "agents",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "project: list only the skills of the project given in project",
+                        "name": "layer",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "a project's id, with layer=project",
+                        "name": "project",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -7956,7 +10524,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "A skill is a folder with a SKILL.md: a name, a one-line description and the procedure the model reads when a task matches. The personal layer is yours; the shared layer needs an administrator.",
+                "description": "A skill is a folder with a SKILL.md: a name, a one-line description and the procedure the model reads when a task matches. The personal layer is yours; the shared layer needs an administrator. The project layer (layer project, with project set to the project's id) holds the skills of one project of yours: its chats and agents get them, and only you write them. It is off while another person may write the project folder, and a write is then refused with 409.",
                 "tags": [
                     "chats"
                 ],
@@ -7988,6 +10556,88 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/skills/import": {
+            "post": {
+                "description": "Send a zip file as the file field of a multipart form. It holds either one skill (SKILL.md at the top) or one folder per skill, each with a SKILL.md and optional scripts/, references/ and assets/, as the Agent Skills specification (agentskills.io) defines. The skills go to your personal layer. The whole archive is checked first and nothing is stored when any part is not valid: the name and description rules of the specification, paths that leave the skill folder, absolute paths, links, duplicate or case-colliding names, and size limits (500 entries, 5 MiB a file, 20 MiB in all). A name that exists already in your skills is refused with 409, and so is the name of a skill that ships with LocalAI; the import never replaces a skill. Files, scripts included, are only stored: the import runs nothing. An imported skill is listed with new set until a chat uses it for the first time.",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Import skills from a zip archive.",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "the zip archive",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The stored skills",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSkillImportResult"
+                        }
+                    },
+                    "400": {
+                        "description": "The archive is not a valid skill archive",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "A skill of that name exists already",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "The archive is over a size limit",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/skills/personal/{name}/export": {
+            "get": {
+                "description": "The archive follows the Agent Skills layout: one folder named after the skill, with SKILL.md and the files below it (scripts/, references/, assets/). Importing it again gives the same skill. Only skills of your personal layer can be exported.",
+                "produces": [
+                    "application/zip"
+                ],
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Export a skill as a zip archive.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the skill's name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The zip archive",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "404": {
+                        "description": "No such skill",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/skills/{layer}/{name}": {
             "get": {
                 "tags": [
@@ -7997,7 +10647,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "personal, shared, agent, addon or builtin",
+                        "description": "personal, shared, project, agent, addon or builtin",
                         "name": "layer",
                         "in": "path",
                         "required": true
@@ -8008,6 +10658,12 @@ const docTemplate = `{
                         "name": "name",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the project's ID, for the project layer",
+                        "name": "project",
+                        "in": "query"
                     },
                     {
                         "type": "string",
@@ -8045,7 +10701,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "personal or shared",
+                        "description": "personal, shared or project",
                         "name": "layer",
                         "in": "path",
                         "required": true
@@ -8056,6 +10712,12 @@ const docTemplate = `{
                         "name": "name",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the project's ID, for the project layer",
+                        "name": "project",
+                        "in": "query"
                     },
                     {
                         "description": "the new description and body",
@@ -8083,7 +10745,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "The skill's folder goes to the Trash of your files, where it can be restored. Shared skills need an administrator. A skill of the agent layer is deleted with the agent query parameter.",
+                "description": "The skill's folder goes to the Trash of your files, where it can be restored. Shared skills need an administrator. A skill of the agent layer is deleted with the agent query parameter, one of the project layer with the project query parameter.",
                 "tags": [
                     "chats"
                 ],
@@ -8091,10 +10753,16 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "personal, shared or agent",
+                        "description": "personal, shared, project or agent",
                         "name": "layer",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the project's ID, for the project layer",
+                        "name": "project",
+                        "in": "query"
                     },
                     {
                         "type": "string",
@@ -8146,7 +10814,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "kind is schedule (schedule: \"daily 08:00\", \"weekdays 09:30\", \"weekly mon,thu 09:30\", \"monthly 15 08:00\", \"once 2026-12-24 18:00\" or five cron fields; time_zone: an IANA name) or file (folder: a path inside your files). It runs nothing for the time before it was saved. At most 50 triggers.",
+                "description": "kind is schedule (schedule: \"daily 08:00\", \"weekdays 09:30\", \"weekly mon,thu 09:30\", \"monthly 15 08:00\", \"once 2026-12-24 18:00\" or five cron fields; time_zone: an IANA name), file (folder: a path inside your files) or event (source: the sender name; event_type and matches narrow the events it takes). It runs nothing for the time before it was saved. At most 50 triggers. The response to an event trigger has secret, the key that signs its events: it is shown here and when you rotate it, and never again. hook_path is where the events go.",
                 "tags": [
                     "chats"
                 ],
@@ -8164,9 +10832,9 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "201": {
-                        "description": "The trigger",
+                        "description": "The trigger, with its secret when it is an event trigger",
                         "schema": {
-                            "$ref": "#/definitions/schema.ChatsTrigger"
+                            "$ref": "#/definitions/schema.ChatsTriggerCreated"
                         }
                     },
                     "400": {
@@ -8434,7 +11102,7 @@ const docTemplate = `{
         },
         "/api/chats/triggers/proposals/{id}/confirm": {
             "post": {
-                "description": "Turns the proposal into a trigger that is on. time_zone is used when the proposal names none.",
+                "description": "Turns the proposal into a trigger that is on. time_zone is used when the proposal names none. For an event trigger the response has secret, the key that signs its events: it is shown here and when you rotate it, and never again; hook_path is where the events go.",
                 "tags": [
                     "chats"
                 ],
@@ -8458,9 +11126,9 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "The trigger",
+                        "description": "The trigger, with its secret when it is an event trigger",
                         "schema": {
-                            "$ref": "#/definitions/schema.ChatsTrigger"
+                            "$ref": "#/definitions/schema.ChatsTriggerCreated"
                         }
                     }
                 }
@@ -8652,6 +11320,62 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/triggers/{id}/hook": {
+            "post": {
+                "description": "Starts a run of an event trigger. Sign the body with the secret of the trigger (X-Webhook-Signature-V2 with X-Webhook-Timestamp, or X-Hub-Signature-256), or send the secret as a bearer value. An event that the trigger does not match answers 202 with no run.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Send an event to an event trigger.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "The trigger id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "The run, or an empty run id when the trigger does not match the event",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Refused, whatever the reason",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "The body is over 256 KiB",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "More than 60 events in a minute",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/triggers/{id}/run": {
             "post": {
                 "description": "Starts a run at once, whether the trigger is on or not. The run is skipped, with its reason, when the trigger has a run going. On a cluster the run may start a few seconds later.",
@@ -8709,9 +11433,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/triggers/{id}/secret": {
+            "post": {
+                "description": "Returns the new secret once. The old secret stops working at once, so update the sender before the next event. 400 when the trigger is not an event trigger.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Make a new secret for an event trigger.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "the trigger's id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The new secret",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsTriggerSecret"
+                        }
+                    },
+                    "400": {
+                        "description": "The trigger is not an event trigger",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such trigger",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/wellknown/{name}": {
             "get": {
-                "description": "name is persona, user, shortcuts, home, ui or widget-data. The file is validated against its JSON Schema. When it is not valid, data holds its last valid version from the history and errors says what is wrong. A missing file is an empty object with exists false. widget-data needs path, the data file of a Home widget.",
+                "description": "name is persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data. The file is validated against its JSON Schema. When it is not valid, data holds its last valid version from the history and errors says what is wrong. A missing file is an empty object with exists false. widget-data needs path, the data file of a Home widget.",
                 "tags": [
                     "chats"
                 ],
@@ -8719,7 +11481,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "persona, user, shortcuts, home, ui or widget-data",
+                        "description": "persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -8761,7 +11523,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "persona, user, shortcuts, home, ui or widget-data",
+                        "description": "persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -8826,7 +11588,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "persona, user, shortcuts, home, ui or widget-data",
+                        "description": "persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -8875,7 +11637,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "persona, user, shortcuts, home, ui or widget-data",
+                        "description": "persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -8908,7 +11670,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "persona, user, shortcuts, home, ui or widget-data",
+                        "description": "persona, user, shortcuts, setups, defaults, home, ui, nav, commands or widget-data",
                         "name": "name",
                         "in": "path",
                         "required": true
@@ -9040,7 +11802,7 @@ const docTemplate = `{
         },
         "/api/chats/{id}/addons": {
             "get": {
-                "description": "The add-ons whose tools the signed-in user may use now, each with the chat's switch, and whether the chat can run commands at its next turn (commands: available, off, unavailable, none, or switched_off when the chat switched the built-in group shell off). When commands is available, commands_provider says who serves bash (builtin: directly on this machine with no isolation and with its network, or the add-on's ID) and commands_isolation says isolated or host; commands_consent is ask when each command waits for a yes in the chat, and commands_fallback names an add-on that would serve but does not (commands_fallback_reason: off, or why it cannot run). Without the add-on host the list is empty.",
+                "description": "The add-ons whose tools the signed-in user may use now, each with the chat's switch, and whether the chat can run commands at its next turn (commands: available, off, unavailable, none, or switched_off when the chat switched the built-in group shell off). When commands is available, commands_provider says who serves bash (builtin: directly on this machine with no isolation and with its network, or the add-on's ID) and commands_isolation says isolated or host; commands_consent is ask when each command waits for a yes in the chat, and commands_fallback names an add-on that would serve but does not (commands_fallback_reason: off, or why it cannot run). commands_host_exec is the mode of chats_host_exec now (off, ask or on), so a client can say that the built-in bash is off when commands is none. Without the add-on host the list is empty.",
                 "tags": [
                     "chats"
                 ],
@@ -9229,7 +11991,7 @@ const docTemplate = `{
         },
         "/api/chats/{id}/builtins": {
             "put": {
-                "description": "off replaces the earlier list of groups that are off. The groups are shell (bash, whether the Sandbox add-on or the built-in bash on this machine serves it), web (web_search and web_fetch), files (list_files, read_file, write_file, edit_file, move_file, delete_file, search_files and read_document), media (describe_image and transcribe_audio), collections (list_collections and search_collection), subagents (spawn_agent), triggers (propose_trigger, list_triggers, update_trigger and delete_trigger) and saved_agents. A sub-agent follows the switches of its parent chat. An opt-in group (opt_in in the list, such as saved_agents: list_agents and the agent argument of spawn_agent) is off until on names it; on replaces the earlier list of opt-in groups that are on, and an opt-in group in off is ignored. Omit on to keep it. A switch never adds what the administrator has off or the user may not use. The next turn of the chat gets the tools that are on.",
+                "description": "off replaces the earlier list of groups that are off. The groups are shell (bash, whether the Sandbox add-on or the built-in bash on this machine serves it), web (web_search and web_fetch), files (list_files, read_file, write_file, edit_file, move_file, delete_file, search_files and read_document), media (describe_image and transcribe_audio), collections (list_collections and search_collection), subagents (spawn_agent), triggers (propose_trigger, list_triggers, update_trigger and delete_trigger), memory (your notes: off makes the chat a private chat that neither reads nor saves memory) saved_agents and history (search_chats and read_chat), localai_client (the LocalAI client tools) and localai_admin (the LocalAI admin tools: opt-in, administrators only). A sub-agent follows the switches of its parent chat. An opt-in group (opt_in in the list, such as saved_agents: list_agents and the agent argument of spawn_agent) is off until on names it; on replaces the earlier list of opt-in groups that are on, and an opt-in group in off is ignored. Omit on to keep it. A switch never adds what the administrator has off or the user may not use. The next turn of the chat gets the tools that are on.",
                 "tags": [
                     "chats"
                 ],
@@ -9412,6 +12174,89 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/{id}/dock": {
+            "get": {
+                "description": "The dock is the panel of pages that the interface shows beside the chat. It is stored with the chat, so every browser and every frontend shows the same one. The assistant opens a page of your home in it with its open_page tool.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Get a chat's dock.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The dock, or null",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsDockResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such conversation, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Replaces the dock: its tabs (at most 6 pages, each once; folder is the id of a shared folder, absent for a page of your home), the index of the tab in front, whether the panel is open and its width in CSS pixels (0 for the default, else 320 to 4096). A dock with no tab clears it. The page names are not checked here: a page that is gone shows as missing in the interface, and a shared page still needs your consent before it runs. Watchers of the chat get a dock event. A sub-agent run has no dock (409).",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Set a chat's dock.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the dock",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsDock"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The dock as stored, or null when it was cleared",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsDockResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "The dock is out of its bounds",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such conversation, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "A sub-agent run has no dock",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/{id}/egress": {
             "get": {
                 "description": "The preset of the chat (off, registries, all), the administrator's ceiling, the preset in force (the lower of the two), whether it applies (false when commands run on this machine, applies_reason host, or no add-on serves bash, none), addon (the add-on that runs the commands and draws the network controls of the chat, from its network-policy host control; absent when none does), the package registries the preset registries admits, the chat's allow and deny rules (above_limit when the ceiling no longer admits one) and the cards that asked. A sub-agent chat shows its parent's. Another user's chat is 404.",
@@ -9444,7 +12289,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "off reaches nothing; registries the HTTPS hosts of the package registries; all every public host. A preset above the administrator's ceiling (chats_egress_ceiling) is 400 egress_above_ceiling. A sub-agent follows its parent: 409. It applies at the next connection of a command.",
+                "description": "off reaches nothing; registries (shown as Custom) the HTTPS hosts of the package registries plus the administrator's extra registries and always-allowed hosts; all every public host. A preset above the administrator's ceiling (chats_egress_ceiling) is 400 egress_above_ceiling. A sub-agent follows its parent: 409. It applies at the next connection of a command.",
                 "tags": [
                     "chats"
                 ],
@@ -9590,7 +12435,7 @@ const docTemplate = `{
         },
         "/api/chats/{id}/events": {
             "get": {
-                "description": "Server-sent events: text, reasoning, tool_start, tool_end, checkpoint, turn_start, turn_end, error, pending_delivered, sub_agent_done, compacted (the context was compacted, by the chat or by POST compact; before and after are token counts), cleared (the context was cleared; read the transcript again), paused (the tool loop reached its step limit, chats_max_iterations; steps is the limit), goal (the chat's goal changed; text is its state, empty when cleared: read the chat again), files and loops (the loops of the chat changed; read GET /api/chats/{id}/loops). Events are live only; read the transcript for what came before.",
+                "description": "Server-sent events: text, reasoning, tool_start, tool_end, checkpoint, turn_start, turn_end, error, pending_delivered, sub_agent_done, compacted (the context was compacted, by the chat or by POST compact; before and after are token counts), cleared (the context was cleared; read the transcript again), paused (the tool loop reached its step limit, chats_max_iterations; steps is the limit), goal (the chat's goal changed; text is its state, empty when cleared: read the chat again), files and loops (the loops of the chat changed; read GET /api/chats/{id}/loops). The events of a running turn carry an id (\"\u003crun\u003e.\u003cn\u003e\"). Send the last id back as the Last-Event-ID header or the after query parameter to get the events you missed, then the live ones. A \"resync\" event means the server cannot give them (the id is of another run, is too old, or the server that runs the turn is gone or does not answer): read the transcript, and go on from the id of the resync event. Without an id the stream starts from now; read the transcript for what came before.",
                 "produces": [
                     "text/event-stream"
                 ],
@@ -9605,6 +12450,18 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "resume after this event id",
+                        "name": "after",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "resume after this event id (sent by a browser when it reconnects)",
+                        "name": "Last-Event-ID",
+                        "in": "header"
                     }
                 ],
                 "responses": {
@@ -9616,6 +12473,12 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "No such conversation, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "The user has 8 event streams open on this chat on this server",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -9924,6 +12787,51 @@ const docTemplate = `{
                     },
                     "410": {
                         "description": "The card expired (consent_expired): the turn that asked has ended, its frontend stopped, or a newer card replaced it; the command did not run",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/{id}/jobs/{job}/kill": {
+            "post": {
+                "description": "Stops a job that the model started with the job tool (a build, a server): the process gets term, and kill after 10 seconds. The job ends with the reason \"stopped\". Only the owner of the chat may stop it. The job may belong to a sub-agent of the chat.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Stop a background job.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "job id",
+                        "name": "job",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The job after the signal",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsJob"
+                        }
+                    },
+                    "404": {
+                        "description": "No such conversation or job",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The job has ended already",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -10496,7 +13404,7 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "A turn is running for a command, or the saved agent's folder is missing (agent_folder_missing), or its complete file access exceeds the folder limit (agent_folder_limit)",
+                        "description": "A turn is running for a command, or the saved agent's folder is missing (agent_folder_missing), or its complete file access exceeds the folder limit (agent_folder_limit), or the saved agent of another person is no longer shared with you (agent_not_shared)",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
@@ -10641,6 +13549,136 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/chats/{id}/project": {
+            "put": {
+                "description": "project_id is the project's id; an empty one takes the chat out of its project. The chat must be idle (409 otherwise). The tool switches of the chat stay as they are: the defaults of a project apply to new chats only. An archived project takes no chats (400).",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Put a chat in a project.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the project",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsChatProject"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The chat",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConversation"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such chat or project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The chat is running, or projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/{id}/projects": {
+            "put": {
+                "description": "The list replaces the earlier one. At most 8 projects, none twice, none the chat's own project, each an active project of yours. An empty list clears it. A pulled project is mounted read only at its pulled-* path for the chat's turns; note that your home is still mounted read and write in an ordinary chat.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Set the projects a chat pulls in.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the projects",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsChatPulledProjects"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "an administrator only: act on the projects of this user id instead of your own",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The chat",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsConversation"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "user_id names another user and you are not an administrator",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such chat or project, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Projects are not available (projects_off)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/chats/{id}/regenerate": {
             "post": {
                 "description": "Removes everything the model said after your last message (all your messages of that turn stay), then starts a new turn. Files that the removed turn changed stay changed. 409 while a turn runs.",
@@ -10662,6 +13700,115 @@ const docTemplate = `{
                         "description": "The new turn started",
                         "schema": {
                             "$ref": "#/definitions/schema.ChatsSendResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/{id}/resume": {
+            "post": {
+                "description": "Starts a new turn that goes on from where the last one failed or was interrupted by a restart. The transcript stays as it is, with the messages, tool calls and results of the failed turn and the reason at its end; the model keeps its own state, so a tool call that has its result is not made again. Messages that wait for the chat go first. When the chat is not at a failed or interrupted turn, or a turn runs, nothing starts and started is false, so a second click is harmless.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Go on with the turn that failed.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Whether a turn started",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSendResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/chats/{id}/sandbox-profile": {
+            "get": {
+                "description": "The profile the next command of the chat runs (the one you picked, else the saved agent's, else the administrator's default, else media, else base), where it comes from, the profiles the Sandbox add-on offers with their tools and limits, whether the administrator's policy lets you use each one (allowed), and where the image of each is on the host (state: pulling shows percent). fallback is true when the next command cannot use the profile because its image failed or is missing, and runs base. newer_image is true when the running sandbox is older than the current image. applies is false when the commands of the chat run in no sandbox with profiles. Another user's chat is 404.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Read the sandbox profile of a chat.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The profile of the chat",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSandboxProfileView"
+                        }
+                    },
+                    "404": {
+                        "description": "No such conversation, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Switches the environment the commands of the chat run in. The sandbox restarts at the next command: your files stay, running processes and installed packages are lost. An empty profile goes back to the saved agent's or the default profile. A profile the Sandbox does not have is 400 sandbox_profile_unknown; one the administrator did not give you is 403 sandbox_profile_not_allowed. A sub-agent follows its parent: 409.",
+                "tags": [
+                    "chats"
+                ],
+                "summary": "Set the sandbox profile of a chat.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "conversation id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the profile",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSandboxProfileSet"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The profile of the chat",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsSandboxProfileView"
+                        }
+                    },
+                    "400": {
+                        "description": "No such profile",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "The administrator did not give you this profile",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "No such conversation, or it is another user's",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -10785,7 +13932,7 @@ const docTemplate = `{
         },
         "/api/chats/{id}/tools": {
             "get": {
-                "description": "The groups of built-in tools (shell, web, files, media, collections, subagents, triggers and saved_agents; a group the server does not offer is absent, and shell is listed even when nothing can run commands, not usable with the reason), add-ons, the MCP servers of the chat's model and your MCP connectors, each with the chat's switch and whether it can be used now (with the reason when not). A chat with a saved agent lists only what the agent grants. fallbacks lists the built-in tools (bash, web_search, web_fetch) that an installed add-on replaces but that no add-on serves in this chat now, with the add-on and whether the built-in serves instead.",
+                "description": "The groups of built-in tools (shell, web, files, media, collections, subagents, triggers, memory, saved_agents and history; a group the server does not offer is absent, and shell is listed even when nothing can run commands, not usable with the reason), add-ons, the MCP servers of the chat's model and your MCP connectors, each with the chat's switch and whether it can be used now (with the reason when not). deferred is true on a group whose tools the chat loads on demand behind tool_search, tool_describe and tool_call (the localai_client and localai_admin groups, see the setting chats_tool_search). A chat with a saved agent lists only what the agent grants. memory says whether memory works in the chat and, when it does not, the level that turned it off (code, blocked_by) and where to turn it on (fix). fallbacks lists the built-in tools (bash, web_search, web_fetch) that an installed add-on replaces but that no add-on serves in this chat now, with the add-on and whether the built-in serves instead. tool_cap is present only when the server's limit on add-on tools (64 per chat) left tools out: it gives the limit, how many tools are offered, the total your add-ons declare, how many were cut and the add-ons that lost tools (id, title, cut). Switching add-ons off in one chat does not bring the cut tools back; stop or disable the add-ons you do not use.",
                 "tags": [
                     "chats"
                 ],
@@ -10821,9 +13968,209 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/cluster/join-tokens": {
+            "get": {
+                "description": "Lists the join tokens with their state (unused, partly_used, used_up, expired, revoked), the uses left, the connections they allow and who minted them. A token stays in the list for a day after it ends. The secret is never in the list. Admin only.",
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "List the join tokens",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/localai.JoinTokenView"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Distributed mode is not enabled",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Mints a random join token that lets a worker register with the cluster. It is good for 10 minutes and one use unless the request says otherwise (up to 24 hours and 100 uses, for Kubernetes or Compose), it can limit the connections of the worker (nats, websocket; P2P workers use their own invite), and a worker that uses it waits for an admin approval unless auto_approve is true (the default comes from the cluster setting join_auto_approve, off unless set). The server keeps only a hash of the token. The response carries the plain token and ready-to-copy commands for each way to run a worker (install script, Windows, docker, docker compose, kubernetes, manual), built from the external URL of this frontend; it is the only time the plain token is shown. Admin only.",
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Mint a join token for a worker",
+                "parameters": [
+                    {
+                        "description": "token options",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.MintJoinTokenRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/localai.MintJoinTokenResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "A limit is out of range or a connection is unknown",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Distributed mode is not enabled",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/cluster/join-tokens/{id}": {
+            "delete": {
+                "description": "Ends a join token at once. A worker that already registered with it keeps its own credential; revoke the node to end that. Admin only.",
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Revoke a join token",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "join token id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "No such token",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Distributed mode is not enabled",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/cluster/settings": {
+            "get": {
+                "description": "Returns the NATS address of the frontends and of the workers, the carrier weights (nats, websocket, p2p) that break a tie between equally fit nodes, the broadcast bus of the frontend that answers (nats while it reaches the NATS server, postgres otherwise), and the live frontend replicas. A user name, password or query string in an address is dropped. Admin only.",
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Read the settings of the cluster",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ClusterSettingsResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Distributed mode is not enabled",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Stores the NATS address, the address workers use, join_auto_approve (the default of the auto-approve choice of a new join token, off unless set), or the carrier weights (carrier_weights: nats, websocket and p2p, each 0 to 1000; a weight is a tie-break between equally fit nodes and never overrides fit; null puts the default back; the change applies to every frontend within seconds, with no restart). Saving a NATS address checks that the serving replica reaches it; the frontends use a new address after a restart. Admin only.",
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Store settings of the cluster",
+                "parameters": [
+                    {
+                        "description": "settings to store",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.ClusterSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "saved, nats.reachable when a NATS address was checked, settings",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Unknown setting, bad value, or a credential in an address",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "This replica cannot reach the NATS server",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Distributed mode is not enabled",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/collections": {
             "get": {
-                "description": "The knowledge-base collections of the caller. An administrator can add all_users=true to also get the other users' collections in user_groups. embedding_model names the model that indexes and searches the collections (collections_embedding_model), and embedding_model_installed says whether this server has it: without it, adding files and searching fail. Needs the collections feature.",
+                "description": "The knowledge-base collections of the caller. shared lists the collections other people shared with the caller: name is the name to use in the other calls (the collection's own name, or shared:\u003cid\u003e when the caller has a collection of that name or two people share one under it), title its own name, owner the display name of the person who shared it and role viewer (search and read) or editor (also add and remove entries). shares gives, for each of the caller's own collections that was made shareable, its resource_id in /api/shares/collection and shared_with, the number of grants. sharing is false when this server cannot share collections (no named accounts). An administrator can add all_users=true to also get the other users' collections in user_groups. embedding_model names the model that indexes and searches the collections (collections_embedding_model), and embedding_model_installed says whether this server has it: without it, adding files and searching fail. search_mode says how a search finds passages: semantic (by meaning only) or hybrid (by meaning and by keyword). max_chunk_size and chunk_overlap are the chunking of a text in characters: a text of N characters becomes about N / (max_chunk_size - chunk_overlap) passages, and each passage is embedded once. Needs the collections feature.",
                 "tags": [
                     "collections"
                 ],
@@ -10900,7 +14247,7 @@ const docTemplate = `{
         },
         "/api/collections/{name}/entries-raw/{entry}": {
             "get": {
-                "description": "Serves the file as it was uploaded.",
+                "description": "Serves the file as it was uploaded. For a collection shared with the caller the download runs under the share: a revocation or a lowering stops it.",
                 "tags": [
                     "collections"
                 ],
@@ -11103,8 +14450,53 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/collections/{name}/share": {
+            "post": {
+                "description": "Returns the ID of the collection in the sharing API: the owner then lists, grants and revokes access with /api/shares/collection/{resource_id}/grants. The roles are viewer (search and read the entries) and editor (also add and remove entries); a collection may be shared with @everyone. Only the owner may call it: another caller gets 404, as for a collection that does not exist. 409 sharing_disabled when this server cannot share collections (no named accounts).",
+                "tags": [
+                    "collections"
+                ],
+                "summary": "Make a collection shareable.",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Collection name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The share of the collection",
+                        "schema": {
+                            "$ref": "#/definitions/schema.CollectionShare"
+                        }
+                    },
+                    "404": {
+                        "description": "Collection not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Sharing is not available on this server",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/collections/{name}/sources": {
             "get": {
+                "description": "Only the owner may list the sources: a source URL can carry a credential. A person the collection is shared with gets 403 whatever the role.",
                 "tags": [
                     "collections"
                 ],
@@ -11123,6 +14515,15 @@ const docTemplate = `{
                         "description": "The sources",
                         "schema": {
                             "$ref": "#/definitions/schema.CollectionSources"
+                        }
+                    },
+                    "403": {
+                        "description": "The collection is shared with the caller, who is not its owner",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
                         }
                     },
                     "404": {
@@ -11425,6 +14826,291 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/federation": {
+            "get": {
+                "description": "Lists the instances that can serve a group (this server, id \"local\", and every remote of kind localai with its P2P tunnel state and its entries) and the groups. A group is a model name served by several of them with the policy least_busy or round_robin; each member has its health, whether it is drained, whether it is constrained (reached through a relay that limits the connection, so it takes a request only when no other member can) and the requests of this server in flight. Requests in flight are counted by each frontend for itself. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Show the federation",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.FederationView"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/federation/groups": {
+            "post": {
+                "description": "Makes a model named \"name\" whose requests go to one of \"members\" (at least two existing models: models of this server or entries of remotes) by \"policy\": least_busy (default; the member with the fewest requests of this server in flight) or round_robin. A member that fails is marked down and the request moves to the next member. The group is a model config with a balanced failover chain, so it shows under /api/failover too. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Create a federation group",
+                "parameters": [
+                    {
+                        "description": "The group",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.FederationGroupRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Group"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/federation/groups/{name}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Get a federation group",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Group name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Group"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Removes the group's model config. The members stay as they are. Admin only.",
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Delete a federation group",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Group name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "description": "An absent field is left as it is. A new member list keeps the drain flag of the members that stay; the probe, trip and recovery settings of the group file are kept. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Update a federation group",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Group name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Fields to change",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.FederationGroupUpdateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Group"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/federation/groups/{name}/drain": {
+            "post": {
+                "description": "With drain true the member takes no new request; requests in flight finish and its health checks go on. With drain false it takes requests again. The last member that takes requests cannot be drained. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Drain a member of a federation group",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Group name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Member and drain flag",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.FederationDrainRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Group"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/fine-tuning/status": {
             "get": {
                 "description": "Returns model_exports=false when this instance does not share the models path of the add-on owner. The value is the same as the model_exports key of GET /api/features.",
@@ -11545,7 +15231,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Adds a source of your own. kind is addon, backend or model; format is library (default) or gallery. The id is derived from the name or URL when it is empty. A source with the same kind and URL is refused (409), as is a taken id. Administrators only.",
+                "description": "Adds a source of your own. kind is addon, backend or model; format is library (default) or gallery. The id is derived from the name or URL when it is empty. issuer and identity, set together, pin the signer of an oci:// add-on library: its artifact must then be signed by that issuer and exact identity (400 otherwise, and on any other source). identity_regex, an anchored pattern, can take the place of identity only together with source_repository, the https URL of the repository the signature must be made for (400 for a pattern alone). source_repository can also go with an exact identity. A source with the same kind and URL is refused (409), as is a taken id. Administrators only.",
                 "consumes": [
                     "application/json"
                 ],
@@ -11806,6 +15492,287 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/models/config/{id}": {
+            "post": {
+                "description": "Removed. Always answers 410 Gone with a Link header to POST /api/models/upgrade/{name}; use that route with config_only true to apply the gallery config of an installed model. This answer stays for one release, then the route goes away.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Removed: rewrite a model config from the gallery",
+                "deprecated": true,
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Gallery model ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "410": {
+                        "description": "Removed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.RemovedRouteResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/recommended": {
+            "get": {
+                "description": "Returns the curated models for the hardware tier of the machine, best first, with the context window each would be installed with and whether it fits. Every signed-in user may read it; installing stays admin-only. The hardware is the host, or the best single node of a cluster.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Recommend models for this machine.",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/localai.RecommendedModelsResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/remote/estimate": {
+            "get": {
+                "description": "Same answer as GET /api/models/estimate/{id} for a gallery model, for one quantization of a Hugging Face or Pirate Face repository: the download size and the memory needed at each requested context size, plus ` + "`" + `file` + "`" + `, ` + "`" + `quantization` + "`" + ` and ` + "`" + `source` + "`" + `. ` + "`" + `source` + "`" + ` is ` + "`" + `gguf-header` + "`" + ` when the layer count, width and heads were read from the GGUF header (exact KV cache term), ` + "`" + `file-size` + "`" + ` when only the file size was known, and ` + "`" + `unknown` + "`" + ` when no size was known. ` + "`" + `approximate` + "`" + ` is true whenever the architecture was not read, so the figure is the file size plus a rule of thumb per context token. ` + "`" + `variants` + "`" + ` repeats the estimate for every quantization of a GGUF repository: they share one architecture, so the header read of the chosen file serves them all and one call answers a whole variant list. When the header cannot be read (a gated repository, a host without range requests) the figures fall back to file sizes and ` + "`" + `approximate` + "`" + ` is true. The header read runs through the same bounded upstream budget as the file listing.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Estimate the memory a remote model file needs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Repository uri: huggingface://owner/repo, pirateface://owner/repo or ollama://name[:tag]",
+                        "name": "uri",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "First file of a variant, as listed by /api/models/remote/files (default: the recommended variant)",
+                        "name": "file",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Comma separated context sizes (default 8192)",
+                        "name": "contexts",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/modelsearch.EstimateResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/remote/files": {
+            "get": {
+                "description": "Reads one repository of Hugging Face or Pirate Face, or one model tag of the Ollama registry, and returns its weight files with sizes, one variant per quantization (shards are one variant), the licence, whether access is gated, a short description from the model card, the GGUF header summary Hugging Face reports, whether an installed model already comes from the repository, and the backend a dry run of the import selects. Nothing is downloaded or enqueued. A variant's ` + "`" + `preference` + "`" + ` is the value for ` + "`" + `preferences.quantizations` + "`" + ` on POST /models/import-uri that selects exactly that variant. Sizes of a Pirate Face repository come from the Hugging Face commit its torrent mirrors; ` + "`" + `size_known` + "`" + ` is false when Hugging Face does not know the repository. The answer is cached per repository for 10 minutes.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "List the weight files of a remote model, grouped by quantization",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Repository uri: huggingface://owner/repo, pirateface://owner/repo, ollama://name[:tag] or a huggingface.co url",
+                        "name": "uri",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Quantization preference to dry-run the import with (default: the importer's)",
+                        "name": "quantization",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/modelsearch.RepoFiles"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/search": {
+            "get": {
+                "description": "Fans the query out to the sources and returns the merged results plus one status per source, so a source that is down does not fail the search. Without ` + "`" + `providers` + "`" + ` the sources are the caller's enabled set (every source the caller can see that they did not turn off; see /api/models/search/sources). A source can come from an add-on that provides the model-search slot. ` + "`" + `filters.\u003csource\u003e.\u003cid\u003e=value` + "`" + ` sets a filter that the source declares in ` + "`" + `sources` + "`" + ` of the answer; an unknown filter or a value that does not fit its type gives a 400 that names the filter. Each result's ` + "`" + `uri` + "`" + ` can be passed to POST /models/import-uri. Results also say whether an installed model already comes from the repository (` + "`" + `installed` + "`" + `, ` + "`" + `installed_name` + "`" + `), the backend an import would likely pick (` + "`" + `backend` + "`" + `, a hint derived from the tags) and whether the repository likely has several quantizations (` + "`" + `has_variants` + "`" + `). Use /api/models/remote/files for the exact files, sizes and backend of one result. With sort=latest the search text may be empty: the answer is the newest models of each source that can list them. A source that cannot is not called and its status says ` + "`" + `unsupported` + "`" + `. A status has ` + "`" + `dropped` + "`" + `, the number of rows the host refused because of a scheme or a size it does not accept.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Search remote sources for installable models",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Search text. Required unless sort is latest",
+                        "name": "q",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Comma separated source IDs (default: the enabled set of the caller)",
+                        "name": "providers",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Results per source (default 20, max 50)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "File format filter (default gguf, any disables it)",
+                        "name": "format",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "downloads (default), likes, updated, trending or latest (newest first; the only sort that works with no q)",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "A filter of one source, for example filters.pirateface.min_seeders=2. The sources and their filters are listed in ` + "`" + `sources` + "`" + ` of the answer.",
+                        "name": "filters.source.id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/modelsearch.Response"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/search/sources": {
+            "get": {
+                "description": "Lists the sources that are installed (Hugging Face, and every add-on that provides the model-search slot and that the caller can see) with their titles, sorts and filters, and the enabled set of the caller: every source they can see that they did not turn off, so a source from a newly installed add-on is on with no action. ` + "`" + `missing` + "`" + ` is kept for older clients and is always empty.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "List the model search sources and the enabled set",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/modelsearch.Overview"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Stores the set of sources the caller searches. The host stores what the caller turned off: every source they can see that is not in the list. An ID that is off and whose add-on is gone stays off, so installing the add-on again keeps the choice. The list has at most as many IDs as the visible sources, the stored off IDs and the built-in source, and never more than 64; a longer list gives a 400. It takes effect at once, with no restart. An ID must be a built-in source, a visible source, or already off. An empty list means nothing is searched.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "models"
+                ],
+                "summary": "Set the enabled model search sources",
+                "parameters": [
+                    {
+                        "description": "The enabled set",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.SearchSourcesRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/modelsearch.Overview"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/models/storage": {
             "get": {
                 "description": "Per-model disk usage, shared-file relations and missing references under the models path",
@@ -11872,6 +15839,92 @@ const docTemplate = `{
                         "description": "Internal Server Error",
                         "schema": {
                             "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/updates": {
+            "get": {
+                "description": "Every model installed from a gallery, with its state: up-to-date, update-available, edited (the update would overwrite keys a person changed; editedKeys lists them), unknown (reason says why), gone (no gallery lists the entry), held (the owner holds this version) or failed (the last upgrade was rolled back; upgrade has the error). needsPerson marks what the Updates page counts: models never update automatically. What the galleries offer is as of the last check; the hold flag, an edit and an upgrade show at once. Every frontend of a cluster gives the same answer.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "List the model updates",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/modelupdates.Snapshot"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/updates/check": {
+            "post": {
+                "description": "Reads every gallery index again (not the copies of the last hour), compares each installed gallery model with its entry, waits for the check (at most 60 seconds) and returns the new data. One frontend of a cluster checks at a time; a request that arrives while another check runs waits for that check. A call within 15 seconds of the last check is answered from it with throttled set. A failed check shows as an error in the state of the gallery source and keeps the previous list. Installs nothing.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Check for model updates now",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/modelupdates.Snapshot"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/upgrade/{name}": {
+            "post": {
+                "description": "Queues an upgrade and returns its operation; follow it on status_url or /api/operations. Without config_only and choices the upgrade runs as an upgrade run of one item (see /api/updates/runs) and the answer adds the run; with them it is queued directly. While an upgrade run runs, every request is refused with 409 and code run_active. The upgrade checks the backend, the free disk and the files other models share, downloads the changed files beside the old ones and verifies their sha256, stops the model, switches the files and the config, and loads the new version as a check. A failed load puts the old version back (state failed, with the error and a retry). The old files are kept until removed with POST /api/models/{name}/remove-old. Keys a person edited are kept; an edited key the update also changes needs a choice in choices, or the request is refused with 409 and the keys. A held model is refused with 409; release the hold first. Nothing upgrades without this request.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Upgrade a model to what its gallery entry installs now",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Installed model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Options",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Operation, and the run when one started it",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelUpgradeRunResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not installed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Running, held, edited keys need a choice, or another upgrade run runs (code run_active)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "422": {
+                        "description": "Not installed from a gallery with a recorded origin",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
                         }
                     }
                 }
@@ -12024,6 +16077,187 @@ const docTemplate = `{
                         "description": "The job table could not be read",
                         "schema": {
                             "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/{name}/adopt": {
+            "post": {
+                "description": "A model installed before LocalAI recorded the origin of gallery installs shows as unknown in GET /api/models/updates. Adopt records the gallery entry it came from, the files it has and what the gallery would write as its config, so the next check compares it like any other model. The model config on disk is not changed: a key changed by hand reads as an edit. Without a body the entry is found by the model's names, and only when exactly one gallery lists it; otherwise the answer lists the candidates (gallery@entry) and the request must name the gallery (and the entry). Refused with 409 when the model already records its origin, an upgrade runs, or more than one gallery matches; with 422 when the model has no record of a gallery install or no gallery entry matches.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Track the updates of a model installed by an earlier release",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Installed model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Gallery and entry",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelAdoptRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Adopted",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelAdoptResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not installed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Already adopted, busy, or more than one candidate",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "422": {
+                        "description": "No record of a gallery install, or no candidate",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/{name}/hold": {
+            "put": {
+                "description": "With hold true the model is reported as held and offered no update until the hold is cleared. Only the gallery file changes: the model config, its revision and the loaded model stay as they are, and a reinstall keeps the hold. Refused with 409 while an upgrade of the model runs.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Hold a model at its installed version",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Installed model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Hold or release",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelHoldRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The hold",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelHoldResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not installed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "409": {
+                        "description": "An upgrade runs",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "422": {
+                        "description": "Not installed from a gallery with a recorded origin",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/{name}/remove-old": {
+            "post": {
+                "description": "Deletes the old files that the last upgrade of the model kept (retainedFiles of GET /api/models/updates). Only after a confirmed upgrade; refused with 409 while an upgrade runs or when there is nothing to remove. A kept file that another model now uses is not deleted. The model config does not change.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Remove the old version of an upgraded model",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Installed model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Removed files",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelRemoveOldResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not installed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Nothing to remove, an upgrade runs, or a file is shared",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/{name}/upgrade/retry": {
+            "post": {
+                "description": "Runs the last upgrade of the model again, with its options and choices, toward what the gallery entry installs now. Refused with 409 when the last upgrade did not fail or the model is held, and with 409 and code run_active while an upgrade run runs.",
+                "tags": [
+                    "models"
+                ],
+                "summary": "Retry a failed model upgrade",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Installed model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Operation",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not installed",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
+                        }
+                    },
+                    "409": {
+                        "description": "Nothing to retry, held, an upgrade runs, or an upgrade run runs (code run_active)",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ModelUpgradeError"
                         }
                     }
                 }
@@ -12323,6 +16557,98 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/nodes/{id}/split-server": {
+            "put": {
+                "description": "A split server is a backend node that serves model-split workers (llama.cpp RPC and MLX helpers): it runs a P2P host with open ports, the frontends admit it on the gated relays they administer, and the helpers attached to it join the next model it loads. A node becomes one only by this admin action or by the --split-server flag of the worker; the admin's choice wins over the flag until DELETE. Clearing it detaches the split workers of the node (they wait, attached to no node, with a warning), removes its relay admission and stops its P2P host at its next exchange. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Declare a node a split server, or clear it",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Node ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Declaration",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.SetSplitServerRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.SetSplitServerResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "agent node, or no split_server field",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "node not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Clears the admin's choice: the next registration of the worker sets the declaration from its --split-server flag. The current value stays until then. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Hand the split server declaration back to the worker flag",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Node ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "boolean"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "node not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/nodes/{id}/vram-budget": {
             "put": {
                 "tags": [
@@ -12407,36 +16733,1050 @@ const docTemplate = `{
                 }
             }
         },
-        "/api/p2p": {
+        "/api/notifications": {
             "get": {
+                "description": "The inbox: backend updates, finished operations, and one item for each run of a trigger that finished, failed or needs you. Newest first. It also returns the number unread and the total kept. Works with the chats on or off; the same routes also answer under /api/chats/notifications while the chats are on.",
                 "tags": [
-                    "p2p"
+                    "notifications"
                 ],
-                "summary": "Returns available P2P nodes",
+                "summary": "List your notifications.",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "only the unread ones",
+                        "name": "unread",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "most items to return (default 50, at most 500)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
-                        "description": "Response",
+                        "description": "The notifications",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/schema.P2PNodesResponse"
-                            }
+                            "$ref": "#/definitions/schema.ChatsNotificationList"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Name the ids, or pass all to empty your inbox; with all, read_only keeps the unread ones. Only your own notifications are touched.",
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Delete notifications.",
+                "parameters": [
+                    {
+                        "description": "ids, or all",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotificationsDelete"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The number still unread and how many were deleted",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotificationCount"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
             }
         },
-        "/api/p2p/token": {
+        "/api/notifications/count": {
             "get": {
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Count unread notifications.",
+                "responses": {
+                    "200": {
+                        "description": "The number unread",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotificationCount"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notifications/events": {
+            "get": {
+                "description": "Server-sent events: one notification event for each new inbox item, with the same fields as the list, and a notifications_changed event when notifications were read or deleted, so a client reads the list again. Live only; list the inbox for what came before. In a cluster the events of every frontend reach every stream.",
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Stream your notifications.",
+                "responses": {
+                    "200": {
+                        "description": "An event stream",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotification"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notifications/push/key": {
+            "get": {
+                "description": "The VAPID public key a browser needs to subscribe to push for your notifications. 409 when the server cannot keep subscriptions (no database and no data path).",
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Get the browser push key.",
+                "responses": {
+                    "200": {
+                        "description": "The key",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsPushKey"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notifications/push/subscribe": {
+            "post": {
+                "description": "Pass the endpoint and keys of a browser PushSubscription. A notification is then pushed to that browser with its title and link only. The endpoint must be an https address on the public internet. At most 10 browsers per user; the oldest go first.",
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Subscribe a browser to push.",
+                "parameters": [
+                    {
+                        "description": "the browser's subscription",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsPushSubscription"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Subscribed"
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Unsubscribe a browser from push.",
+                "parameters": [
+                    {
+                        "description": "the endpoint",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsPushUnsubscribe"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Unsubscribed"
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notifications/read": {
+            "post": {
+                "description": "Name the ids, or pass all. Opening a chat marks its notifications read by itself.",
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "Mark notifications read.",
+                "parameters": [
+                    {
+                        "description": "ids or all",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotificationsRead"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The number still unread",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ChatsNotificationCount"
+                        }
+                    },
+                    "400": {
+                        "description": "The request is not valid",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/devices": {
+            "get": {
+                "description": "Lists the paired devices, revoked ones included, with how each one reaches the server now (path kind direct, hole_punched or relayed, the relay and its limits). Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
                 "tags": [
                     "p2p"
                 ],
-                "summary": "Show the P2P token",
+                "summary": "List P2P devices",
                 "responses": {
                     "200": {
-                        "description": "Response",
+                        "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/p2p.DeviceList"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/devices/{id}": {
+            "delete": {
+                "description": "Revokes a device: it is removed from the allowlist, its connections are closed, every relay is told to drop it, and the API key of a remote device is revoked. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Revoke a P2P device",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Device ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RevokeResult"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Rename a P2P device",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Device ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New label",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RenameDeviceRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.OKResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/identity/regenerate": {
+            "post": {
+                "description": "Makes a new peer identity for this server and restarts P2P with it. The old key is kept next to the new one as a backup. Every paired device and remote knows the old peer ID, so each must pair again. The body must be {\"confirm\": true}. Needs P2P mode connect or share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Regenerate the P2P identity",
+                "parameters": [
+                    {
+                        "description": "Confirmation",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RegenerateIdentityRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.Status"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/invites": {
+            "get": {
+                "description": "Lists the invites with their state: pending, used, expired or canceled. The links are not part of the answer. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "List P2P invites",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.InviteList"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Creates a one-time invite link. kind is device (P2P admission only; the person signs in as usual), remote (also issues an API key for the other server: limited to \"models\" when given, else every model this server lets a client key use, models added later too; \"all_models\": true asks for every model explicitly and is refused with a non-empty \"models\"), worker or split. A remote invite needs a signed-in user account: the API key set with LOCALAI_API_KEY gets 409. relays is \"auto\", \"none\" or a list of relay IDs. When a gated relay is named, a single-use relay pass is registered on it; \"relay.reason\" says why there is none. The link is shown once. Needs P2P mode share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Create a P2P invite",
+                "parameters": [
+                    {
+                        "description": "Invite to create",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.MintRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.MintResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/invites/{id}": {
+            "delete": {
+                "description": "Cancels a pending invite and drops its relay pass. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Cancel a P2P invite",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Invite ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.OKResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/redeem": {
+            "post": {
+                "description": "Served only on the P2P protocol /localai/http/1; the normal HTTP listener answers 404. The caller's peer ID comes from the connection. A wrong, used, canceled or expired code all get the same 410 answer. After 5 wrong codes from one peer in an hour, or too many from all peers, the answer is 429. The answer carries the confirmation phrase to compare on both sides, and for a remote invite the API key (shown once).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Redeem a P2P invite (over P2P only)",
+                "parameters": [
+                    {
+                        "description": "Code and device name",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RedeemRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RedeemResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "410": {
+                        "description": "Gone",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays": {
+            "get": {
+                "description": "Lists the relays this server knows, with their mode (gated, open, unclaimed) and state (in_sync, out_of_sync, open, unclaimed, not_admin, denied, unreachable, checking). Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "List P2P relays",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RelayList"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Adds a relay by its address, which must end in /p2p/\u003crelay peer ID\u003e, and checks it. claim_code claims a relay that has no admin yet, with the code it printed at start. Needs P2P mode share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Add a P2P relay",
+                "parameters": [
+                    {
+                        "description": "Relay to add",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.AddRelayRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.Relay"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays/{id}": {
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Remove a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.OKResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays/{id}/check": {
+            "post": {
+                "description": "Connects to the relay, reserves a slot, reads whether this server is an admin, tests a circuit and compares the paired set. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Check a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RelayCheck"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays/{id}/claim": {
+            "post": {
+                "description": "Makes this server an admin of a relay that has none, with the one-time code the relay printed at start. Needs P2P mode share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Claim a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Claim code",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.ClaimRelayRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.Relay"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays/{id}/limits": {
+            "get": {
+                "description": "Reads the limits the relay runs with now: the data, the time and the bandwidth of one circuit (zero means no limit). ceiling is the most a change may set for each limit (zero means no ceiling); the operator of the relay sets it with the relay's flags. can_change says whether this server is an admin of the relay and may change them. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Read the limits of a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RelayLimitsInfo"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Changes the data, time and bandwidth limits of one circuit on a relay this server administers; a field left out stays as it is and zero removes that limit. The relay saves the new limits, so they stay over a restart of the relay. A new bandwidth limit applies to the next circuit at once. A new data or time limit makes the relay restart its circuit service: its reservations are dropped, running circuits keep their old limits until they end, and the paired devices reserve again within moments (\"restarted\" is true). A value above the ceiling of the relay, or zero for a limit that has a ceiling, is refused with 400 and an error that names the ceiling; nothing is clamped. Answers 409 when this server is not an admin of the relay or the relay is open. Needs P2P mode share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Change the limits of a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Limits to change",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.SetRelayLimitsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.RelayLimitsInfo"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/relays/{id}/sync": {
+            "post": {
+                "description": "Pushes the full set of paired devices to the relay now. Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Sync a P2P relay",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Relay ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.Relay"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/split-workers": {
+            "get": {
+                "description": "Lists the paired llama.cpp RPC and MLX workers that lend their memory to models that run on this server or, in a cluster, on the backend node each is attached to (node_id), with their state (online, offline, slow, limited, refused), the path that reaches them and the memory they add. A worker reached only through a relay is \"slow\" until allow_slow_path is set. A relay of the user (own_relay: a gated relay this server administers) may carry it even with a data or time limit, and then ends each connection at the limit; its limits change with PUT /api/p2p/relays/{relay_id}/limits. A public relay never carries model layers (\"limited\"). Needs P2P mode share. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "List model-split workers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.SplitWorkerList"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/split-workers/{id}": {
+            "patch": {
+                "description": "Sets node_id and/or allow_slow_path of a model-split worker. node_id attaches the worker to a backend node of the cluster (\"\" attaches it to this server): the worker moves to the node at its next session, the node forwards its port and the backends that the node starts use it. Pin the model to that node with a node selector. With allow_slow_path true the server or the node uses the worker over a relay (\"Use anyway\"): it works, but every token waits for the relay, and a relay of the user that limits each connection ends it at the limit. A public relay is never used. With false it uses the worker only over a direct or hole-punched path. A model that is loaded keeps its workers until it is loaded again. Needs P2P mode share. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "Use a model-split worker over a slow path, or attach it to a node",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Device ID of the worker",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Change",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/p2p.SplitWorkerUpdate"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.SplitWorkerView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/p2p/status": {
+            "get": {
+                "description": "The mode in effect (off, connect or share), the peer ID and addresses of this server, its reachability, the relays that hold a reservation for it, whether it relays for its paired devices, and the number of pending invites and paired devices. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "p2p"
+                ],
+                "summary": "P2P status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/p2p.Status"
                         }
                     }
                 }
@@ -12521,6 +17861,438 @@ const docTemplate = `{
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/remotes": {
+            "get": {
+                "description": "Lists the saved remotes. The key is never part of the answer; \"key_set\" says whether one is stored. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "List remotes",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteListResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Saves a remote and turns each chosen model into a model config (an entry) that carries only the remote id. The key is stored sealed and is never returned. With \"invite\" (an invite link of kind remote from another LocalAI) the server redeems the invite over P2P, keeps the key the other server issues, and reaches it through a forwarder on a loopback port; P2P must be on (mode connect or share), url and api_key must be empty, and the answer carries the confirmation \"phrase\". Models that cannot be adopted are listed in \"skipped\" with a reason. At most 500 models per call. When the remote is saved but some models could not be added, the answer is still 201 with \"warning\" set; read the lists and add the missing models with the adopt route, not with a second create. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Create a remote",
+                "parameters": [
+                    {
+                        "description": "Remote to create; api_key is write-only, for example \\",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteCreateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteResultResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "410": {
+                        "description": "Gone",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "504": {
+                        "description": "Gateway Timeout",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/remotes/test": {
+            "post": {
+                "description": "Lists the models of a remote without saving anything. A failed test is a 200 answer with ok=false and the failed step. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Test a remote",
+                "parameters": [
+                    {
+                        "description": "Remote to test; api_key is write-only, for example \\",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteTestRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.TestResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/remotes/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Get a remote",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Remote id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Remote"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "With entries=keep (the default) the entries stay as plain models without the remote and its key; with entries=remove they are deleted. When some entries could not be handled, the remote stays and the answer is a 500 error; a retry finishes the job. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Delete a remote",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Remote id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "enum": [
+                            "keep",
+                            "remove"
+                        ],
+                        "type": "string",
+                        "default": "keep",
+                        "description": "What to do with the entries",
+                        "name": "entries",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "description": "An absent field is left as it is; an empty api_key removes the key (not allowed for the anthropic kind). The key must be printable ASCII. A new key restarts every loaded model that names the remote and a new url patches the entries the remote owns. A new key or url also refreshes the remote, so status, last_error, new and unavailable in the answer are current; a rename does not. When the change is saved but patching some entries failed, the answer is a 500 error that says so, not the saved remote: read it again with GET. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Update a remote",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Remote id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Fields to change; api_key is write-only, for example \\",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteUpdateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Remote"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/remotes/{id}/adopt": {
+            "post": {
+                "description": "Turns each chosen model into a model config (an entry) that carries only the remote id. Models that cannot be adopted are listed in \"skipped\" with a reason. At most 500 models per call. When some models were added but the rest failed, the answer is still 200 with \"warning\" set. Admin only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Adopt models of a remote",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Remote id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Models to adopt",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteAdoptRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.RemoteResultResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/remotes/{id}/refresh": {
+            "post": {
+                "description": "Asks the remote for its models and records the answer: status, \"new\" (found, not adopted) and \"unavailable\" (adopted, no longer listed). It never writes an entry. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "remotes"
+                ],
+                "summary": "Refresh a remote",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Remote id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/remotes.Remote"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     }
                 }
@@ -12770,6 +18542,360 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/shares/{kind}": {
+            "get": {
+                "description": "Returns the resources of one kind that the caller owns (owned) and those shared with the caller (shared), at most 100 of each (truncated says more exist). Each one has the caller's own role, which is owner or a role the kind grants; for a shared one the owner's display name, and everyone true when the role comes from a grant to every account; for an owned one the number of grants (sharedWith). The answer also carries the roles the kind grants and whether it may be shared with every account. Resources of other people that are not shared with the caller are never listed, whatever the caller's installation role. An unknown kind gets the same denial as a resource the caller may not see. Local-owner mode has no sharing and answers 409 sharing_disabled. Needs a named account, not the addons feature; a kind may name a feature of its own. Read-only. API keys may call it. No MCP tool maps to this route.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sharing"
+                ],
+                "summary": "List the shared resources of a kind",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource kind, for example example:note",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Owned and shared resources of the kind",
+                        "schema": {
+                            "$ref": "#/definitions/gateway.ShareIndex"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "A feature the kind names is denied, or unknown kind",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The owner is unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/shares/{kind}/{resourceId}/grants": {
+            "get": {
+                "description": "Returns the grants of the whole resource: the immutable account ID, the display name and the role of each grantee. A grant to every account has the user ID @everyone and no display name. Only the owner of the resource may read it; installation administrators and grantees get the same denial as for an unknown resource or an unknown kind. Local-owner mode answers 409 sharing_disabled. Accepted only from the owner's own browser session (same-origin fetch, X-LocalAI-Confirm equal to the resource ID, no API key, no tool, agent or MCP marker). No MCP tool maps to this route.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sharing"
+                ],
+                "summary": "List who a resource is shared with (owner, UI only)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource kind",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Resource ID",
+                        "name": "resourceId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Grants of the resource",
+                        "schema": {
+                            "$ref": "#/definitions/gateway.ShareList"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not a human surface, a feature the kind names denied, not the owner, unknown kind or unknown resource",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The owner is unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/shares/{kind}/{resourceId}/grants/{principal}": {
+            "put": {
+                "description": "Gives the principal one of the roles the kind grants (for example use or manage) on the whole resource. The principal is the immutable account ID the user picker returned, an active named account that the kind must accept as a grantee (it does not need the addons feature), or @everyone on a kind that allows it: every active named account, accounts created later included. The owner role cannot be granted. A user's own grant and the grant to everyone add up and are changed and revoked apart. Lowering a role stops the grantee's admitted work that the role no longer allows before it is acknowledged. Local-owner mode answers 409 sharing_disabled. Accepted only from the owner's own browser session (same-origin fetch, X-LocalAI-Confirm equal to the resource ID, no API key, no tool, agent or MCP marker). Safe to repeat; after outcome_unknown repeat the same call. No MCP tool maps to this route: sharing is never a tool.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sharing"
+                ],
+                "summary": "Share a resource with a user or with everyone (owner, UI only)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource kind",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Resource ID",
+                        "name": "resourceId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Account ID of the grantee, or @everyone",
+                        "name": "principal",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Role",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/gateway.SetShareRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/gateway.ShareList"
+                        }
+                    },
+                    "400": {
+                        "description": "Malformed body, or type invalid_request for a role the kind does not grant",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not a human surface, a feature the kind names denied, not the owner, unknown kind or resource, or a principal that cannot be granted",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Unavailable, or type outcome_unknown (with operationId)",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Removes the grant of the principal, an account ID or @everyone. The other grant a user may hold stays: revoking @everyone leaves the users' own grants, and revoking a user leaves what @everyone holds. It returns only after the admitted work that the removed grant alone allowed stopped; a drain that did not finish in the bound is a 503 and the revocation is already effective for new work. Local-owner mode answers 409 sharing_disabled. Accepted only from the owner's own browser session (same-origin fetch, X-LocalAI-Confirm equal to the resource ID, no API key, no tool, agent or MCP marker). Safe to repeat. No MCP tool maps to this route.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sharing"
+                ],
+                "summary": "Stop sharing a resource with a user or with everyone (owner, UI only)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource kind",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Resource ID",
+                        "name": "resourceId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Account ID of the grantee, or @everyone",
+                        "name": "principal",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional operation ID, returned with outcome_unknown",
+                        "name": "operationId",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Grants after the change",
+                        "schema": {
+                            "$ref": "#/definitions/gateway.ShareList"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not a human surface, a feature the kind names denied, not the owner, unknown kind or unknown resource",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Unavailable, or type outcome_unknown (with operationId)",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/shares/{kind}/{resourceId}/users": {
+            "get": {
+                "description": "Finds active named accounts by a prefix of the display name, 3 to 64 characters, at most 20 results, whether or not they may use add-ons, and keeps only those the kind accepts as grantees. A prefix of an address finds nobody; an account without a display name is found by its whole address only and comes back with an empty display name. Each result is an immutable account ID and a display name and nothing else. Each person may search 20 times at once and then once every 2 seconds; a search over that rate answers 429 rate_limited. Only the owner of the resource may search; the owner and the caller are left out. Local-owner mode answers 409 sharing_disabled. Accepted only from the owner's own browser session (same-origin fetch, X-LocalAI-Confirm equal to the resource ID, no API key, no tool, agent or MCP marker). No MCP tool maps to this route.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Sharing"
+                ],
+                "summary": "Search the people a resource can be shared with (owner, UI only)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource kind",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Resource ID",
+                        "name": "resourceId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Display name prefix, or a whole address",
+                        "name": "q",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "At most this many results, up to 20",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Matching people",
+                        "schema": {
+                            "$ref": "#/definitions/gateway.UserList"
+                        }
+                    },
+                    "400": {
+                        "description": "Query too short or too long",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Named authentication required",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Not a human surface, a feature the kind names denied, not the owner, unknown kind or unknown resource",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Type sharing_disabled",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Type rate_limited: too many searches",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "The owner is unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/addons.AddonErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/api/traces": {
             "get": {
                 "description": "Returns a bounded, newest-first page of captured API exchange traces. Request and response bodies plus headers are omitted unless full=true; fetch them per-trace from /api/traces/{id}. Paging metadata is returned in the X-Total-Count, X-Trace-Offset and X-Trace-Limit headers.",
@@ -12889,9 +19015,342 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/updates/runs": {
+            "get": {
+                "description": "The running run first, then the newest. active=1 lists only the running run. Dismissed runs are left out. Administrators only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "List upgrade runs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "1 lists only the running run",
+                        "name": "active",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Most runs to return (default 20)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Runs",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunList"
+                        }
+                    },
+                    "503": {
+                        "description": "Upgrade runs are not available",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Checks every item (installed, an update available, the update still goes to expected_to) and starts one run; if one item fails a check, no run is created. Only one run runs at a time (409 run_active). A held model or one whose update changes edited keys is part of the run as skipped. Add-on items run for the administrator who started the run, through the same owner checks as POST /api/addons/{id}/upgrade; they need the administrator's own browser session with the header X-LocalAI-Confirm: upgrade-run, or they are skipped with error key not_human_surface. source must be manual. Administrators only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Start an upgrade run",
+                "parameters": [
+                    {
+                        "description": "Items and the version or digest each must move to",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.StartRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "The run",
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.Run"
+                        }
+                    },
+                    "400": {
+                        "description": "Code invalid",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "409": {
+                        "description": "Code no_update, stale, run_active or source_unchecked",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "503": {
+                        "description": "Upgrade runs are not available",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/updates/runs/preview": {
+            "post": {
+                "description": "Lists the backends, gallery models and add-ons that have an update, in run order (backends, then models, then add-ons), with what each update does and whether it can start. Starts nothing. Send expected_to of each item back in the start request. Administrators only.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Preview an upgrade run",
+                "parameters": [
+                    {
+                        "description": "Items to preview; empty previews all",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunPreviewRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Plan",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunPreview"
+                        }
+                    },
+                    "400": {
+                        "description": "Malformed request",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "503": {
+                        "description": "Upgrade runs are not available",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/updates/runs/{id}": {
+            "get": {
+                "description": "The run with each item: phase, progress, error key and the operation (job_id) of /api/operations it runs. Administrators only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Read an upgrade run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Run id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The run",
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.Run"
+                        }
+                    },
+                    "404": {
+                        "description": "Code not_found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Hides a finished run from the default list. Administrators only.",
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Dismiss an upgrade run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Run id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Dismissed"
+                    },
+                    "404": {
+                        "description": "Code not_found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "409": {
+                        "description": "Code run_not_finished",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/updates/runs/{id}/cancel": {
+            "post": {
+                "description": "Drops the queued items and stops the running ones that can stop; the run then ends cancelled. Administrators only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Cancel an upgrade run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Run id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The run",
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.Run"
+                        }
+                    },
+                    "404": {
+                        "description": "Code not_found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "409": {
+                        "description": "Code run_finished",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/updates/runs/{id}/items/{key}/cancel": {
+            "post": {
+                "description": "A queued item is dropped; a running item is stopped only while its operation says it can stop. Administrators only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Cancel one item of an upgrade run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Run id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Item key, \u003ckind\u003e:\u003cname\u003e, URL-encoded",
+                        "name": "key",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The run",
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.Run"
+                        }
+                    },
+                    "404": {
+                        "description": "Code not_found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "409": {
+                        "description": "Code not_cancellable or run_finished",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/updates/runs/{id}/retry": {
+            "post": {
+                "description": "Starts a new run with the items of a finished run that failed, rolled back or stayed unconfirmed and still have an update, toward what the checks offer now. The old run does not change. The new run is a manual run of the administrator who retries, also when the old run was automatic or was started by another administrator. When that includes add-on items, the request needs the administrator's own browser session with X-LocalAI-Confirm: upgrade-run (409 not_human_surface). Administrators only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "updates"
+                ],
+                "summary": "Retry an upgrade run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Run id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The new run",
+                        "schema": {
+                            "$ref": "#/definitions/upgraderun.Run"
+                        }
+                    },
+                    "404": {
+                        "description": "Code not_found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    },
+                    "409": {
+                        "description": "Code run_not_finished, nothing_to_retry, run_active, not_human_surface or source_unchecked",
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpgradeRunError"
+                        }
+                    }
+                }
+            }
+        },
         "/api/voice-profiles": {
             "get": {
-                "description": "List saved voice-cloning references without exposing filesystem paths.",
+                "description": "List the saved voice-cloning references the caller may use (their own and the instance-wide ones; an administrator sees all), without exposing filesystem paths.",
                 "produces": [
                     "application/json"
                 ],
@@ -12916,7 +19375,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Save a consent-confirmed PCM WAV reference clip and exact transcript for voice cloning. Admin-only.",
+                "description": "Save a consent-confirmed PCM WAV reference clip and exact transcript for voice cloning. Needs the audio speech feature. The profile belongs to the caller (an administrator creates instance-wide profiles); a user who is not an administrator may own at most 20.",
                 "consumes": [
                     "multipart/form-data",
                     "application/json"
@@ -12984,6 +19443,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/schema.ErrorResponse"
                         }
                     },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "The per-user profile limit is reached",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
+                    },
                     "413": {
                         "description": "Request Entity Too Large",
                         "schema": {
@@ -12995,7 +19466,7 @@ const docTemplate = `{
         },
         "/api/voice-profiles/{id}": {
             "delete": {
-                "description": "Permanently remove a saved voice-cloning profile. Admin-only.",
+                "description": "Permanently remove a saved voice-cloning profile. The owner or an administrator may delete it; an instance-wide profile only an administrator. The profile of another user answers 404.",
                 "tags": [
                     "audio",
                     "voice-profiles"
@@ -13013,6 +19484,12 @@ const docTemplate = `{
                 "responses": {
                     "204": {
                         "description": "No Content"
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/schema.ErrorResponse"
+                        }
                     },
                     "404": {
                         "description": "Not Found",
@@ -13576,8 +20053,43 @@ const docTemplate = `{
                 }
             }
         },
+        "/backends/updates": {
+            "get": {
+                "description": "Gallery and library backends with a newer build, the state of each source (checkedAt, lastSuccessAt, error, stale) and what the automatic update covers. Answers from the cache of the instance that serves the request; in a cluster each frontend has its own cache. Contacts no registry.",
+                "tags": [
+                    "backends"
+                ],
+                "summary": "List the backend updates",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/backendupdates.Snapshot"
+                        }
+                    }
+                }
+            }
+        },
+        "/backends/updates/check": {
+            "post": {
+                "description": "Refreshes the sources, waits for the check (at most 45 seconds) and returns the new data. A failed check shows as an error in the state of its source and keeps the previous list. Callers that arrive during a check share it; a call within 15 seconds of the last check is answered from it with throttled set. In a cluster the frontend that gets the request updates its own cache only. Installs nothing.",
+                "tags": [
+                    "backends"
+                ],
+                "summary": "Check for backend updates now",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/backendupdates.Snapshot"
+                        }
+                    }
+                }
+            }
+        },
         "/backends/upgrade/{name}": {
             "post": {
+                "description": "Refused before anything is queued when the backend is not installed (404, code not_installed), has no pending upgrade (409, code no_update), or when the optional expected_to (the available version or digest, as a query parameter or a JSON field) is no longer the available build (409, code stale).",
                 "tags": [
                     "backends"
                 ],
@@ -13589,6 +20101,12 @@ const docTemplate = `{
                         "name": "name",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "The version or digest the caller wants; refused with code stale when it is no longer the available one",
+                        "name": "expected_to",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -13600,6 +20118,20 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Backend installation is disabled on this server (code backend_install_disabled)",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "The backend is not installed (code not_installed)",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "409": {
+                        "description": "The backend has no pending upgrade (code no_update) or the requested build is no longer the available one (code stale)",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -13671,6 +20203,192 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found"
+                    }
+                }
+            }
+        },
+        "/join.ps1": {
+            "get": {
+                "description": "Returns the script that installs a worker and joins it to this cluster: join.sh for Linux and macOS (installs the binary through install.sh in worker mode, writes a systemd unit or a launchd daemon, keeps the settings in a root-only file), join.ps1 for Windows, join.yaml for Kubernetes (a Secret and a StatefulSet with a volume for the state directory). Public, but answers only for a join token that exists and is not expired, revoked or used up; the answer is the same 404 for every other token. Serving the script does not spend the token.",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Join script for a worker",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "join token",
+                        "name": "t",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "connections of the worker, comma separated: nats, websocket",
+                        "name": "routes",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the script",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "A connection is unknown or the token does not allow it",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "The token is not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too many tokens that are not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/join.sh": {
+            "get": {
+                "description": "Returns the script that installs a worker and joins it to this cluster: join.sh for Linux and macOS (installs the binary through install.sh in worker mode, writes a systemd unit or a launchd daemon, keeps the settings in a root-only file), join.ps1 for Windows, join.yaml for Kubernetes (a Secret and a StatefulSet with a volume for the state directory). Public, but answers only for a join token that exists and is not expired, revoked or used up; the answer is the same 404 for every other token. Serving the script does not spend the token.",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Join script for a worker",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "join token",
+                        "name": "t",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "connections of the worker, comma separated: nats, websocket",
+                        "name": "routes",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the script",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "A connection is unknown or the token does not allow it",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "The token is not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too many tokens that are not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/join.yaml": {
+            "get": {
+                "description": "Returns the script that installs a worker and joins it to this cluster: join.sh for Linux and macOS (installs the binary through install.sh in worker mode, writes a systemd unit or a launchd daemon, keeps the settings in a root-only file), join.ps1 for Windows, join.yaml for Kubernetes (a Secret and a StatefulSet with a volume for the state directory). Public, but answers only for a join token that exists and is not expired, revoked or used up; the answer is the same 404 for every other token. Serving the script does not spend the token.",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Join script for a worker",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "join token",
+                        "name": "t",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "connections of the worker, comma separated: nats, websocket",
+                        "name": "routes",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the script",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "A connection is unknown or the token does not allow it",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "The token is not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too many tokens that are not valid",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
                     }
                 }
             }
@@ -15649,6 +22367,45 @@ const docTemplate = `{
                 }
             }
         },
+        "addons.HostGrantsQueueBody": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gateway.HostGrantsQueueRequest"
+                    }
+                }
+            }
+        },
+        "addons.HostGrantsQueueItem": {
+            "type": "object",
+            "properties": {
+                "addonId": {
+                    "type": "string"
+                },
+                "error": {
+                    "$ref": "#/definitions/addons.AddonError"
+                },
+                "jobId": {
+                    "type": "string"
+                },
+                "operationId": {
+                    "type": "string"
+                }
+            }
+        },
+        "addons.HostGrantsQueueResult": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/addons.HostGrantsQueueItem"
+                    }
+                }
+            }
+        },
         "addons.OperationStatus": {
             "type": "object",
             "properties": {
@@ -15895,6 +22652,18 @@ const docTemplate = `{
                     "description": "ManagementURL opens the management view of the addon.",
                     "type": "string",
                     "example": "/app/addons?manage=notes"
+                },
+                "official": {
+                    "type": "boolean"
+                },
+                "signer": {
+                    "description": "Signer is the identity that signed the package, shown only when the\nreceipt says the signature was checked and the package is not official.",
+                    "type": "string"
+                },
+                "sourceId": {
+                    "description": "SourceID is the library the package came from, and Official is true\nwhen that is the official library and the signature was checked. An\nadministrator who approves something for the add-on, such as its OAuth\nlogin, is warned when it is not.",
+                    "type": "string",
+                    "example": "official"
                 }
             }
         },
@@ -15958,9 +22727,26 @@ const docTemplate = `{
                     "type": "string",
                     "example": "2026-10-30T09:15:00Z"
                 },
+                "language": {
+                    "description": "Language, LocalizedTitle and LocalizedDescription are present only when\nthe request named a language (the lang query parameter, else the\nAccept-Language header) that the manifest translates. Language is the\ntag that matched. Each localized field falls back to English on its own,\nso a title without a translation is the English title. No other field\nchanges: Title and Description stay the default-language text.",
+                    "type": "string",
+                    "example": "it"
+                },
                 "launchMode": {
                     "type": "string",
                     "example": "always"
+                },
+                "localizedDescription": {
+                    "type": "string",
+                    "example": "Tieni degli appunti."
+                },
+                "localizedSetup": {
+                    "type": "string",
+                    "example": "un token di accesso"
+                },
+                "localizedTitle": {
+                    "type": "string",
+                    "example": "Appunti"
                 },
                 "mainPage": {
                     "description": "MainPage is the path the Open action navigates to. It is present only\nfor an enabled addon whose manifest declares a main page that is one of\nits pages.",
@@ -15978,6 +22764,37 @@ const docTemplate = `{
                             "$ref": "#/definitions/apps.NetworkView"
                         }
                     ]
+                },
+                "oauth": {
+                    "description": "OAuth is present when the credential slot is of kind oauth2: the host\nlogs the person in to the service. It names the scopes, so the person\ncan choose the optional ones when they connect, and tells the\nadministrator's Settings tab to draw the form that approves the login.\nThe addresses of the login are not here: an administrator reads them\nwith the OAuth client.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/apps.OAuthView"
+                        }
+                    ]
+                },
+                "operation": {
+                    "description": "Operation is the lifecycle operation that runs on the add-on now (an\nupgrade, say). It is absent when none runs. The observation is\nseparate from State: the process can run on while the owner stages\nthe next generation.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/apps.Operation"
+                        }
+                    ]
+                },
+                "ownerData": {
+                    "description": "OwnerData is true when the manifest says the tools keep the owner's own\ndata (capabilities.ownerData). Its writes need tools.write in a\nconnector chat, like the writes of a credentialed add-on.",
+                    "type": "boolean"
+                },
+                "setup": {
+                    "description": "Setup says in one short phrase what the person needs before the add-on\nworks, such as \"an access token\". It is English plain text, absent when\nthe manifest declares none. Setups carries the translations by BCP 47\ntag and LocalizedSetup follows the rule of LocalizedTitle; it is absent\nwhen the add-on has no setup text.",
+                    "type": "string",
+                    "example": "an access token"
+                },
+                "setups": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 },
                 "shadows": {
                     "description": "Shadows lists the built-in chat tools the add-on replaces (bash, say).",
@@ -16178,6 +22995,56 @@ const docTemplate = `{
                 }
             }
         },
+        "apps.OAuthView": {
+            "type": "object",
+            "properties": {
+                "optionalScopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "write"
+                    ]
+                },
+                "requiredScopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "read"
+                    ]
+                }
+            }
+        },
+        "apps.Operation": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "description": "Kind is the action: install, upgrade, enable, disable or uninstall.",
+                    "type": "string",
+                    "enum": [
+                        "install",
+                        "upgrade",
+                        "enable",
+                        "disable",
+                        "uninstall"
+                    ],
+                    "example": "upgrade"
+                },
+                "phase": {
+                    "description": "Phase is the step the owner is in: queued, downloading (fetch and\nverify the package), backing-up, installing, migrating, starting or\nworking for a step without a name of its own.",
+                    "type": "string",
+                    "example": "downloading"
+                },
+                "since": {
+                    "description": "Since is when the operation was accepted, RFC 3339 in UTC. It is absent\nfor an operation recorded before the owner kept the time.",
+                    "type": "string",
+                    "example": "2026-11-04T17:18:00Z"
+                }
+            }
+        },
         "apps.SlotView": {
             "type": "object",
             "properties": {
@@ -16251,7 +23118,8 @@ const docTemplate = `{
                         "type": "string",
                         "enum": [
                             "network-policy",
-                            "tool-providers"
+                            "tool-providers",
+                            "sandbox-profiles"
                         ]
                     },
                     "example": [
@@ -16361,6 +23229,162 @@ const docTemplate = `{
                 }
             }
         },
+        "backendupdates.AutoUpdate": {
+            "type": "object",
+            "properties": {
+                "backends": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "backendupdates.Item": {
+            "type": "object",
+            "properties": {
+                "availableDigest": {
+                    "type": "string"
+                },
+                "availableVersion": {
+                    "type": "string"
+                },
+                "driftNodes": {
+                    "type": "integer"
+                },
+                "heldBack": {
+                    "description": "HeldBack is true when the automatic update does not take this\nrelease: the same release already rolled back, or failed because it\ndoes not work here, in a recent upgrade run. A manual update still\ncan. It goes away when the gallery lists another release.",
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "installedDigest": {
+                    "type": "string"
+                },
+                "installedVersion": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "nodes": {
+                    "description": "Nodes is every node that reports the backend (cluster only).\nDriftNodes is the subset that differs from the majority.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/backendupdates.Node"
+                    }
+                },
+                "reason": {
+                    "description": "Reason is why the backend is flagged when version and digest alone\nwould not flag it (the stale reason).",
+                    "type": "string"
+                },
+                "signed": {
+                    "type": "boolean"
+                },
+                "sourceId": {
+                    "description": "SourceID and Signed are set on library items.",
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                }
+            }
+        },
+        "backendupdates.Node": {
+            "type": "object",
+            "properties": {
+                "digest": {
+                    "type": "string"
+                },
+                "drift": {
+                    "description": "Drift is true when the node differs from the cluster majority.",
+                    "type": "boolean"
+                },
+                "models": {
+                    "description": "Models are the models loaded on this node whose recorded backend is\nthis one. The registry records the backend a model was loaded with,\nwhich can be empty or a different name than the installed variant, so\nan empty list does not prove that nothing would stop.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "nodeId": {
+                    "type": "string"
+                },
+                "nodeName": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "backendupdates.Snapshot": {
+            "type": "object",
+            "properties": {
+                "autoUpdate": {
+                    "$ref": "#/definitions/backendupdates.AutoUpdate"
+                },
+                "checkedAt": {
+                    "description": "CheckedAt is the latest check of any source; zero (omitted) before the\nfirst check.",
+                    "type": "string"
+                },
+                "installsDisabled": {
+                    "description": "InstallsDisabled is true when this server refuses backend installs, so\nno item can be updated here.",
+                    "type": "boolean"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/backendupdates.Item"
+                    }
+                },
+                "sources": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/backendupdates.Source"
+                    }
+                },
+                "throttled": {
+                    "description": "Throttled is set by a check-now call that was answered from a check\nthat ran a few seconds ago.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "backendupdates.Source": {
+            "type": "object",
+            "properties": {
+                "checkedAt": {
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error is the error of the last check, empty when it succeeded.",
+                    "type": "string"
+                },
+                "lastSuccessAt": {
+                    "type": "string"
+                },
+                "note": {
+                    "description": "Note states a limit of what the source can see.",
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason says why a source is disabled.",
+                    "type": "string"
+                },
+                "stale": {
+                    "description": "Stale is true when the items of this source come from an older check\nthan CheckedAt, because the last one failed.",
+                    "type": "boolean"
+                },
+                "state": {
+                    "description": "State is ok, failed, never or disabled.",
+                    "type": "string"
+                }
+            }
+        },
         "builtin.Entry": {
             "type": "object",
             "properties": {
@@ -16396,6 +23420,22 @@ const docTemplate = `{
                 "KindPage"
             ]
         },
+        "carrier.BusState": {
+            "type": "object",
+            "properties": {
+                "bus": {
+                    "description": "Bus is the bus that the process publishes on now: BusNATS or BusPostgres.",
+                    "type": "string"
+                },
+                "nats_configured": {
+                    "description": "NATSConfigured says that the cluster has a NATS server, and NATSConnected\nthat the process reaches it.",
+                    "type": "boolean"
+                },
+                "nats_connected": {
+                    "type": "boolean"
+                }
+            }
+        },
         "catalog.Kind": {
             "type": "string",
             "enum": [
@@ -16420,8 +23460,12 @@ const docTemplate = `{
                 "count": {
                     "type": "integer"
                 },
+                "error": {
+                    "description": "Error is why the latest fetch failed, as the owner log says it. It is\nempty when the fetch worked. LastSuccess says when the library last\nloaded, if it ever did.",
+                    "type": "string"
+                },
                 "failed": {
-                    "description": "Failed is true when the latest fetch failed; the previous releases are\nnot served in that case.",
+                    "description": "Failed is true when the latest fetch failed; the previous releases are\nnot served in that case. Other libraries are not affected: a listing\nstill answers with what they loaded and names this one in Page.Failed.",
                     "type": "boolean"
                 },
                 "lastSuccess": {
@@ -16446,7 +23490,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "identityRegex": {
-                    "description": "IdentityRegex is an anchored pattern for the signer identity, used\ninstead of Identity so that master and tagged builds both verify. Only a\nlibrary that serves backends may use it; an add-on install refuses it.",
+                    "description": "IdentityRegex is an anchored pattern for the signer identity, used\ninstead of Identity so that master and tagged builds both verify. A\nbackend install accepts it alone. An add-on install and an oci:// add-on\nlibrary accept it only with SourceRepository: a shared signing workflow\nsigns for every repository that calls it, so the pattern alone would\nadmit a signature made for any of them.",
                     "type": "string"
                 },
                 "issuer": {
@@ -16454,8 +23498,39 @@ const docTemplate = `{
                 },
                 "requireSignature": {
                     "type": "boolean"
+                },
+                "sourceRepository": {
+                    "description": "SourceRepository pins the repository the signature was made for: an\nhttps URL compared exactly with the source-repository extension of the\nsigning certificate, such as https://github.com/\u003cowner\u003e/\u003crepo\u003e. It is\nvalid only when a signature is required.",
+                    "type": "string"
                 }
             }
+        },
+        "cluster.CarrierWeights": {
+            "type": "object",
+            "properties": {
+                "nats": {
+                    "type": "integer"
+                },
+                "p2p": {
+                    "type": "integer"
+                },
+                "websocket": {
+                    "type": "integer"
+                }
+            }
+        },
+        "config.FailoverPolicy": {
+            "type": "string",
+            "enum": [
+                "priority",
+                "least_busy",
+                "round_robin"
+            ],
+            "x-enum-varnames": [
+                "FailoverPolicyPriority",
+                "FailoverPolicyLeastBusy",
+                "FailoverPolicyRoundRobin"
+            ]
         },
         "config.Gallery": {
             "type": "object",
@@ -16542,11 +23617,13 @@ const docTemplate = `{
             "type": "string",
             "enum": [
                 "user",
+                "project",
                 "agent",
                 "channel"
             ],
             "x-enum-varnames": [
                 "ScopeUser",
+                "ScopeProject",
                 "ScopeAgent",
                 "ScopeChannel"
             ]
@@ -16558,14 +23635,18 @@ const docTemplate = `{
                 "profile",
                 "skill",
                 "page",
-                "dashboard"
+                "dashboard",
+                "knowledge",
+                "voice_profile"
             ],
             "x-enum-varnames": [
                 "ChangeMemory",
                 "ChangeProfile",
                 "ChangeSkill",
                 "ChangePage",
-                "ChangeDashboard"
+                "ChangeDashboard",
+                "ChangeKnowledge",
+                "ChangeVoiceProfile"
             ]
         },
         "contract.ChangeProposal": {
@@ -16602,6 +23683,14 @@ const docTemplate = `{
                 "owner": {
                     "type": "string"
                 },
+                "project_node": {
+                    "description": "ProjectNode is the identity of the shared project folder a proposal with\na Proposer is for. The host checks again, when the Owner confirms, that\nthe Proposer still has write access to that folder. Zero otherwise.",
+                    "type": "integer"
+                },
+                "proposer": {
+                    "description": "Proposer is the person who made the proposal when it is not the Owner:\nsomeone a project is shared with, who proposes a note for it. Owner is\nstill the person whose home the change writes and the only one who can\nconfirm. A host that stores the record keeps the account here; a host\nthat sends it to the Owner shows a display name instead, never an\naccount. Empty for a proposal the Owner's own chat made.",
+                    "type": "string"
+                },
                 "rev": {
                     "description": "Rev is the workspace change set that applying wrote; RevertRev the one\nthat reverting wrote. Zero until then.",
                     "type": "integer"
@@ -16626,6 +23715,10 @@ const docTemplate = `{
                 },
                 "v": {
                     "type": "integer"
+                },
+                "warning": {
+                    "description": "Warning is set by the host when the text of a proposal looks risky, as a\nstable code (see the Warning constants). The owner still sees the text,\nwith a warning, and can confirm it in the web interface; a messaging chat\ncannot confirm it. The host works it out when it reads the proposal and\ndoes not keep it.",
+                    "type": "string"
                 }
             }
         },
@@ -16634,12 +23727,14 @@ const docTemplate = `{
             "enum": [
                 "user",
                 "agent",
-                "channel"
+                "channel",
+                "project"
             ],
             "x-enum-varnames": [
                 "ScopeUser",
                 "ScopeAgent",
-                "ScopeChannel"
+                "ScopeChannel",
+                "ScopeProject"
             ]
         },
         "contract.ChangeSource": {
@@ -16652,6 +23747,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "kind": {
+                    "type": "string"
+                },
+                "sender": {
+                    "description": "Sender is the platform ID of the sender whose message made a connector\nchat propose this change. The host keeps it so that, in a shared chat,\nonly that sender can answer the proposal there.",
                     "type": "string"
                 },
                 "thread": {
@@ -16686,6 +23785,13 @@ const docTemplate = `{
                     "description": "Note is one plain sentence for the model when the provider reports\nisolated execution, such as the programs its environment has.",
                     "type": "string"
                 },
+                "profiles": {
+                    "description": "Profiles are the environments the provider can run commands in. The\nfirst one is the fallback and has the ID FallbackProfile. When there\nare profiles, the host builds the note for the model from the profile\nof the chat and Note is not used.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/contract.ExecutionProfile"
+                    }
+                },
                 "skills": {
                     "description": "Skills says which skills run on this provider.",
                     "allOf": [
@@ -16697,6 +23803,40 @@ const docTemplate = `{
                 "title": {
                     "description": "Title names the provider in the text the host shows the person and the\nmodel, for example \"Sandbox\". It falls back to the add-on's title.",
                     "type": "string"
+                }
+            }
+        },
+        "contract.ExecutionProfile": {
+            "type": "object",
+            "properties": {
+                "cpus": {
+                    "description": "CPUs, MemoryMiB and DiskMiB are the limits of one sandbox.",
+                    "type": "integer"
+                },
+                "description": {
+                    "description": "Description says what the profile is for, in one sentence.",
+                    "type": "string"
+                },
+                "diskMiB": {
+                    "type": "integer"
+                },
+                "id": {
+                    "description": "ID is a short lower case name, such as base or media.",
+                    "type": "string"
+                },
+                "memoryMiB": {
+                    "type": "integer"
+                },
+                "title": {
+                    "description": "Title is the name the person sees.",
+                    "type": "string"
+                },
+                "tools": {
+                    "description": "Tools are the programs the environment has. The provider's image build\nfails when one of them is missing (see ProfileTool.Check).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/contract.ProfileTool"
+                    }
                 }
             }
         },
@@ -16726,6 +23866,20 @@ const docTemplate = `{
                 }
             }
         },
+        "contract.ModelSearchText": {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/contract.SearchFilterText"
+                    }
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
         "contract.NetworkPreset": {
             "type": "object",
             "properties": {
@@ -16751,6 +23905,26 @@ const docTemplate = `{
                 },
                 "size": {
                     "type": "integer"
+                }
+            }
+        },
+        "contract.ProfileTool": {
+            "type": "object",
+            "properties": {
+                "check": {
+                    "description": "Check are the commands the image build runs to prove the tool works,\neach a program name with its version flags, for example \"jq --version\".",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "detail": {
+                    "description": "Detail is an optional short remark, for example the libraries of Python.",
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is how the model and the person read it, for example ffmpeg.",
+                    "type": "string"
                 }
             }
         },
@@ -16871,6 +24045,67 @@ const docTemplate = `{
                 }
             }
         },
+        "contract.SearchFilter": {
+            "type": "object",
+            "properties": {
+                "default": {
+                    "description": "Default is a string (enum, text), a bool or a number (range)."
+                },
+                "help": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "max": {
+                    "type": "number"
+                },
+                "maxLength": {
+                    "description": "MaxLength bounds a text filter; zero means MaxFilterTextLength.",
+                    "type": "integer"
+                },
+                "min": {
+                    "description": "Min, Max, Step and Unit describe a range filter.",
+                    "type": "number"
+                },
+                "step": {
+                    "type": "number"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "unit": {
+                    "type": "string"
+                },
+                "values": {
+                    "description": "Values are the choices of an enum filter.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "contract.SearchFilterText": {
+            "type": "object",
+            "properties": {
+                "help": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "values": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "contract.SkillDefinition": {
             "type": "object",
             "properties": {
@@ -16926,9 +24161,21 @@ const docTemplate = `{
                     "description": "Approval, when it is ApprovalAlways, is a ceiling the person cannot lift:\nthe host stores a proposal for a write tool of this kind and applies it\nonly when a person confirms it at a host surface. A chat or an agent\nnever applies it, even when the person allowed writes without asking.\nOnly a write tool may set it.",
                     "type": "string"
                 },
+                "approvalOverridable": {
+                    "description": "ApprovalOverridable lets the person relax Approval to \"ask never\" for\nthis tool, and nothing else. The choice is a user setting that the\nmanifest declares under ApprovalSettingKey(Name), with the values\nApprovalAsk and ApprovalSkip and the default ApprovalAsk, so the answer\nis the person's own, written from their own browser session only. The\nhost honors ApprovalSkip only for a call that the person makes in their\nown chat, or that a sender paired with the person's bot makes in a\nmessaging chat. Every other caller, and every call without a chat,\nstill waits for a confirmation. Only a tool with Approval \"always\" may\nset it.",
+                    "type": "boolean"
+                },
+                "deferred": {
+                    "description": "Deferred says that a chat offers this tool through the tool search\n(tool_search, tool_describe and tool_call) instead of as a typed tool, so\nits schema is not sent on every turn. It changes the model's prompt only:\nthe tool keeps its name, its kind, its role check and its approval, and\npages, MCP clients, agents and triggers list it as before. It is refused\non a UIOnly tool, which no model is offered, and on a tool that Shadows a\nbuilt-in one, which must keep its name.",
+                    "type": "boolean"
+                },
                 "description": {
                     "description": "Description is plain text for the model.",
                     "type": "string"
+                },
+                "enumerates": {
+                    "description": "Enumerates marks a read tool that lists what the credential reaches, such\nas the repositories of a token. It names no resource, so the host cannot\nhold it to the person's list: it runs only for a binding whose list is\nthe wildcard * (see ConnectorKind.WildcardResources), and is refused for\nany other.",
+                    "type": "boolean"
                 },
                 "execution": {
                     "description": "Execution declares that this tool runs commands and what the host may\nsay about the provider. Only a tool that shadows bash may declare it.",
@@ -16952,6 +24199,17 @@ const docTemplate = `{
                 },
                 "shadows": {
                     "description": "Shadows names a built-in chat tool that this tool replaces. When the\nadd-on is installed, running and on for a chat, the model sees one tool\nunder that name, served by the add-on, and the built-in one is hidden.\nOnly a name in ReplaceableTools may be shadowed. A tool without it keeps\nits add-on name (addon__\u003cid\u003e__\u003ctool\u003e).",
+                    "type": "string"
+                },
+                "summaryFields": {
+                    "description": "SummaryFields name keys of the sample that the add-on's preview returns\n(the facts it shows the person who confirms). The host may repeat the\nscalar values of those keys, cut short, in the chat where a call waits\nfor a confirmation. Only the add-on knows which facts are safe to show\nthere; a key that is not listed is never shown in a chat. At most\nMaxSummaryFields keys.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "title": {
+                    "description": "Title is the name of the tool in plain words (\"Open an issue\"), for a\nperson who reads that a call waits for them in a chat. Only a write,\nschema or create tool may set it. A tool without one is named by its\ntool name.",
                     "type": "string"
                 },
                 "uiOnly": {
@@ -17023,6 +24281,9 @@ const docTemplate = `{
                 "pinned": {
                     "type": "string"
                 },
+                "policy": {
+                    "$ref": "#/definitions/config.FailoverPolicy"
+                },
                 "state": {
                     "$ref": "#/definitions/failover.ChainState"
                 },
@@ -17064,6 +24325,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "consecutive_ok": {
+                    "type": "integer"
+                },
+                "constrained": {
+                    "description": "Constrained targets are tried last by a balanced chain.",
+                    "type": "boolean"
+                },
+                "drained": {
+                    "description": "Drained targets take no new request.",
+                    "type": "boolean"
+                },
+                "in_flight": {
+                    "description": "InFlight is the number of requests of this server that the target\nserves now. It is not shared between frontends.",
                     "type": "integer"
                 },
                 "kind": {
@@ -17348,6 +24621,26 @@ const docTemplate = `{
                 }
             }
         },
+        "gallery.NodeVersionInfo": {
+            "type": "object",
+            "properties": {
+                "digest": {
+                    "type": "string"
+                },
+                "node_id": {
+                    "type": "string"
+                },
+                "node_name": {
+                    "type": "string"
+                },
+                "node_status": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
         "gallery.StorageFile": {
             "type": "object",
             "properties": {
@@ -17421,6 +24714,13 @@ const docTemplate = `{
                         "$ref": "#/definitions/gallery.NodeDriftInfo"
                     }
                 },
+                "nodes": {
+                    "description": "Nodes lists every node that reports this backend, with the version it\nhas, so a view of one backend can show the nodes that are current too.\nEmpty in single-node mode.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gallery.NodeVersionInfo"
+                    }
+                },
                 "reason": {
                     "description": "Reason says why the backend is flagged when version and digest alone\nwould not flag it: the backend failed a request in a way that shows it\nis older than the server. Empty for ordinary version or digest upgrades.",
                     "type": "string"
@@ -17443,6 +24743,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "error": {
+                    "type": "string"
+                },
+                "error_key": {
+                    "description": "ErrorKey is the gallery.UpgradeFailureCode of a failed backend upgrade\non this node (status error or rolled_back).",
                     "type": "string"
                 },
                 "file_name": {
@@ -17489,6 +24793,10 @@ const docTemplate = `{
                 "downloaded_size": {
                     "type": "string"
                 },
+                "error_key": {
+                    "description": "ErrorKey is the stable code of a failed backend upgrade (the string\nof a gallery.UpgradeFailureCode), next to the text of the failure. It\nis empty for every other outcome. Readers branch on it, never on the\nmessage.",
+                    "type": "string"
+                },
                 "file_name": {
                     "type": "string"
                 },
@@ -17517,8 +24825,20 @@ const docTemplate = `{
                 "progress": {
                     "type": "number"
                 },
+                "rolled_back": {
+                    "description": "RolledBack is true for a failed backend upgrade (or forced install)\nwhose new build did not start and whose previous build was put back:\nthe backend still runs the version it ran before. On a cluster it is\ntrue when every node that failed rolled back.",
+                    "type": "boolean"
+                },
                 "total_bytes": {
                     "type": "integer"
+                },
+                "unconfirmed": {
+                    "description": "Unconfirmed is true for a backend upgrade whose outcome is not known:\na worker did not reply (a timeout, or a link that broke after it took\nthe request). It is neither a failure nor a success; a later check of\nthe node decides.",
+                    "type": "boolean"
+                },
+                "upgrade": {
+                    "description": "Upgrade is true if the operation re-installs a backend to move it to a\nnewer build. Without it an upgrade reads as an install: the UI needs the\ndifference for its wording and for what Retry has to call.",
+                    "type": "boolean"
                 }
             }
         },
@@ -18231,8 +25551,18 @@ const docTemplate = `{
                 "digest": {
                     "type": "string"
                 },
+                "fromIndex": {
+                    "description": "FromIndex is true when the requested operations come from the library\nindex, with no download. The install then holds the add-on, and asks\nagain, when its verified manifest requests anything not listed here.",
+                    "type": "boolean"
+                },
                 "installed": {
                     "type": "boolean"
+                },
+                "locked": {
+                    "type": "boolean"
+                },
+                "lockedReason": {
+                    "type": "string"
                 },
                 "nonce": {
                     "type": "string"
@@ -18255,7 +25585,41 @@ const docTemplate = `{
                 "revision": {
                     "type": "integer"
                 },
+                "signer": {
+                    "type": "string"
+                },
                 "title": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "gateway.HostGrantsQueueRequest": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "description": "Action is install (the default) or upgrade.",
+                    "type": "string"
+                },
+                "addonId": {
+                    "type": "string"
+                },
+                "approve": {
+                    "$ref": "#/definitions/gateway.HostGrantsApprove"
+                },
+                "candidateDigest": {
+                    "type": "string"
+                },
+                "expectedDigest": {
+                    "description": "ExpectedDigest and CandidateDigest pin an upgrade; both or neither.",
+                    "type": "string"
+                },
+                "operationId": {
+                    "type": "string"
+                },
+                "sourceId": {
                     "type": "string"
                 },
                 "version": {
@@ -18294,6 +25658,10 @@ const docTemplate = `{
                 },
                 "locked": {
                     "type": "boolean"
+                },
+                "lockedReason": {
+                    "description": "LockedReason is LockedByDeployment or LockedNoAuth when Locked.",
+                    "type": "string"
                 },
                 "revision": {
                     "type": "integer"
@@ -18453,6 +25821,10 @@ const docTemplate = `{
                 },
                 "generation": {
                     "type": "integer"
+                },
+                "hold": {
+                    "description": "Hold says why it awaits a person: write_mode_propose (the connection is\nin the mode that only proposes) or approval_always (the tool always asks).",
+                    "type": "string"
                 },
                 "id": {
                     "description": "ID is the proposal identifier. It is the operation identifier of the\nstored operation, so a lost reply is always resolved by the same ID.",
@@ -18754,6 +26126,124 @@ const docTemplate = `{
                 }
             }
         },
+        "gateway.SetShareRequest": {
+            "type": "object",
+            "properties": {
+                "operationId": {
+                    "description": "OperationID is optional. It is returned with outcome_unknown, and the\nchange is safe to repeat.",
+                    "type": "string",
+                    "example": "share-1"
+                },
+                "role": {
+                    "description": "Role is one of the roles the kind grants, for example use or manage.\nThe owner role cannot be granted.",
+                    "type": "string",
+                    "example": "use"
+                }
+            }
+        },
+        "gateway.ShareIndex": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "type": "boolean"
+                },
+                "kind": {
+                    "type": "string",
+                    "example": "example:note"
+                },
+                "owned": {
+                    "description": "Owned lists the resources the caller owns, at most 100.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gateway.SharedResource"
+                    }
+                },
+                "roles": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "use",
+                        "manage"
+                    ]
+                },
+                "shared": {
+                    "description": "Shared lists the resources shared with the caller, at most 100.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gateway.SharedResource"
+                    }
+                },
+                "truncated": {
+                    "description": "Truncated says that one of the lists has more than it shows.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "gateway.ShareList": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "description": "Everyone says whether the kind may be shared with every account.",
+                    "type": "boolean"
+                },
+                "grants": {
+                    "description": "Grants lists the grants. A grant to every account has the user ID\n@everyone and no display name.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gateway.Grant"
+                    }
+                },
+                "kind": {
+                    "type": "string",
+                    "example": "example:note"
+                },
+                "resourceId": {
+                    "type": "string",
+                    "example": "r0123456789abcdef0123456789abcde"
+                },
+                "roles": {
+                    "description": "Roles are the roles the kind grants, in the order the kind declares.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "use",
+                        "manage"
+                    ]
+                }
+            }
+        },
+        "gateway.SharedResource": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "description": "Everyone says that the role comes from a grant to every account.",
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "r0123456789abcdef0123456789abcde"
+                },
+                "owner": {
+                    "description": "Owner is the display name of the owner. It is absent for the owner.",
+                    "type": "string",
+                    "example": "Alice"
+                },
+                "role": {
+                    "description": "Role is the caller's own role: owner or a role the kind grants.",
+                    "type": "string",
+                    "example": "use"
+                },
+                "sharedWith": {
+                    "description": "SharedWith is the number of grants, the grant to every account\nincluded. It is present for the owner only.",
+                    "type": "integer",
+                    "example": 2
+                }
+            }
+        },
         "gateway.UndoRequest": {
             "type": "object",
             "properties": {
@@ -19002,6 +26492,76 @@ const docTemplate = `{
                 }
             }
         },
+        "localai.ClusterSettingsRequest": {
+            "type": "object",
+            "properties": {
+                "carrier_weights": {
+                    "description": "CarrierWeights sets some or all of nats, websocket and p2p, each a whole\nnumber from 0 to 1000. A key that is absent stays as it is, null puts the\ndefault back, and a key that is not one of the three is refused.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
+                "join_auto_approve": {
+                    "description": "JoinAutoApprove sets the default of the auto-approve choice of a new join\ntoken. null puts the default (off) back.",
+                    "type": "boolean"
+                },
+                "nats_url": {
+                    "type": "string"
+                },
+                "nats_worker_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.ClusterSettingsResponse": {
+            "type": "object",
+            "properties": {
+                "bus": {
+                    "description": "Bus is the broadcast bus of the frontend that answers, read from its own\nconnection: NATS while it reaches the NATS server, PostgreSQL otherwise.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/carrier.BusState"
+                        }
+                    ]
+                },
+                "carrier_weights": {
+                    "description": "CarrierWeights are the weights that break a tie between equally fit nodes\nreached over different carriers (nats, websocket, p2p). A weight that is not\nstored is the default, so these are always the values in force.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/cluster.CarrierWeights"
+                        }
+                    ]
+                },
+                "carrier_weights_default": {
+                    "description": "CarrierWeightsDefault are the weights that apply when none is stored.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/cluster.CarrierWeights"
+                        }
+                    ]
+                },
+                "join_auto_approve": {
+                    "description": "JoinAutoApprove is the default of the auto-approve choice of a new join\ntoken: when true, a worker that registers with such a token joins with no\nadmin approval. Off unless set.",
+                    "type": "boolean"
+                },
+                "nats_url": {
+                    "description": "NATSURL is the NATS address that the frontends use.",
+                    "type": "string"
+                },
+                "nats_worker_url": {
+                    "description": "NATSWorkerURL is the NATS address that workers are told to use. Empty means NATSURL.",
+                    "type": "string"
+                },
+                "replicas": {
+                    "description": "Replicas are the live frontend replicas.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/localai.ReplicaView"
+                    }
+                }
+            }
+        },
         "localai.FailoverChainsResponse": {
             "type": "object",
             "properties": {
@@ -19018,6 +26578,56 @@ const docTemplate = `{
             "properties": {
                 "target": {
                     "type": "string"
+                }
+            }
+        },
+        "localai.FederationDrainRequest": {
+            "type": "object",
+            "properties": {
+                "drain": {
+                    "description": "Drain true stops new requests to the model; false starts them again.",
+                    "type": "boolean"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.FederationGroupRequest": {
+            "type": "object",
+            "properties": {
+                "members": {
+                    "description": "Members are the model names that serve the group: a model of this\nserver or an entry of a remote. At least two.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "description": "Name is the model name clients use for the group.",
+                    "type": "string"
+                },
+                "policy": {
+                    "description": "Policy is least_busy (default) or round_robin.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.FailoverPolicy"
+                        }
+                    ]
+                }
+            }
+        },
+        "localai.FederationGroupUpdateRequest": {
+            "type": "object",
+            "properties": {
+                "members": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "policy": {
+                    "$ref": "#/definitions/config.FailoverPolicy"
                 }
             }
         },
@@ -19116,6 +26726,84 @@ const docTemplate = `{
                 }
             }
         },
+        "localai.JoinCommands": {
+            "type": "object",
+            "properties": {
+                "docker": {
+                    "description": "Docker runs the worker as one container.",
+                    "type": "string"
+                },
+                "docker_compose": {
+                    "description": "DockerCompose is a compose file with one worker service.",
+                    "type": "string"
+                },
+                "install_script": {
+                    "description": "InstallScript installs the binary and a service on a Linux or macOS host.",
+                    "type": "string"
+                },
+                "kubernetes": {
+                    "description": "Kubernetes applies a Secret and a StatefulSet.",
+                    "type": "string"
+                },
+                "manual": {
+                    "description": "Manual starts a worker from a binary that is already installed.",
+                    "type": "string"
+                },
+                "windows": {
+                    "description": "Windows installs the binary and a service on a Windows host (PowerShell).",
+                    "type": "string"
+                }
+            }
+        },
+        "localai.JoinTokenView": {
+            "type": "object",
+            "properties": {
+                "auto_approve": {
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "created_by": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "last_used_at": {
+                    "type": "string"
+                },
+                "max_uses": {
+                    "type": "integer"
+                },
+                "revoked_at": {
+                    "type": "string"
+                },
+                "revoked_by": {
+                    "type": "string"
+                },
+                "routes": {
+                    "description": "nats, websocket; empty means any",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "state": {
+                    "description": "unused, partly_used, used_up, expired or revoked",
+                    "type": "string"
+                },
+                "uses": {
+                    "type": "integer"
+                }
+            }
+        },
         "localai.LibrarySourcesResponse": {
             "type": "object",
             "properties": {
@@ -19127,6 +26815,95 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/library.Info"
                     }
+                }
+            }
+        },
+        "localai.MintJoinTokenRequest": {
+            "type": "object",
+            "properties": {
+                "auto_approve": {
+                    "description": "AutoApprove makes the worker that uses the token join with no admin step.",
+                    "type": "boolean"
+                },
+                "label": {
+                    "description": "Label is a note for the list, for example the name of the machine.",
+                    "type": "string"
+                },
+                "routes": {
+                    "description": "Routes limits the connections of the worker: nats, websocket. Empty allows any.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ttl_seconds": {
+                    "description": "TTLSeconds is how long the token is good for, up to 86400 (24 hours).",
+                    "type": "integer"
+                },
+                "uses": {
+                    "description": "Uses is how many workers may register with it, up to 100. Use more than\none for Kubernetes and Compose, where several replicas start together.",
+                    "type": "integer"
+                }
+            }
+        },
+        "localai.MintJoinTokenResponse": {
+            "type": "object",
+            "properties": {
+                "auto_approve": {
+                    "type": "boolean"
+                },
+                "commands": {
+                    "description": "Commands are ready to copy, one for each way to run a worker.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/localai.JoinCommands"
+                        }
+                    ]
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "created_by": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "last_used_at": {
+                    "type": "string"
+                },
+                "max_uses": {
+                    "type": "integer"
+                },
+                "revoked_at": {
+                    "type": "string"
+                },
+                "revoked_by": {
+                    "type": "string"
+                },
+                "routes": {
+                    "description": "nats, websocket; empty means any",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "state": {
+                    "description": "unused, partly_used, used_up, expired or revoked",
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Token is the plain token. It is shown once.",
+                    "type": "string"
+                },
+                "uses": {
+                    "type": "integer"
                 }
             }
         },
@@ -19166,6 +26943,26 @@ const docTemplate = `{
                 },
                 "success": {
                     "type": "boolean"
+                }
+            }
+        },
+        "localai.ModelUpgradeRunResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "jobID": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "run": {
+                    "$ref": "#/definitions/upgraderun.Run"
+                },
+                "status_url": {
+                    "type": "string"
                 }
             }
         },
@@ -19220,6 +27017,267 @@ const docTemplate = `{
                 }
             }
         },
+        "localai.RecommendedHardwareInfo": {
+            "type": "object",
+            "properties": {
+                "detected": {
+                    "description": "Detected is false when no memory figure could be read; the cpu tier is\nthen shown without a fit verdict.",
+                    "type": "boolean"
+                },
+                "kind": {
+                    "description": "Kind is \"gpu\", \"cpu\" or \"unknown\".",
+                    "type": "string"
+                },
+                "memory_bytes": {
+                    "description": "MemoryBytes is the per-device VRAM on a GPU host and the system memory\notherwise.",
+                    "type": "integer"
+                },
+                "node_name": {
+                    "type": "string"
+                },
+                "scope": {
+                    "description": "Scope is \"local\" or \"cluster\"; NodeName names the cluster node sized for.",
+                    "type": "string"
+                }
+            }
+        },
+        "localai.RecommendedModel": {
+            "type": "object",
+            "properties": {
+                "context_size": {
+                    "description": "ContextSize is the window the install will use. Pass it as the\ncontext_size parameter of the install route so the installed config\ncarries it. 0 when it could not be computed; then install without it.",
+                    "type": "integer"
+                },
+                "fit": {
+                    "description": "Fit is \"fits\", \"tight\", \"does_not_fit\" or \"unknown\".",
+                    "type": "string"
+                },
+                "fit_reasons": {
+                    "description": "FitReasons are stable keys a client turns into text.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "description": "ID is the gallery name; pass it to the install route.",
+                    "type": "string"
+                },
+                "installed": {
+                    "type": "boolean"
+                },
+                "license": {
+                    "type": "string"
+                },
+                "memory_bytes": {
+                    "description": "MemoryBytes is the estimated memory at ContextSize.",
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is the one-line reason the curated list gives.",
+                    "type": "string"
+                },
+                "role": {
+                    "description": "Role is \"default\" or \"alternative\", as the curated list has it.",
+                    "type": "string"
+                },
+                "size_bytes": {
+                    "description": "SizeBytes is the size of the weights to download.",
+                    "type": "integer"
+                }
+            }
+        },
+        "localai.RecommendedModelsResponse": {
+            "type": "object",
+            "properties": {
+                "hardware": {
+                    "$ref": "#/definitions/localai.RecommendedHardwareInfo"
+                },
+                "min_context": {
+                    "description": "MinContext and RecommendedContext are the chat windows the fit is judged by.",
+                    "type": "integer"
+                },
+                "models": {
+                    "description": "Models are ranked best first. The first one is the recommendation.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/localai.RecommendedModel"
+                    }
+                },
+                "nothing_fits": {
+                    "description": "NothingFits is true when no curated model fits the machine. Models then\nholds the smallest one, with a fit of does_not_fit.",
+                    "type": "boolean"
+                },
+                "recommended_context": {
+                    "type": "integer"
+                },
+                "tier": {
+                    "description": "Tier is the hardware tier: cpu, gpu-small, gpu-mid or gpu-large.",
+                    "type": "string"
+                }
+            }
+        },
+        "localai.RemoteAdoptRequest": {
+            "type": "object",
+            "properties": {
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.UpstreamModel"
+                    }
+                }
+            }
+        },
+        "localai.RemoteCreateRequest": {
+            "type": "object",
+            "properties": {
+                "allow_open_relay": {
+                    "description": "AllowOpenRelay accepts an invite that names an open relay.",
+                    "type": "boolean"
+                },
+                "api_key": {
+                    "description": "write-only",
+                    "type": "string"
+                },
+                "invite": {
+                    "description": "Invite is an invite link of kind remote (localai://pair?...).\nWrite-only: it is a one-time credential.",
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/remotes.Kind"
+                },
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.UpstreamModel"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.RemoteListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.Remote"
+                    }
+                }
+            }
+        },
+        "localai.RemoteResultResponse": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "phrase": {
+                    "description": "Phrase is the confirmation phrase of a remote added by invite: the\nother server shows the same words in its device list.",
+                    "type": "string"
+                },
+                "remote": {
+                    "$ref": "#/definitions/remotes.Remote"
+                },
+                "skipped": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.Skip"
+                    }
+                },
+                "warning": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.RemoteTestRequest": {
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "description": "write-only",
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/remotes.Kind"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.RemoteUpdateRequest": {
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "description": "write-only",
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.ReplicaView": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "last_seen": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.SearchSourcesRequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "description": "Enabled is the new enabled set of source IDs. The host stores the\nvisible sources that are not in it as the ones turned off. An empty list\nsearches nothing.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "localai.SetSplitServerRequest": {
+            "type": "object",
+            "properties": {
+                "split_server": {
+                    "description": "SplitServer declares the node a split server, or clears it.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "localai.SetSplitServerResponse": {
+            "type": "object",
+            "properties": {
+                "detached": {
+                    "description": "Detached is the number of split workers that were attached to the node\nand are now attached to no node.",
+                    "type": "integer"
+                },
+                "split_server": {
+                    "type": "boolean"
+                }
+            }
+        },
         "localai.TTSModelVoices": {
             "type": "object",
             "properties": {
@@ -19260,6 +27318,148 @@ const docTemplate = `{
                 "value": {
                     "description": "Value is the VRAM cap (\"80%\" or \"12GB\"). Empty string clears the cap.",
                     "type": "string"
+                }
+            }
+        },
+        "localai.UpgradeRunError": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "run_active"
+                },
+                "key": {
+                    "type": "string",
+                    "example": "gallery:kokoro"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "another upgrade run is running"
+                }
+            }
+        },
+        "localai.UpgradeRunList": {
+            "type": "object",
+            "properties": {
+                "runs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/upgraderun.Run"
+                    }
+                }
+            }
+        },
+        "localai.UpgradeRunPreview": {
+            "type": "object",
+            "properties": {
+                "active_run_id": {
+                    "description": "ActiveRunID is the run that runs now; a start is refused while it runs.",
+                    "type": "string"
+                },
+                "complete": {
+                    "description": "Complete is false when a source did not answer, so items may be\nmissing.",
+                    "type": "boolean"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/localai.UpgradeRunPreviewItem"
+                    }
+                },
+                "order": {
+                    "description": "Order is the keys in run order.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "localai.UpgradeRunPreviewItem": {
+            "type": "object",
+            "properties": {
+                "default_selected": {
+                    "type": "boolean"
+                },
+                "expected_to": {
+                    "description": "ExpectedTo is what a start request should send back as expected_to:\nthe version, or for an add-on the digest of the candidate.",
+                    "type": "string"
+                },
+                "from": {
+                    "description": "From and To are the versions for display.",
+                    "type": "string"
+                },
+                "key": {
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/upgraderun.Kind"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "order": {
+                    "description": "Order is the position in the run, from 0.",
+                    "type": "integer"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "risk": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/localai.UpgradeRunRisk"
+                    }
+                },
+                "risks": {
+                    "description": "Risks are what the update does beyond replacing the item.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "selected": {
+                    "description": "Selected is the default selection: backends and add-ons, not models.",
+                    "type": "boolean"
+                },
+                "stage": {
+                    "type": "integer"
+                },
+                "startable": {
+                    "type": "boolean"
+                },
+                "title": {
+                    "description": "Title is the name a person knows the item by (an add-on's title).",
+                    "type": "string"
+                },
+                "to": {
+                    "type": "string"
+                }
+            }
+        },
+        "localai.UpgradeRunPreviewRequest": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/upgraderun.ItemRef"
+                    }
+                }
+            }
+        },
+        "localai.UpgradeRunRisk": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "stops_models"
+                },
+                "params": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -19346,11 +27546,19 @@ const docTemplate = `{
         "modeladmin.VRAMResponse": {
             "type": "object",
             "properties": {
+                "block_count": {
+                    "description": "BlockCount is the number of layers of the model, read from the GGUF\nmetadata. Absent when it is unknown.",
+                    "type": "integer"
+                },
                 "context_length": {
                     "type": "integer"
                 },
                 "context_note": {
                     "type": "string"
+                },
+                "expert_count": {
+                    "description": "ExpertCount is the number of experts of a mixture-of-experts model, read\nfrom the GGUF metadata. Absent for a dense model or when it is unknown.",
+                    "type": "integer"
                 },
                 "model_max_context": {
                     "type": "integer"
@@ -19365,6 +27573,615 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "vram_display": {
+                    "type": "string"
+                }
+            }
+        },
+        "modelsearch.EstimateResult": {
+            "type": "object",
+            "properties": {
+                "approximate": {
+                    "description": "Approximate is true when the architecture was not read from a GGUF\nheader, so the KV cache term is a rule of thumb (size plus 2 KiB per\ncontext token) and not computed from layers, width and heads.",
+                    "type": "boolean"
+                },
+                "blockCount": {
+                    "description": "from GGUF metadata; the layer count",
+                    "type": "integer"
+                },
+                "estimates": {
+                    "description": "keys: context size as string",
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/vram.VRAMAt"
+                    }
+                },
+                "expertCount": {
+                    "description": "from GGUF metadata; zero for a dense model",
+                    "type": "integer"
+                },
+                "file": {
+                    "description": "File is the first file of the variant that was estimated; empty when\nthe whole repository was.",
+                    "type": "string"
+                },
+                "modelMaxContext": {
+                    "description": "from GGUF metadata",
+                    "type": "integer"
+                },
+                "quantization": {
+                    "type": "string"
+                },
+                "sizeBytes": {
+                    "type": "integer"
+                },
+                "sizeDisplay": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source says where the architecture came from: \"gguf-header\" when the\nheader of the file was read (layers, width and heads are exact),\n\"file-size\" when only the file size was known (the KV cache term is a\nrule of thumb) and \"unknown\" when no size was known at all.",
+                    "type": "string"
+                },
+                "variants": {
+                    "description": "Variants has the same estimate for every quantization of a GGUF\nrepository. Quantizations of one model share an architecture, so the\nheader read for the chosen file serves them all: one upstream read\nanswers the whole variant list.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.VariantEstimate"
+                    }
+                }
+            }
+        },
+        "modelsearch.GGUFInfo": {
+            "type": "object",
+            "properties": {
+                "architecture": {
+                    "type": "string"
+                },
+                "context_length": {
+                    "type": "integer"
+                },
+                "parameters": {
+                    "type": "integer"
+                }
+            }
+        },
+        "modelsearch.Overview": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "description": "Enabled is the enabled set: every source the person can see that they\ndid not turn off, in the order of Sources.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "missing": {
+                    "description": "Missing is kept for older clients and is always empty: the store holds\nwhat the person turned off, so no stored ID asks for an add-on to be\ninstalled.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.Source"
+                    }
+                }
+            }
+        },
+        "modelsearch.ProviderStatus": {
+            "type": "object",
+            "properties": {
+                "cached": {
+                    "description": "Cached is true when the results came from the cache.",
+                    "type": "boolean"
+                },
+                "count": {
+                    "type": "integer"
+                },
+                "dropped": {
+                    "description": "Dropped counts the rows that the host refused: a scheme it does not\nhandle, or a field over its cap.",
+                    "type": "integer"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "ok": {
+                    "type": "boolean"
+                },
+                "title": {
+                    "description": "Title is the name of the source, when it has one.",
+                    "type": "string"
+                },
+                "unsupported": {
+                    "description": "Unsupported is true when the provider was not asked because it cannot\nanswer this kind of request: a list of the newest models with no search\ntext. The provider is ok and has no results; nothing went upstream.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "modelsearch.RepoFile": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "description": "Kind is \"gguf\", \"mmproj\", \"drafter\" (a speculative-decoding sidecar such\nas dspark-*.gguf, never a variant of its own) or \"weights\" (safetensors,\nbin, pt).",
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "sha256": {
+                    "type": "string"
+                },
+                "size": {
+                    "description": "Size is in bytes; zero when the provider did not say.",
+                    "type": "integer"
+                }
+            }
+        },
+        "modelsearch.RepoFiles": {
+            "type": "object",
+            "properties": {
+                "backend": {
+                    "description": "The fields below are filled by the route, not by the Inspector.\nBackend and ImportFiles come from a dry run of the import (no download,\nno job) on this very listing; ImportError says why it could not run.",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "Description is the first paragraph of the model card, at most 400\ncharacters. Empty when the card could not be read.",
+                    "type": "string"
+                },
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.RepoFile"
+                    }
+                },
+                "gated": {
+                    "description": "Gated is reported as is. For Pirate Face it is also true when the site\nshows no magnet link, which is what a gated licence looks like there.",
+                    "type": "boolean"
+                },
+                "gguf": {
+                    "$ref": "#/definitions/modelsearch.GGUFInfo"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "import_error": {
+                    "type": "string"
+                },
+                "import_files": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "installed": {
+                    "type": "boolean"
+                },
+                "installed_name": {
+                    "type": "string"
+                },
+                "last_modified": {
+                    "type": "string"
+                },
+                "library_name": {
+                    "type": "string"
+                },
+                "license": {
+                    "type": "string"
+                },
+                "pipeline_tag": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "revision": {
+                    "description": "Revision is the commit the file list and sizes come from.",
+                    "type": "string"
+                },
+                "size_known": {
+                    "description": "SizeKnown is false when no file size could be found, which happens for\na Pirate Face repository Hugging Face does not know.",
+                    "type": "boolean"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "uri": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "variants": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.Variant"
+                    }
+                }
+            }
+        },
+        "modelsearch.Response": {
+            "type": "object",
+            "properties": {
+                "providers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.ProviderStatus"
+                    }
+                },
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.Result"
+                    }
+                },
+                "sources": {
+                    "description": "Sources describes the sources that were asked, with their filters, so a\nclient needs no second call to draw the controls.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelsearch.Source"
+                    }
+                }
+            }
+        },
+        "modelsearch.Result": {
+            "type": "object",
+            "properties": {
+                "backend": {
+                    "description": "Backend is the backend an import would likely pick, derived from the\ntags; a hint. RepoFiles.Backend is exact.",
+                    "type": "string"
+                },
+                "downloads": {
+                    "type": "integer"
+                },
+                "gated": {
+                    "description": "Gated is true when the provider says access needs approval. It is\nreported as is; nothing here tries to get around it.",
+                    "type": "boolean"
+                },
+                "has_variants": {
+                    "description": "HasVariants is true when opening the model is likely to list several\nquantizations: a GGUF repository, or any Pirate Face one (the source of an add-on).",
+                    "type": "boolean"
+                },
+                "id": {
+                    "description": "ID is the owner/repo name.",
+                    "type": "string"
+                },
+                "installed": {
+                    "description": "Installed is true when an installed model comes from this repository;\nInstalledName is that model's name.",
+                    "type": "boolean"
+                },
+                "installed_name": {
+                    "type": "string"
+                },
+                "last_modified": {
+                    "type": "string"
+                },
+                "license": {
+                    "type": "string"
+                },
+                "likes": {
+                    "type": "integer"
+                },
+                "magnet": {
+                    "description": "Magnet is the BitTorrent magnet link, when the provider lists one.",
+                    "type": "string"
+                },
+                "pipeline_tag": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "seeders": {
+                    "type": "integer"
+                },
+                "size_bytes": {
+                    "type": "integer"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "title": {
+                    "type": "string"
+                },
+                "uri": {
+                    "description": "URI is what the import route accepts: huggingface://owner/repo for\nHugging Face, pirateface://owner/repo for Pirate Face.",
+                    "type": "string"
+                },
+                "url": {
+                    "description": "URL is a page a person can open.",
+                    "type": "string"
+                }
+            }
+        },
+        "modelsearch.Source": {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/contract.SearchFilter"
+                    }
+                },
+                "has_variants": {
+                    "type": "boolean"
+                },
+                "i18n": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/contract.ModelSearchText"
+                    }
+                },
+                "icon": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "description": "Kind is \"builtin\" or \"addon\".",
+                    "type": "string"
+                },
+                "lists_latest": {
+                    "type": "boolean"
+                },
+                "p2p": {
+                    "type": "boolean"
+                },
+                "running": {
+                    "description": "Running is false for an add-on that is installed and not running.",
+                    "type": "boolean"
+                },
+                "sorts": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "modelsearch.Variant": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "description": "File is the first shard; pass it to the estimate route.",
+                    "type": "string"
+                },
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "preference": {
+                    "description": "Preference is the value for preferences.quantizations on\nPOST /models/import-uri that makes the import pick exactly this\nvariant. Empty when no safe value exists.",
+                    "type": "string"
+                },
+                "quantization": {
+                    "description": "Quantization is the label read from the file name, such as \"Q4_K_M\".",
+                    "type": "string"
+                },
+                "recommended": {
+                    "description": "Recommended marks the variant LocalAI would suggest first.",
+                    "type": "boolean"
+                },
+                "shards": {
+                    "type": "integer"
+                },
+                "size_bytes": {
+                    "description": "SizeBytes sums the shards; zero when sizes are unknown.",
+                    "type": "integer"
+                }
+            }
+        },
+        "modelsearch.VariantEstimate": {
+            "type": "object",
+            "properties": {
+                "estimates": {
+                    "description": "Estimates is keyed by context size, like the gallery estimate.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/vram.VRAMAt"
+                    }
+                },
+                "file": {
+                    "type": "string"
+                },
+                "quantization": {
+                    "type": "string"
+                },
+                "sizeBytes": {
+                    "type": "integer"
+                },
+                "sizeDisplay": {
+                    "type": "string"
+                }
+            }
+        },
+        "modelupdates.FileChange": {
+            "type": "object",
+            "properties": {
+                "change": {
+                    "description": "Change is added, changed or removed.",
+                    "type": "string"
+                },
+                "checksum": {
+                    "description": "Checksum is false for a file the gallery lists without a sha256. The\nupgrade refuses to download weights without one.",
+                    "type": "boolean"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
+        "modelupdates.Item": {
+            "type": "object",
+            "properties": {
+                "availableDigest": {
+                    "type": "string"
+                },
+                "changedFiles": {
+                    "description": "ChangedFiles are the files the update adds, replaces or retires.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelupdates.FileChange"
+                    }
+                },
+                "configOnly": {
+                    "description": "ConfigOnly is true when the update changes no file the upgrade must\ndownload: only the model config or the prompt templates.",
+                    "type": "boolean"
+                },
+                "editedKeys": {
+                    "description": "EditedKeys are the keys of the model config a person changed since the\ninstall, by dotted path. Conflict marks the ones the update also\nchanges.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelupdates.KeyEdit"
+                    }
+                },
+                "entryName": {
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error is the error behind a check-failed reason.",
+                    "type": "string"
+                },
+                "gallery": {
+                    "type": "string"
+                },
+                "held": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "description": "ID is \"model:\u003cname\u003e\".",
+                    "type": "string"
+                },
+                "installedDigest": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is the installed model name.",
+                    "type": "string"
+                },
+                "needsPerson": {
+                    "description": "NeedsPerson is true for an update, an edited update and a failed\nupgrade. Models have no automatic update, so every update needs a\nperson; this is not the backend rule, where the automatic update\nremoves items from the digest.",
+                    "type": "boolean"
+                },
+                "reason": {
+                    "description": "Reason says why the state is unknown.",
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "upgrade": {
+                    "description": "Upgrade is the last or the running upgrade of this model.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/modelupdates.UpgradeStatus"
+                        }
+                    ]
+                }
+            }
+        },
+        "modelupdates.KeyEdit": {
+            "type": "object",
+            "properties": {
+                "conflict": {
+                    "type": "boolean"
+                },
+                "gallery": {},
+                "installed": {
+                    "description": "Installed is the value the install wrote, Mine the value on disk, and\nGallery the value the update would write. A nil value means the key is\nabsent."
+                },
+                "key": {
+                    "type": "string"
+                },
+                "mine": {}
+            }
+        },
+        "modelupdates.Snapshot": {
+            "type": "object",
+            "properties": {
+                "checkedAt": {
+                    "description": "CheckedAt is the end of the last check; zero (omitted) before the\nfirst one.",
+                    "type": "string"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/modelupdates.Item"
+                    }
+                },
+                "sources": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/backendupdates.Source"
+                    }
+                },
+                "throttled": {
+                    "description": "Throttled is set when a check-now call was answered from a check that\nended a few seconds before.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "modelupdates.UpgradeStatus": {
+            "type": "object",
+            "properties": {
+                "attempts": {
+                    "type": "integer"
+                },
+                "configOnly": {
+                    "type": "boolean"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "fromDigest": {
+                    "type": "string"
+                },
+                "note": {
+                    "description": "Note says how the upgrade ran when that differs from what was asked\n(a canary strategy runs as stop and start until canary is available).",
+                    "type": "string"
+                },
+                "opId": {
+                    "type": "string"
+                },
+                "phase": {
+                    "type": "string"
+                },
+                "removableOld": {
+                    "type": "boolean"
+                },
+                "retainedFiles": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "running": {
+                    "type": "boolean"
+                },
+                "toDigest": {
+                    "type": "string"
+                },
+                "updatedAt": {
                     "type": "string"
                 }
             }
@@ -19427,6 +28244,762 @@ const docTemplate = `{
                 },
                 "updated_at": {
                     "type": "string"
+                }
+            }
+        },
+        "p2p.AddRelayRequest": {
+            "type": "object",
+            "properties": {
+                "addr": {
+                    "description": "Addr must end in /p2p/\u003crelay peer ID\u003e.",
+                    "type": "string"
+                },
+                "claim_code": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.ClaimRelayRequest": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.ClientKey": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "secret": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.DeviceList": {
+            "type": "object",
+            "properties": {
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/p2p.DeviceView"
+                    }
+                }
+            }
+        },
+        "p2p.DeviceView": {
+            "type": "object",
+            "properties": {
+                "all_models": {
+                    "description": "AllModels is true for a remote device that may use every model.",
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string"
+                },
+                "models": {
+                    "description": "Models are the models a remote device is limited to.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "online": {
+                    "description": "Online is true while the device is connected.",
+                    "type": "boolean"
+                },
+                "path": {
+                    "$ref": "#/definitions/p2p.PathView"
+                },
+                "peer_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is active or revoked.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.InviteList": {
+            "type": "object",
+            "properties": {
+                "invites": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/p2p.InviteView"
+                    }
+                }
+            }
+        },
+        "p2p.InviteView": {
+            "type": "object",
+            "properties": {
+                "all_models": {
+                    "description": "AllModels is true for a remote invite that grants every model, also\nfor one made without a list.",
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "created_by": {
+                    "type": "string"
+                },
+                "device_id": {
+                    "type": "string"
+                },
+                "device_peer_id": {
+                    "description": "DevicePeerID is the peer that redeemed a used invite.",
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "models": {
+                    "description": "Models are the models a remote invite is limited to. Device and worker\ninvites carry none.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "phrase": {
+                    "description": "Phrase is the confirmation phrase of a used invite: the words the\ndevice was shown when it redeemed. The admin compares them.",
+                    "type": "string"
+                },
+                "relay_pass": {
+                    "description": "RelayPass is the label of the relay that holds the pass of the invite;\nempty when the link carries no pass.",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is pending, used, expired or canceled.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.MintRequest": {
+            "type": "object",
+            "properties": {
+                "all_models": {
+                    "description": "AllModels grants a remote invite every model this server lets a client\nkey use, models added later too. It is refused with a non-empty models.",
+                    "type": "boolean"
+                },
+                "allow_open_relay": {
+                    "description": "AllowOpenRelay lets the invite name an open relay.",
+                    "type": "boolean"
+                },
+                "features": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "kind": {
+                    "description": "Kind is device, remote, worker or split.",
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "models": {
+                    "description": "Models limits a remote invite to these models. An empty list means\nevery model, as before all_models existed.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "omit_lan_addrs": {
+                    "description": "OmitLANAddrs keeps the private addresses of this server out of the\nlink. By default the link carries them, so a device on the same network\ncan redeem it with no relay and no multicast discovery.",
+                    "type": "boolean"
+                },
+                "relays": {
+                    "description": "Relays is \"auto\", \"none\" or a list of relay IDs.",
+                    "type": "string",
+                    "example": "auto"
+                },
+                "ttl_seconds": {
+                    "description": "TTLSeconds is the life of the invite: 600 when zero, at most 86400.",
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.MintResult": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "link": {
+                    "type": "string"
+                },
+                "qr": {
+                    "description": "QR says whether the interface may show the link as a QR code (device\nand remote invites only).",
+                    "type": "boolean"
+                },
+                "relay": {
+                    "$ref": "#/definitions/p2p.RelayPass"
+                },
+                "warnings": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "p2p.OKResponse": {
+            "type": "object",
+            "properties": {
+                "ok": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.PathView": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "description": "Kind is none, direct, hole_punched or relayed.",
+                    "type": "string"
+                },
+                "limit_bytes": {
+                    "type": "integer"
+                },
+                "limit_seconds": {
+                    "type": "integer"
+                },
+                "limited": {
+                    "type": "boolean"
+                },
+                "relay_label": {
+                    "type": "string"
+                },
+                "rtt_ms": {
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.PublicDHTInfo": {
+            "type": "object",
+            "properties": {
+                "on": {
+                    "type": "boolean"
+                },
+                "peers": {
+                    "description": "Peers is the number of peers the host is connected to.",
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.RedeemRequest": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "platform": {
+                    "type": "string"
+                },
+                "v": {
+                    "description": "V is the protocol version, 1.",
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.RedeemResult": {
+            "type": "object",
+            "properties": {
+                "client_key": {
+                    "description": "ClientKey is the API key of a remote invite; it is shown once.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/p2p.ClientKey"
+                        }
+                    ]
+                },
+                "device_id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "phrase": {
+                    "description": "Phrase is shown on both sides; the person compares them.",
+                    "type": "string"
+                },
+                "server": {
+                    "$ref": "#/definitions/p2p.ServerInfo"
+                }
+            }
+        },
+        "p2p.RegenerateIdentityRequest": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "description": "Confirm must be true: a new identity unpairs every device and remote.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.Relay": {
+            "type": "object",
+            "properties": {
+                "addr": {
+                    "description": "Addr is a multiaddr that ends in /p2p/\u003crelay peer ID\u003e.",
+                    "type": "string"
+                },
+                "admins": {
+                    "type": "integer"
+                },
+                "checked_at": {
+                    "type": "string"
+                },
+                "health": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "latency_ms": {
+                    "type": "integer"
+                },
+                "limits": {
+                    "$ref": "#/definitions/p2p.RelayLimits"
+                },
+                "members": {
+                    "type": "integer"
+                },
+                "mode": {
+                    "description": "Mode is gated, open, unclaimed or unknown.",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is in_sync, out_of_sync, open, unclaimed, not_admin, denied,\nunreachable or checking.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.RelayCheck": {
+            "type": "object",
+            "properties": {
+                "admin_ok": {
+                    "type": "boolean"
+                },
+                "circuit_ok": {
+                    "type": "boolean"
+                },
+                "connected": {
+                    "type": "boolean"
+                },
+                "detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "in_sync": {
+                    "type": "boolean"
+                },
+                "relay": {
+                    "$ref": "#/definitions/p2p.Relay"
+                },
+                "reserved": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.RelayLimits": {
+            "type": "object",
+            "properties": {
+                "circuit_bytes": {
+                    "type": "integer"
+                },
+                "circuit_seconds": {
+                    "type": "integer"
+                },
+                "rate_bps": {
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.RelayLimitsInfo": {
+            "type": "object",
+            "properties": {
+                "can_change": {
+                    "description": "CanChange is true when this server is an admin of a gated relay and\nmay change the limits.",
+                    "type": "boolean"
+                },
+                "ceiling": {
+                    "description": "Ceiling is the most a change may set for each limit; the operator of\nthe relay sets it. Zero means no ceiling. With a ceiling a limit\ncannot be removed either: a value above it, or zero, is refused with\nan error that names the ceiling.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/p2p.RelayLimits"
+                        }
+                    ]
+                },
+                "limits": {
+                    "$ref": "#/definitions/p2p.RelayLimits"
+                },
+                "restarted": {
+                    "description": "Restarted is true when the relay restarted its circuit service to\napply the change: it dropped its reservations and the paired devices\nreserve again within moments. A change of the bandwidth limit alone\nnever restarts it.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.RelayList": {
+            "type": "object",
+            "properties": {
+                "relays": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/p2p.Relay"
+                    }
+                }
+            }
+        },
+        "p2p.RelayPass": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "open": {
+                    "type": "boolean"
+                },
+                "pass": {
+                    "description": "Pass is true when the link carries a relay pass.",
+                    "type": "boolean"
+                },
+                "reason": {
+                    "description": "Reason is no_relay or relay_unreachable when there is no pass.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.RelayServiceInfo": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "description": "Reason says why it does not run: off, not_share, not_public.",
+                    "type": "string"
+                },
+                "running": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.RenameDeviceRequest": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.RevokeResult": {
+            "type": "object",
+            "properties": {
+                "revoked": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "p2p.ServerInfo": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "peer_id": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.SetRelayLimitsRequest": {
+            "type": "object",
+            "properties": {
+                "circuit_bytes": {
+                    "description": "CircuitBytes is the data one circuit may carry in each direction.",
+                    "type": "integer"
+                },
+                "circuit_seconds": {
+                    "description": "CircuitSeconds is the time one circuit may stay open.",
+                    "type": "integer"
+                },
+                "rate_bps": {
+                    "description": "RateBPS is the bandwidth of one circuit in each direction, in bytes\nper second.",
+                    "type": "integer"
+                }
+            }
+        },
+        "p2p.SplitNodeRelay": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string"
+                },
+                "relays": {
+                    "description": "Relays is the state on each gated relay that this server administers.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/p2p.SplitRelayAdmission"
+                    }
+                },
+                "state": {
+                    "description": "State is admitted, refused, pending or not_needed.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.SplitRelayAdmission": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "relay_id": {
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is admitted, refused or pending.",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.SplitWorkerList": {
+            "type": "object",
+            "properties": {
+                "distributed": {
+                    "description": "Distributed is true in a cluster: models run on the backend nodes, so\na worker is used only when it is attached to one (node_id).",
+                    "type": "boolean"
+                },
+                "memory_in_use": {
+                    "description": "MemoryInUse is the memory of the workers in use, in bytes.",
+                    "type": "integer"
+                },
+                "workers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/p2p.SplitWorkerView"
+                    }
+                }
+            }
+        },
+        "p2p.SplitWorkerUpdate": {
+            "type": "object",
+            "properties": {
+                "allow_slow_path": {
+                    "description": "AllowSlowPath uses the worker over a relayed path (\"Use anyway\"), or\nstops using it there.",
+                    "type": "boolean"
+                },
+                "node_id": {
+                    "description": "NodeID attaches the worker to a backend node of the cluster, or to\nthis server with \"\".",
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.SplitWorkerView": {
+            "type": "object",
+            "properties": {
+                "addr": {
+                    "description": "Addr is the loopback address that reaches the worker, on this server\nor on the node of NodeID: an entry of LLAMACPP_GRPC_SERVERS, or of the\nMLX hostfile.",
+                    "type": "string"
+                },
+                "allow_slow_path": {
+                    "description": "AllowSlowPath is the \"Use anyway\" choice for a relayed path.",
+                    "type": "boolean"
+                },
+                "connected_since": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "engine": {
+                    "description": "Engine is llama (llama.cpp RPC) or mlx.",
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error says why a refused worker was refused.",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string"
+                },
+                "memory_bytes": {
+                    "description": "MemoryBytes is the memory the worker reported: its VRAM, or its RAM\nwhen it has no GPU (unified memory on Apple Silicon).",
+                    "type": "integer"
+                },
+                "name": {
+                    "description": "Name and Version are what the worker reported.",
+                    "type": "string"
+                },
+                "node_id": {
+                    "description": "NodeID is the backend node the worker is attached to; empty means\nthis server. NodeName is its name. The state, path and address of an\nattached worker are what the node last reported.",
+                    "type": "string"
+                },
+                "node_name": {
+                    "type": "string"
+                },
+                "node_note": {
+                    "description": "NodeNote says why a worker attached to no node was detached, for\nexample because its node stopped being a split server.",
+                    "type": "string"
+                },
+                "node_offline": {
+                    "description": "NodeOffline is true when the node of NodeID is offline: the worker\nstays attached and waits for it; nothing moves it.",
+                    "type": "boolean"
+                },
+                "node_relay": {
+                    "description": "NodeRelay says whether the gated relays of this server admit the node\nof NodeID, so that the worker can reach it through them when no direct\nor hole-punched path works. Set only for a worker attached to a node.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/p2p.SplitNodeRelay"
+                        }
+                    ]
+                },
+                "own_relay": {
+                    "description": "OwnRelay is true when that relay is a gated relay this server\nadministers: its limits can change. With a data or time limit the\nrelay ends each connection at the limit, also after allow_slow_path.",
+                    "type": "boolean"
+                },
+                "path": {
+                    "$ref": "#/definitions/p2p.PathView"
+                },
+                "peer_id": {
+                    "type": "string"
+                },
+                "rank": {
+                    "description": "Rank is the MLX rank of the worker; zero when not in the ring.",
+                    "type": "integer"
+                },
+                "relay_id": {
+                    "description": "RelayID is the server's ID of the relay of a relayed path, when the\nrelay is one the server knows (see /api/p2p/relays/{id}/limits).",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is online (in use), offline, slow (only a relay reaches it: it\nwaits for allow_slow_path), limited (only a public relay reaches it,\nwhose limits cannot carry model layers) or refused.",
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "p2p.Status": {
+            "type": "object",
+            "properties": {
+                "addrs": {
+                    "description": "Addrs are the addresses of the host, each with /p2p/\u003cpeer ID\u003e.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "devices": {
+                    "description": "Devices is the number of active paired devices.",
+                    "type": "integer"
+                },
+                "enabled": {
+                    "description": "Enabled is true when the mode is not off.",
+                    "type": "boolean"
+                },
+                "error": {
+                    "description": "Error says why the host does not run although the mode asks for it.",
+                    "type": "string"
+                },
+                "mode": {
+                    "description": "Mode is the mode in effect: off, connect or share.",
+                    "type": "string"
+                },
+                "peer_id": {
+                    "description": "PeerID is the peer ID of this server; empty when the host does not run.",
+                    "type": "string"
+                },
+                "pending_invites": {
+                    "description": "PendingInvites is the number of invites that can still be redeemed.",
+                    "type": "integer"
+                },
+                "public_dht": {
+                    "$ref": "#/definitions/p2p.PublicDHTInfo"
+                },
+                "reachability": {
+                    "description": "Reachability is unknown, public or private.",
+                    "type": "string"
+                },
+                "relay_service": {
+                    "description": "RelayService says whether this server relays for its paired devices.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/p2p.RelayServiceInfo"
+                        }
+                    ]
+                },
+                "reservations": {
+                    "description": "Reservations are the peer IDs of the relays that hold a reservation for\nthis server.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "running": {
+                    "description": "Running is true when the host runs.",
+                    "type": "boolean"
                 }
             }
         },
@@ -19819,6 +29392,363 @@ const docTemplate = `{
                 }
             }
         },
+        "remotes.FederationView": {
+            "type": "object",
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.Group"
+                    }
+                },
+                "instances": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.Instance"
+                    }
+                }
+            }
+        },
+        "remotes.Group": {
+            "type": "object",
+            "properties": {
+                "members": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.GroupMember"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "policy": {
+                    "$ref": "#/definitions/config.FailoverPolicy"
+                },
+                "state": {
+                    "description": "State is the state of the chain: primary, fallback or degraded. Empty\nwhen the failover manager does not know it yet.",
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.GroupMember": {
+            "type": "object",
+            "properties": {
+                "constrained": {
+                    "description": "Constrained is true when the target is reached through a relay that\nlimits the connection: it takes a request only when no other can.",
+                    "type": "boolean"
+                },
+                "drained": {
+                    "type": "boolean"
+                },
+                "in_flight": {
+                    "description": "InFlight counts the requests of this server that the target serves.",
+                    "type": "integer"
+                },
+                "instance": {
+                    "description": "Instance is the id of the instance that serves the model: LocalInstance,\na remote id, or empty for a model of another proxy.",
+                    "type": "string"
+                },
+                "instance_name": {
+                    "type": "string"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is the health of the target: healthy, down, recovering or\nmissing. Empty when the failover manager does not know it yet.",
+                    "type": "string"
+                },
+                "upstream_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.Instance": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "description": "ID is LocalInstance or the id of the remote.",
+                    "type": "string"
+                },
+                "in_flight": {
+                    "description": "InFlight counts the requests of this server that the instance serves\nnow through a group.",
+                    "type": "integer"
+                },
+                "local": {
+                    "type": "boolean"
+                },
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.InstanceModel"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "p2p": {
+                    "description": "P2P is the tunnel of a remote over P2P.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/remotes.P2PInfo"
+                        }
+                    ]
+                },
+                "status": {
+                    "$ref": "#/definitions/remotes.Status"
+                },
+                "transport": {
+                    "$ref": "#/definitions/remotes.Transport"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.InstanceModel": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "description": "Model is the name of the model config on this server.",
+                    "type": "string"
+                },
+                "upstream_id": {
+                    "description": "UpstreamID is the model id at the instance. For this server it is\nthe model name.",
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.Kind": {
+            "type": "string",
+            "enum": [
+                "localai",
+                "openai",
+                "anthropic"
+            ],
+            "x-enum-varnames": [
+                "KindLocalAI",
+                "KindOpenAI",
+                "KindAnthropic"
+            ]
+        },
+        "remotes.P2PInfo": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Error is the last dial or listen error, for a person to read.",
+                    "type": "string"
+                },
+                "limited": {
+                    "description": "Limited is true when the relay of a relayed path limits the data or\nthe time of the connection.",
+                    "type": "boolean"
+                },
+                "local_port": {
+                    "description": "LocalPort is the loopback port of the forwarder. The entries of the\nremote use http://127.0.0.1:\u003cLocalPort\u003e as their upstream address.",
+                    "type": "integer"
+                },
+                "path": {
+                    "description": "Path is how the last request reached the server: direct,\nhole_punched or relayed. Empty before the first request.",
+                    "type": "string"
+                },
+                "peer_id": {
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is off (P2P is off on this server), listening (no request went\nthrough yet), up, down or error (the port could not be opened).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/remotes.TunnelState"
+                        }
+                    ]
+                }
+            }
+        },
+        "remotes.Remote": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "description": "model config names this remote owns",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "key_set": {
+                    "type": "boolean"
+                },
+                "kind": {
+                    "$ref": "#/definitions/remotes.Kind"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_refresh": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "new": {
+                    "description": "discovered at last refresh, not adopted",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.UpstreamModel"
+                    }
+                },
+                "p2p": {
+                    "description": "P2P is the tunnel of a remote over P2P. It is the state of this\nserver's forwarder, not of the shared store.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/remotes.P2PInfo"
+                        }
+                    ]
+                },
+                "status": {
+                    "$ref": "#/definitions/remotes.Status"
+                },
+                "transport": {
+                    "description": "Transport is \"p2p\" for a remote over P2P and absent otherwise.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/remotes.Transport"
+                        }
+                    ]
+                },
+                "unavailable": {
+                    "description": "subset of Entries the upstream no longer lists",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "url": {
+                    "description": "address as entered; empty for anthropic",
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.Skip": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.Status": {
+            "type": "string",
+            "enum": [
+                "never",
+                "ok",
+                "auth_failed",
+                "unreachable"
+            ],
+            "x-enum-varnames": [
+                "StatusNever",
+                "StatusOK",
+                "StatusAuthFailed",
+                "StatusUnreachable"
+            ]
+        },
+        "remotes.TestResult": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                },
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/remotes.UpstreamModel"
+                    }
+                },
+                "ok": {
+                    "type": "boolean"
+                },
+                "step": {
+                    "description": "invalid_url, unreachable, auth, no_models",
+                    "type": "string"
+                }
+            }
+        },
+        "remotes.Transport": {
+            "type": "string",
+            "enum": [
+                "p2p"
+            ],
+            "x-enum-varnames": [
+                "TransportP2P"
+            ]
+        },
+        "remotes.TunnelState": {
+            "type": "string",
+            "enum": [
+                "off",
+                "listening",
+                "up",
+                "down",
+                "error"
+            ],
+            "x-enum-varnames": [
+                "TunnelOff",
+                "TunnelListening",
+                "TunnelUp",
+                "TunnelDown",
+                "TunnelError"
+            ]
+        },
+        "remotes.UpstreamModel": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "usecases": {
+                    "description": "Usecases are valid known_usecases values. For the cloud kinds it is\nempty, which means chat.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "resourcesets.Entry": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "description": "ID is the resource ID the add-on host uses.",
+                    "type": "string",
+                    "example": "db-1a2b3c"
+                },
+                "mode": {
+                    "description": "Mode is read or write.",
+                    "type": "string",
+                    "enum": [
+                        "read",
+                        "write"
+                    ],
+                    "example": "read"
+                }
+            }
+        },
+        "resourcesets.Sets": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {
+                    "$ref": "#/definitions/resourcesets.Entry"
+                }
+            }
+        },
         "schema.APIError": {
             "type": "object",
             "properties": {
@@ -20059,6 +29989,14 @@ const docTemplate = `{
                 "connection_by": {
                     "type": "string"
                 },
+                "connection_state": {
+                    "description": "ConnectionState is reconnect_needed when an enabled connection that\nuses a login must be connected again, connected when the enabled ones\nthat use a login work, and empty when none uses a login.",
+                    "type": "string",
+                    "enum": [
+                        "connected",
+                        "reconnect_needed"
+                    ]
+                },
                 "connections": {
                     "type": "array",
                     "items": {
@@ -20087,9 +30025,24 @@ const docTemplate = `{
                 "off": {
                     "type": "boolean"
                 },
+                "resources": {
+                    "description": "Resources is set when the add-on scopes its resources per agent: a saved\nagent then names the resources it may use (agent field resources). It\ncarries the word for them. GET /api/chats/agents/addons/{addon}/resources\nlists what you can give an agent.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAddonResources"
+                        }
+                    ]
+                },
                 "title": {
                     "description": "Title and Description are what the add-on's manifest declares for\npeople. Title is empty when the add-on declares none; the interface then shows the ID.",
                     "type": "string"
+                },
+                "tool_list": {
+                    "description": "ToolList names the tools of the add-on you may use, by the name the\nadd-on declares, with kind read or write. Sorted by name.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAddonTool"
+                    }
                 },
                 "tools": {
                     "type": "integer"
@@ -20120,6 +30073,10 @@ const docTemplate = `{
                 "commands_fallback_reason": {
                     "type": "string"
                 },
+                "commands_host_exec": {
+                    "description": "CommandsHostExec is the mode of the setting chats_host_exec as it applies\nnow (off, ask or on), so a client can say that the built-in bash is off\nwhen no add-on runs commands. Every signed-in user may read it.",
+                    "type": "string"
+                },
                 "commands_isolation": {
                     "description": "CommandsIsolation is isolated (a sandbox) or host (directly on this\nmachine, with its files and network), when Commands is available.",
                     "type": "string"
@@ -20137,6 +30094,23 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsAddonResources": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "example": "it"
+                },
+                "noun": {
+                    "type": "string",
+                    "example": "database"
+                },
+                "noun_plural": {
+                    "type": "string",
+                    "example": "databases"
+                }
+            }
+        },
         "schema.ChatsAddonSwitches": {
             "type": "object",
             "properties": {
@@ -20145,6 +30119,22 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "schema.ChatsAddonTool": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "read",
+                        "write"
+                    ],
+                    "example": "read"
+                },
+                "name": {
+                    "type": "string"
                 }
             }
         },
@@ -20232,12 +30222,26 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "allow_trust": {
+                    "description": "AllowTrust sets, for a chat entry of allow, what the people who write in\nthat chat may do: \"answer\" (the bot answers there, but its members are not\ntrusted one by one; the level of an entry that is not listed) or \"act\"\n(every member may use the capabilities that are not sensitive, as a listed\nperson does; sensitive ones still need a pairing).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "approval": {
                     "description": "Approval is what the host does with a trigger that the agent proposes\nfrom a chat of this binding.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/schema.ChatsConnectorApproval"
                         }
+                    ]
+                },
+                "auth_kind": {
+                    "description": "AuthKind is oauth2 for a binding whose credential comes from a login\nat the service (see oauth). Absent for a binding that holds a token\nyou gave.",
+                    "type": "string",
+                    "enum": [
+                        "oauth2"
                     ]
                 },
                 "caps": {
@@ -20264,6 +30268,14 @@ const docTemplate = `{
                 "credentials_only": {
                     "description": "CredentialsOnly is true for a binding without an agent: it holds the\ntoken, the resource list and the write mode, and never answers messages.",
                     "type": "boolean"
+                },
+                "duplicate": {
+                    "description": "Duplicate is present when another enabled connection of yours is the\nsame bot (the add-on reported the same upstream account for both) and\nthis one is enabled too: both then answer the same message.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorDuplicate"
+                        }
+                    ]
                 },
                 "enabled": {
                     "type": "boolean"
@@ -20295,6 +30307,13 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "inbound_media": {
+                    "description": "InboundMedia lists the kinds of file that the bot takes from senders:\nphoto, voice, audio, video_note, document. Empty takes every kind.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "kind": {
                     "type": "string"
                 },
@@ -20303,6 +30322,14 @@ const docTemplate = `{
                 },
                 "notify_chat": {
                     "type": "string"
+                },
+                "oauth": {
+                    "description": "OAuth is the state of the login of an oauth2 binding; absent for a\ntoken binding. It never holds a token or a secret.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorOAuth"
+                        }
+                    ]
                 },
                 "options": {
                     "description": "Options are the choices made for the options of the kind, by option id.\nAn option that is absent has its default (see ChatsConnectorKind).",
@@ -20325,8 +30352,12 @@ const docTemplate = `{
                     "description": "Reason says in plain words why the binding is not active.",
                     "type": "string"
                 },
+                "reply_language": {
+                    "description": "ReplyLanguage is the language of the sentences the bot writes itself in\nthe chat (confirmations, refusals, notes about files): auto (the\nlanguage of the sender's message), en, it, de, es, fr or pt-BR. The\nanswers of the model follow the conversation, not this setting.",
+                    "type": "string"
+                },
                 "reply_mode": {
-                    "description": "ReplyMode is what a sender sees while a turn runs: off (typing, then\nthe answer), progress (a working message that names the tools as they\nstart) or stream (a working message that shows the answer as it is\nwritten). The answer replaces the working message.",
+                    "description": "ReplyMode is what a sender sees while a turn runs: off (typing, then\nthe answer), progress (a working message that names the tools as they\nstart), stream (a working message that shows the answer as it is\nwritten) or reasoning (like stream, and it shows the reasoning of the\nmodel while it thinks; every sender of the binding can read it). The\nanswer replaces the working message.",
                     "type": "string"
                 },
                 "resources": {
@@ -20339,6 +30370,22 @@ const docTemplate = `{
                 "send_files": {
                     "description": "SendFiles sends the files that a turn makes to the sender, after the\nanswer.",
                     "type": "boolean"
+                },
+                "share": {
+                    "description": "Share is the share of the binding, once its owner made it shareable.\nOnly the owner reads it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorShare"
+                        }
+                    ]
+                },
+                "ui_language": {
+                    "description": "UILanguage is the interface language the owner's page last sent, such as\nit or pt-BR. With reply_language auto, the bot speaks in it before it\nreads the language of the sender. Absent when the server was not told.",
+                    "type": "string"
+                },
+                "used_by": {
+                    "description": "UsedBy is how many of your saved agents have this connection in their\nconnections. Present only for a binding of a tool_only kind.",
+                    "type": "integer"
                 },
                 "window_minutes": {
                     "type": "integer"
@@ -20385,16 +30432,37 @@ const docTemplate = `{
                 "agent_id": {
                     "type": "string"
                 },
+                "binding": {
+                    "description": "Binding is the ID of the messaging connection that a trigger belongs to\nwhen it was made without asking under that connection's approval. Such a\ntrigger stays within the acts the connection allows. Empty otherwise.",
+                    "type": "string"
+                },
                 "cost": {
                     "$ref": "#/definitions/schema.ChatsTriggerCost"
                 },
                 "daily_cap": {
                     "type": "integer"
                 },
+                "delivery": {
+                    "description": "Delivery says where the answer of each run goes.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsTriggerDelivery"
+                        }
+                    ]
+                },
+                "effective_run_limit": {
+                    "type": "string"
+                },
                 "enabled": {
                     "type": "boolean"
                 },
+                "event_type": {
+                    "type": "string"
+                },
                 "folder": {
+                    "type": "string"
+                },
+                "hook_path": {
                     "type": "string"
                 },
                 "id": {
@@ -20413,6 +30481,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/schema.ChatsTriggerRun"
                         }
                     ]
+                },
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "min_gap_seconds": {
                     "description": "MinGapSeconds is the shortest time between two runs of a file trigger.",
@@ -20450,7 +30524,15 @@ const docTemplate = `{
                 "read_only_why": {
                     "type": "string"
                 },
+                "run_limit": {
+                    "description": "RunLimit is the longest one run may take, as a duration such as 30m;\nempty means the administrator's run limit. EffectiveRunLimit is what\napplies now: the least of RunLimit and the administrator's limit.",
+                    "type": "string"
+                },
                 "schedule": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source, EventType and Matches say which events an event trigger takes.\nHookPath is the path of its hook; add the address of the server.",
                     "type": "string"
                 },
                 "source_chat_id": {
@@ -20479,6 +30561,14 @@ const docTemplate = `{
         "schema.ChatsAgent": {
             "type": "object",
             "properties": {
+                "access": {
+                    "description": "Access is how you hold the agent: your own, or shared with you and by\nwhom. It is absent when the server does not share agents.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAgentAccess"
+                        }
+                    ]
+                },
                 "addons": {
                     "type": "array",
                     "items": {
@@ -20560,6 +30650,27 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "memory": {
+                    "description": "Memory is the choice of notes for this agent: own (its own notes only),\nmine_and_own (reads your notes and its own, saves to its own; the\ndefault of a new agent in the interface), mine (your notes only) or\nnone. The host enforces it: it decides which notes go in the prompt of\na chat and where a note is saved. Absent is \"as before\", an agent saved\nbefore the choice existed: it reads notes when its add-ons name Memory\nand the model picks the scope of a note.",
+                    "type": "string",
+                    "enum": [
+                        "own",
+                        "mine_and_own",
+                        "mine",
+                        "none"
+                    ],
+                    "example": "mine_and_own"
+                },
+                "memory_save": {
+                    "description": "MemorySave is the agent's own rule for saving a note: always (every note\nwaits for the person, and the model cannot undo or forget by itself),\nauto (Save it and tell me: this agent saves a note at once and tells the\nperson, with an Undo, even when the person's level is Ask me first) or\nnever (it reads notes and saves none). Absent uses the person's setting\n(Account \u003e Memory). Always and never are never looser than that setting.\nauto loosens ask and auto for this agent only: the person's Always\nconfirm and Never still hold, and so do the limits of an automatic save.",
+                    "type": "string",
+                    "enum": [
+                        "always",
+                        "auto",
+                        "never"
+                    ],
+                    "example": "always"
+                },
                 "model": {
                     "type": "string"
                 },
@@ -20570,6 +30681,23 @@ const docTemplate = `{
                     "description": "Network is the network preset of the Sandbox commands of the agent's\nunattended runs: off (the default), registries or all, capped by the\nadministrator's ceiling.",
                     "type": "string"
                 },
+                "project_id": {
+                    "description": "ProjectID is the project the agent belongs to, absent for an agent of no\nproject. It is set when the agent is created and cannot change.",
+                    "type": "string",
+                    "example": "3f2a9c"
+                },
+                "resources": {
+                    "description": "Resources names, for each add-on whose manifest scopes its resources per\nagent (by add-on ID), the resources the agent may use and the mode of\neach, read or write. An add-on of that kind with no entry gives the\nagent no resource; the field has no effect on any other add-on. The host\nchecks it on every tool call that takes a resource, on top of what you\nmay use yourself, and the resource list and the selection of a chat show\nthe agent nothing outside it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/resourcesets.Sets"
+                        }
+                    ]
+                },
+                "sandbox_profile": {
+                    "description": "SandboxProfile is the sandbox profile of the agent's unattended runs and\nthe starting profile of its chats (GET /api/chats/sandbox-profiles lists\nthem). Empty: the administrator's default. A profile the Sandbox does\nnot have, or that you may not use, runs the default or base.",
+                    "type": "string"
+                },
                 "skills": {
                     "type": "array",
                     "items": {
@@ -20578,6 +30706,43 @@ const docTemplate = `{
                 },
                 "updated": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.ChatsAgentAccess": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "description": "Everyone says the agent is shared with every account.",
+                    "type": "boolean"
+                },
+                "owner": {
+                    "description": "Owner is the display name of the person who shared the agent with\nyou. Absent for your own agents.",
+                    "type": "string",
+                    "example": "Alice"
+                },
+                "role": {
+                    "description": "Role is owner for your own agent, use or viewer for an agent shared\nwith you. use runs it in your own chats; viewer also reads its full\ndefinition. Only the owner edits, deletes, exports or shares it.",
+                    "type": "string",
+                    "enum": [
+                        "owner",
+                        "use",
+                        "viewer"
+                    ],
+                    "example": "use"
+                },
+                "share_id": {
+                    "description": "ShareID is the ID of your own agent in the sharing API\n(/api/shares/agent/{ShareID}/...). Absent until it is first shared and\nfor agents shared with you.",
+                    "type": "string"
+                },
+                "sharedWith": {
+                    "description": "SharedWith is the number of grants of your own agent.",
+                    "type": "integer",
+                    "example": 2
+                },
+                "sharing": {
+                    "description": "Sharing says whether you can share the agent on this server.",
+                    "type": "boolean"
                 }
             }
         },
@@ -20691,6 +30856,396 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsAgentMove": {
+            "type": "object",
+            "properties": {
+                "disable_triggers": {
+                    "description": "DisableTriggers switches off the file triggers whose folder is outside\nthe new folders, in place of refusing the move.",
+                    "type": "boolean"
+                },
+                "dry_run": {
+                    "description": "DryRun reports what the move would do and writes nothing.",
+                    "type": "boolean"
+                },
+                "files_mode": {
+                    "description": "FilesMode is read or write (the default): how the agent uses the files\nfolder of the new project.",
+                    "type": "string"
+                },
+                "folders": {
+                    "description": "Folders are the folders the agent keeps when it leaves a project. They\nare required then, unless WholeHome is true.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAgentFolderWrite"
+                    }
+                },
+                "project_id": {
+                    "description": "ProjectID is an active project of yours, or empty to take the agent out\nof its project.",
+                    "type": "string"
+                },
+                "revoke_shares": {
+                    "description": "RevokeShares removes the grants of a shared agent so that it can enter a\nproject.",
+                    "type": "boolean"
+                },
+                "whole_home": {
+                    "description": "WholeHome lets an agent that leaves a project work on all your files.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsAgentMoveAttached": {
+            "type": "object",
+            "properties": {
+                "addons": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "collections": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "connectors": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "mcp_servers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentMoveReport": {
+            "type": "object",
+            "properties": {
+                "attached_new": {
+                    "description": "AttachedNew is what the new project attaches: the agent gets it on every\nrun after the move.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAgentMoveAttached"
+                        }
+                    ]
+                },
+                "attached_old": {
+                    "description": "AttachedOld is what the old project attached and the new one does not.\nIt stops applying to the agent.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAgentMoveAttached"
+                        }
+                    ]
+                },
+                "blockers": {
+                    "description": "Blockers lists why the move cannot be done as asked: busy, shared or\ntriggers_outside.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "chats": {
+                    "description": "Chats is the number of chats of the agent that stop taking turns, and\nLoops the number of their loops that end.",
+                    "type": "integer"
+                },
+                "dropped_tools": {
+                    "$ref": "#/definitions/schema.ChatsAgentMoveTools"
+                },
+                "dry_run": {
+                    "type": "boolean"
+                },
+                "from": {
+                    "type": "string"
+                },
+                "loops": {
+                    "type": "integer"
+                },
+                "memory_grant_dropped": {
+                    "type": "boolean"
+                },
+                "moved": {
+                    "description": "Moved is true when the agent was moved.",
+                    "type": "boolean"
+                },
+                "project_skills_switch": {
+                    "description": "ProjectSkillsSwitch is true when the agent's project skills change: the\nskills of the old project stop and those of the new project start. It is\nfalse when neither project has a skill in its own layer.",
+                    "type": "boolean"
+                },
+                "proposals": {
+                    "description": "Proposals is the number of waiting project notes of the agent that are\nvoided.",
+                    "type": "integer"
+                },
+                "shares": {
+                    "description": "Shares is the number of people the agent is shared with.",
+                    "type": "integer"
+                },
+                "to": {
+                    "type": "string"
+                },
+                "triggers_outside": {
+                    "description": "TriggersOutside are the file triggers that watch a folder outside the\nnew folders.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAgentMoveTrigger"
+                    }
+                },
+                "warnings": {
+                    "description": "Warnings lists steps after the move that did not finish.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentMoveTools": {
+            "type": "object",
+            "properties": {
+                "addons": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "collections": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "mcp_servers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentMoveTrigger": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsAgentNeed": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "example": "collection"
+                },
+                "label": {
+                    "type": "string",
+                    "example": "docs"
+                },
+                "state": {
+                    "description": "State is ok (you have it), missing (it is not shared with you),\nunavailable (this server or your account does not offer it) or ask (the\nagent asks for a network or a tool group that your chat starts without;\nyou may turn it on in the chat). Kind network is the agent's network\npreset, kind tool-group an opt-in group of built-in tools it turns on.",
+                    "type": "string",
+                    "enum": [
+                        "ok",
+                        "missing",
+                        "unavailable",
+                        "ask"
+                    ],
+                    "example": "missing"
+                }
+            }
+        },
+        "schema.ChatsAgentNeedList": {
+            "type": "object",
+            "properties": {
+                "needs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAgentNeed"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentProjectRef": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "slug": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsAgentProjectRequired": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "$ref": "#/definitions/schema.ChatsAgentProjectRequiredError"
+                }
+            }
+        },
+        "schema.ChatsAgentProjectRequiredError": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "project_name": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string",
+                    "example": "project_required"
+                }
+            }
+        },
+        "schema.ChatsAgentReference": {
+            "type": "object",
+            "properties": {
+                "addon_id": {
+                    "description": "AddonID is the add-on of a connection or an add-on resource.",
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID names the thing for its kind.",
+                    "type": "string",
+                    "example": "docs"
+                },
+                "kind": {
+                    "description": "Kind is addon, collection, skill, folder, connection, addon-resource,\nmcp or builtin.",
+                    "type": "string",
+                    "example": "collection"
+                },
+                "label": {
+                    "type": "string",
+                    "example": "docs"
+                },
+                "mode": {
+                    "description": "Mode is read or write for a folder or an add-on resource.",
+                    "type": "string"
+                },
+                "share": {
+                    "description": "Share is how the thing can be shared with the same person, absent when\nthe person needs access of their own.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAgentReferenceShare"
+                        }
+                    ]
+                }
+            }
+        },
+        "schema.ChatsAgentReferenceList": {
+            "type": "object",
+            "properties": {
+                "references": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAgentReference"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentReferenceShare": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "description": "Kind is the share kind (collection, connection), or addon for an\nadd-on resource, which is shared through /api/addons/resources.",
+                    "type": "string",
+                    "example": "collection"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "view",
+                            "use"
+                        ]
+                    }
+                },
+                "resource_id": {
+                    "type": "string"
+                },
+                "roles": {
+                    "description": "Roles maps each option to the role the grant carries on the thing:\none of the roles its kind grants (viewer, editor or use).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsAgentResourceChoice": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "role": {
+                    "description": "Role is your own role on it: viewer, editor or owner. A viewer cannot\ngive an agent the write mode in a useful way: the owner of the resource\nstill decides what you may change.",
+                    "type": "string",
+                    "enum": [
+                        "viewer",
+                        "editor",
+                        "owner"
+                    ]
+                }
+            }
+        },
+        "schema.ChatsAgentResourceChoices": {
+            "type": "object",
+            "properties": {
+                "addon_id": {
+                    "type": "string"
+                },
+                "items": {
+                    "description": "Items are the resources you may use now, ordered by ID.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsAgentResourceChoice"
+                    }
+                },
+                "language": {
+                    "type": "string"
+                },
+                "noun": {
+                    "type": "string"
+                },
+                "noun_plural": {
+                    "type": "string"
+                },
+                "truncated": {
+                    "description": "Truncated is true when the list is cut short.",
+                    "type": "boolean"
+                }
+            }
+        },
         "schema.ChatsAgentRun": {
             "type": "object",
             "properties": {
@@ -20722,6 +31277,20 @@ const docTemplate = `{
                 },
                 "updated": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.ChatsAgentShareRef": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "description": "ID is the resource ID to use with /api/shares/agent/{id}/...",
+                    "type": "string",
+                    "example": "r0123456789abcdef0123456789abcde"
+                },
+                "kind": {
+                    "type": "string",
+                    "example": "agent"
                 }
             }
         },
@@ -20832,6 +31401,26 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "memory": {
+                    "description": "Memory is the choice of notes (see ChatsAgent). A write without it keeps\nthe stored choice, so a client that does not know it cannot widen the\nagent; the value must be own, mine_and_own, mine or none (400 otherwise).\nA new agent written without it is \"as before\".",
+                    "type": "string",
+                    "enum": [
+                        "own",
+                        "mine_and_own",
+                        "mine",
+                        "none"
+                    ]
+                },
+                "memory_save": {
+                    "description": "MemorySave is the save rule of the agent (see ChatsAgent). A write\nwithout it keeps the stored rule, so a client that does not know the\nfield cannot loosen the agent. use_mine clears the rule. ask is not\naccepted (400).",
+                    "type": "string",
+                    "enum": [
+                        "always",
+                        "auto",
+                        "never",
+                        "use_mine"
+                    ]
+                },
                 "model": {
                     "type": "string"
                 },
@@ -20839,6 +31428,30 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "network": {
+                    "type": "string"
+                },
+                "projectRef": {
+                    "description": "ProjectRef is set in an export file (version 5) of a project agent: the\nproject of the exporting server, used only as a hint for the name to\noffer. An import never takes the project from it. A write to\nPOST /api/chats/agents ignores it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsAgentProjectRef"
+                        }
+                    ]
+                },
+                "project_id": {
+                    "description": "ProjectID makes the agent a project agent. It is read on create only: it\nmust be one of your own active projects (404 for an unknown or foreign\none, 400 for an archived one). A write to an existing agent may leave it\nout or repeat the stored value; a different value is 400.",
+                    "type": "string"
+                },
+                "resources": {
+                    "description": "Resources names the resources the agent may use for each add-on with\nper-agent resources (see ChatsAgent). A write without it keeps the\nstored list; an empty object clears it. Each mode is read or write (400\notherwise). An export file never carries it and an import drops it, a\nresource ID belongs to one server.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/resourcesets.Sets"
+                        }
+                    ]
+                },
+                "sandbox_profile": {
+                    "description": "SandboxProfile is the sandbox profile of the agent (see ChatsAgent).\nA profile ID, or empty for the default; a value that is not a profile ID\nis 400.",
                     "type": "string"
                 },
                 "skills": {
@@ -20925,6 +31538,10 @@ const docTemplate = `{
         "schema.ChatsBuiltinGroup": {
             "type": "object",
             "properties": {
+                "deferred": {
+                    "description": "Deferred is true when the chat loads the tools of the group on demand:\nthe model sees tool_search, tool_describe and tool_call in their place\n(see the setting chats_tool_search).",
+                    "type": "boolean"
+                },
                 "description": {
                     "type": "string",
                     "example": "The model can search the web and read a public page by its address."
@@ -21217,15 +31834,34 @@ const docTemplate = `{
         "schema.ChatsChatHit": {
             "type": "object",
             "properties": {
+                "at": {
+                    "description": "At is when the matching line was written.",
+                    "type": "string"
+                },
                 "chat": {
                     "$ref": "#/definitions/schema.ChatsConversation"
+                },
+                "highlights": {
+                    "description": "Highlights are the parts of Snippet that match, in order.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSearchRange"
+                    }
                 },
                 "in_title": {
                     "description": "InTitle is true when the title matches.",
                     "type": "boolean"
                 },
+                "matches": {
+                    "description": "Matches is how many lines of the chat match, among the newest matches.",
+                    "type": "integer"
+                },
+                "role": {
+                    "description": "Role is user or assistant: who wrote the matching line.",
+                    "type": "string"
+                },
                 "seq": {
-                    "description": "Seq is the first matching transcript line, or 0 when only the title matches.",
+                    "description": "Seq is the matching transcript line, or 0 when only the title matches.",
                     "type": "integer"
                 },
                 "snippet": {
@@ -21234,20 +31870,65 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsChatProject": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsChatPulledProjects": {
+            "type": "object",
+            "properties": {
+                "project_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "schema.ChatsChatSearchResponse": {
             "type": "object",
             "properties": {
+                "engine": {
+                    "description": "Engine is how the server searched: fts5, pg_trgm or scan.",
+                    "type": "string"
+                },
                 "hits": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/schema.ChatsChatHit"
                     }
+                },
+                "indexing": {
+                    "description": "Indexing is true while the server still adds earlier chats to its\nsearch index, so older chats may be missing from the hits.",
+                    "type": "boolean"
+                },
+                "partial": {
+                    "description": "Partial is true when a server without an index stopped before it had\nread every chat; SearchedChats of TotalChats were read.",
+                    "type": "boolean"
+                },
+                "searched_chats": {
+                    "type": "integer"
+                },
+                "total_chats": {
+                    "type": "integer"
                 }
             }
         },
         "schema.ChatsConnection": {
             "type": "object",
             "properties": {
+                "connection_state": {
+                    "description": "ConnectionState is the state of the login of a connection that uses\none (connected or reconnect_needed); empty for a token.",
+                    "type": "string",
+                    "enum": [
+                        "connected",
+                        "reconnect_needed"
+                    ]
+                },
                 "handle": {
                     "type": "string"
                 },
@@ -21256,6 +31937,13 @@ const docTemplate = `{
                 },
                 "name": {
                     "type": "string"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "shared": {
+                    "description": "Shared is true for a connection that another person shared with you;\nOwner is that person's name. Its login is theirs: only they can connect\nit again.",
+                    "type": "boolean"
                 }
             }
         },
@@ -21302,12 +31990,26 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "allow_trust": {
+                    "description": "AllowTrust sets, for a chat entry of allow, what the people who write in\nthat chat may do: \"answer\" (the bot answers there, but its members are not\ntrusted one by one; the level of an entry that is not listed) or \"act\"\n(every member may use the capabilities that are not sensitive, as a listed\nperson does; sensitive ones still need a pairing).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "approval": {
                     "description": "Approval is what the host does with a trigger that the agent proposes\nfrom a chat of this binding.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/schema.ChatsConnectorApproval"
                         }
+                    ]
+                },
+                "auth_kind": {
+                    "description": "AuthKind is oauth2 for a binding whose credential comes from a login\nat the service (see oauth). Absent for a binding that holds a token\nyou gave.",
+                    "type": "string",
+                    "enum": [
+                        "oauth2"
                     ]
                 },
                 "caps": {
@@ -21334,6 +32036,14 @@ const docTemplate = `{
                 "credentials_only": {
                     "description": "CredentialsOnly is true for a binding without an agent: it holds the\ntoken, the resource list and the write mode, and never answers messages.",
                     "type": "boolean"
+                },
+                "duplicate": {
+                    "description": "Duplicate is present when another enabled connection of yours is the\nsame bot (the add-on reported the same upstream account for both) and\nthis one is enabled too: both then answer the same message.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorDuplicate"
+                        }
+                    ]
                 },
                 "enabled": {
                     "type": "boolean"
@@ -21365,6 +32075,13 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "inbound_media": {
+                    "description": "InboundMedia lists the kinds of file that the bot takes from senders:\nphoto, voice, audio, video_note, document. Empty takes every kind.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "kind": {
                     "type": "string"
                 },
@@ -21373,6 +32090,14 @@ const docTemplate = `{
                 },
                 "notify_chat": {
                     "type": "string"
+                },
+                "oauth": {
+                    "description": "OAuth is the state of the login of an oauth2 binding; absent for a\ntoken binding. It never holds a token or a secret.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorOAuth"
+                        }
+                    ]
                 },
                 "options": {
                     "description": "Options are the choices made for the options of the kind, by option id.\nAn option that is absent has its default (see ChatsConnectorKind).",
@@ -21392,8 +32117,12 @@ const docTemplate = `{
                     "description": "Reason says in plain words why the binding is not active.",
                     "type": "string"
                 },
+                "reply_language": {
+                    "description": "ReplyLanguage is the language of the sentences the bot writes itself in\nthe chat (confirmations, refusals, notes about files): auto (the\nlanguage of the sender's message), en, it, de, es, fr or pt-BR. The\nanswers of the model follow the conversation, not this setting.",
+                    "type": "string"
+                },
                 "reply_mode": {
-                    "description": "ReplyMode is what a sender sees while a turn runs: off (typing, then\nthe answer), progress (a working message that names the tools as they\nstart) or stream (a working message that shows the answer as it is\nwritten). The answer replaces the working message.",
+                    "description": "ReplyMode is what a sender sees while a turn runs: off (typing, then\nthe answer), progress (a working message that names the tools as they\nstart), stream (a working message that shows the answer as it is\nwritten) or reasoning (like stream, and it shows the reasoning of the\nmodel while it thinks; every sender of the binding can read it). The\nanswer replaces the working message.",
                     "type": "string"
                 },
                 "resources": {
@@ -21406,6 +32135,22 @@ const docTemplate = `{
                 "send_files": {
                     "description": "SendFiles sends the files that a turn makes to the sender, after the\nanswer.",
                     "type": "boolean"
+                },
+                "share": {
+                    "description": "Share is the share of the binding, once its owner made it shareable.\nOnly the owner reads it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorShare"
+                        }
+                    ]
+                },
+                "ui_language": {
+                    "description": "UILanguage is the interface language the owner's page last sent, such as\nit or pt-BR. With reply_language auto, the bot speaks in it before it\nreads the language of the sender. Absent when the server was not told.",
+                    "type": "string"
+                },
+                "used_by": {
+                    "description": "UsedBy is how many of your saved agents have this connection in their\nconnections. Present only for a binding of a tool_only kind.",
+                    "type": "integer"
                 },
                 "window_minutes": {
                     "type": "integer"
@@ -21424,7 +32169,33 @@ const docTemplate = `{
         "schema.ChatsConnectorAccess": {
             "type": "object",
             "properties": {
+                "addon_tools": {
+                    "description": "AddonTools lists the tools of the add-ons the agent uses that a\npermission of the connection decides in a messaging chat, so the page can\nsay which tools a missing permission holds back. Absent when none.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorAddonTools"
+                    }
+                },
+                "approvals": {
+                    "description": "Approvals lists the tools of the add-on whose confirmation the owner can\nrelax, and for whom each runs without asking now. Absent when the\nadd-on has none.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorToolApproval"
+                    }
+                },
                 "binding": {
+                    "type": "string"
+                },
+                "language": {
+                    "description": "Language is the language of the localized_message fields, negotiated\nfrom the lang query parameter, then Accept-Language. Absent for\nEnglish.",
+                    "type": "string"
+                },
+                "preview": {
+                    "description": "Preview is true when the view is for a form that is not saved.",
+                    "type": "boolean"
+                },
+                "proposal_mode": {
+                    "description": "ProposalMode is what the connection does with a trigger the agent\nproposes: ask, auto or auto_readonly.",
                     "type": "string"
                 },
                 "recent": {
@@ -21438,6 +32209,13 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.ChatsConnectorAccessSubject"
                     }
+                },
+                "tool_outcomes": {
+                    "description": "ToolOutcomes are the latest add-on tool calls that used this connection\nor came in through this bot, newest first, at most 20. They reset when\nthe server restarts, like recent.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorAccessEvent"
+                    }
                 }
             }
         },
@@ -21447,11 +32225,42 @@ const docTemplate = `{
                 "allowed": {
                     "type": "boolean"
                 },
+                "blocked_by": {
+                    "description": "BlockedBy is the link that refused: server, tools, agent, connection\nor sender.",
+                    "type": "string"
+                },
                 "capability": {
+                    "type": "string"
+                },
+                "code": {
+                    "description": "Code says which link of the chain refused first. It is one of\nserver_setting_off, tools_switch_off, agent_permission_off,\nagent_unavailable, connection_permission_off, no_agent,\nsender_not_listed, sender_needs_pairing, channel_not_trusted,\nrole_not_granted, kind_not_running, context_rule or\nunknown_capability. Only a refused capability has it.",
+                    "type": "string"
+                },
+                "fix": {
+                    "description": "Fix points at the one place that solves it. The server sends no URL.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsConnectorAccessFix"
+                        }
+                    ]
+                },
+                "localized_message": {
+                    "description": "LocalizedMessage is message in the language of the request (see\nChatsConnectorAccess.Language), found by code. Absent when the\nlanguage is English or the code has no translation; message stays\nEnglish and code stays unchanged.",
+                    "type": "string"
+                },
+                "message": {
+                    "description": "Message is one plain sentence for the owner. It names no setting.",
                     "type": "string"
                 },
                 "reason": {
                     "type": "string"
+                },
+                "then_check": {
+                    "description": "ThenCheck lists the links after the first problem that were not\nlooked at, in order: tools, agent, connection, sender and, for\ntriggers.propose, approval. More problems may follow.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "via": {
                     "description": "Via is how the capability is reached: paired, or role:\u003cid\u003e.",
@@ -21462,14 +32271,50 @@ const docTemplate = `{
         "schema.ChatsConnectorAccessEvent": {
             "type": "object",
             "properties": {
+                "addon": {
+                    "description": "Addon and Tool name the add-on tool call, for an event in tool_outcomes;\ncapability is empty then. Outcome is ok, denied, held or error, code\nthe cause and status the HTTP status of the service behind\nthe add-on, when it answered one. Message is the owner's sentence for the\nreason, in English, and localized_message the same in the language of the\nrequest. An outcome holds names and codes, never arguments or results.",
+                    "type": "string"
+                },
                 "allowed": {
                     "type": "boolean"
+                },
+                "asker": {
+                    "description": "Asker is the sender whose message asked for a write that waited in the\nchat; senders then holds who answered it (confirmed, cancelled).",
+                    "type": "string"
                 },
                 "at": {
                     "type": "string"
                 },
                 "capability": {
                     "type": "string"
+                },
+                "chat": {
+                    "type": "string"
+                },
+                "chat_name": {
+                    "type": "string"
+                },
+                "code": {
+                    "description": "Code is the code of a refusal, as in the decisions.",
+                    "type": "string"
+                },
+                "localized_message": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": [
+                        "ok",
+                        "denied",
+                        "held",
+                        "error",
+                        "confirmed",
+                        "cancelled",
+                        "expired"
+                    ]
                 },
                 "reason": {
                     "type": "string"
@@ -21480,13 +32325,96 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "sender_name": {
+                    "description": "SenderName is the display name of the first sender, and Chat and ChatName\nthe conversation of the message: its ID, and its name when the add-on\nknows it. All three are optional; a reader falls back to the IDs.",
+                    "type": "string"
+                },
                 "senders": {
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
+                "status": {
+                    "type": "integer"
+                },
+                "tool": {
+                    "type": "string"
+                },
                 "via": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorAccessFix": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "description": "Field narrows the target: the capability to tick on the connection or\nto grant on the agent, or tools:\u003cgroup\u003e for a Tools switch.",
+                    "type": "string"
+                },
+                "kind": {
+                    "description": "Kind is open_server_setting, open_agent, open_connection, pair_sender\nor add_person.",
+                    "type": "string"
+                },
+                "target": {
+                    "description": "Target is a stable ID: the key of a server setting, an agent ID, a field\nof the connection form (caps, grants, agent_id, allow) or pairing.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorAccessPreviewRequest": {
+            "type": "object",
+            "properties": {
+                "accept_any": {
+                    "type": "boolean"
+                },
+                "agent_id": {
+                    "type": "string"
+                },
+                "allow": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "allow_trust": {
+                    "description": "AllowTrust is the form's trust levels for the chat entries of allow.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "approval_mode": {
+                    "description": "ApprovalMode is the form's choice for proposed triggers: ask, auto or\nauto_readonly. Absent keeps the saved one.",
+                    "type": "string"
+                },
+                "caps": {
+                    "description": "Caps and Grants are the form's permissions; an empty list clears.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "channels": {
+                    "description": "Channels is the form's list of places the bot may post. Absent keeps the\nsaved list.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorChannel"
+                    }
+                },
+                "grants": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorRoleGrant"
+                    }
+                },
+                "kind": {
+                    "description": "Kind is read only for the id \"new\" (a connection that is not saved).",
+                    "type": "string"
+                },
+                "sender": {
+                    "description": "Sender limits the answer to one kind of sender: listed, paired,\nchannel_member, channel_acts, anyone or role:\u003cid\u003e. Absent means every kind.",
                     "type": "string"
                 }
             }
@@ -21503,14 +32431,79 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "note_save": {
+                    "description": "NoteSave is present only when the agent of the connection has the save\nrule auto (Save it and tell me): now when a note from this kind of\nsender, in a one-to-one chat, is saved at once with an Undo, ask when it\nwaits for the owner.",
+                    "type": "string",
+                    "enum": [
+                        "now",
+                        "ask"
+                    ]
+                },
                 "title": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorAddonConnection": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "description": "Name is the name the owner gave the connection.",
+                    "type": "string"
+                },
+                "write_mode": {
+                    "description": "WriteMode is the write mode of that connection: off, propose or auto.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorAddonTools": {
+            "type": "object",
+            "properties": {
+                "addon": {
+                    "description": "Addon is the ID of the add-on.",
+                    "type": "string"
+                },
+                "capability": {
+                    "description": "Capability is the permission the tools need, such as tools.write.",
+                    "type": "string"
+                },
+                "connections": {
+                    "description": "Connections are the connections of the add-on that the agent selected,\nwith their write modes. Only for tools.write; absent otherwise.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorAddonConnection"
+                    }
+                },
+                "tick_removed": {
+                    "description": "TickRemoved is true when the owner took the tick away, so nobody is\ncovered without it.",
+                    "type": "boolean"
+                },
+                "tools": {
+                    "description": "Tools are the names of the tools inside the add-on.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "without_tick": {
+                    "description": "WithoutTick lists the senders who use the tools although the permission\nis not ticked, because the agent is connected to the add-on: \"paired\".\nAbsent when the tick is set, was taken away by the owner, or every\nselected connection is in write mode off.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
         "schema.ChatsConnectorApproval": {
             "type": "object",
             "properties": {
+                "acts": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "max_lifetime_days": {
                     "type": "integer"
                 },
@@ -21531,7 +32524,21 @@ const docTemplate = `{
         "schema.ChatsConnectorCapability": {
             "type": "object",
             "properties": {
+                "binding_only": {
+                    "description": "BindingOnly capabilities are never granted to a role, even when a kind\nlists them: the owner turns them on for the whole binding.",
+                    "type": "boolean"
+                },
                 "description": {
+                    "type": "string"
+                },
+                "language": {
+                    "description": "Language is the language of localized_title and localized_description:\nthe one the request asked for (lang, else Accept-Language) among the\ntranslated ones. Absent for English and for a language with no\ntranslation; title and description stay English.",
+                    "type": "string"
+                },
+                "localized_description": {
+                    "type": "string"
+                },
+                "localized_title": {
                     "type": "string"
                 },
                 "name": {
@@ -21560,6 +32567,37 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "label": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorDuplicate": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "Code is duplicate_connection.",
+                    "type": "string"
+                },
+                "message": {
+                    "description": "Message is the plain sentence for the owner, in the language of the\nrequest (lang, else Accept-Language) with English as the fallback.",
+                    "type": "string"
+                },
+                "others": {
+                    "description": "Others are the other enabled connections of the same bot, oldest first.\nThe oldest enabled one is the one that answers.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorDuplicateRef"
+                    }
+                }
+            }
+        },
+        "schema.ChatsConnectorDuplicateRef": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
                     "type": "string"
                 }
             }
@@ -21620,8 +32658,18 @@ const docTemplate = `{
                     "description": "AgentOptional is true when a binding of this kind may have no agent. It\nthen only holds credentials (token, resource list, write mode).",
                     "type": "boolean"
                 },
+                "auth_kind": {
+                    "description": "AuthKind is oauth2 when the add-on logs people in with OAuth: create\nits bindings with auth_kind oauth2 and no token. Absent for a kind\nwhose bindings hold a token.",
+                    "type": "string"
+                },
                 "description": {
                     "type": "string"
+                },
+                "descriptions": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 },
                 "files": {
                     "description": "Files are the limits of a binding of this kind that has no limit of\nyour own.",
@@ -21632,6 +32680,19 @@ const docTemplate = `{
                     ]
                 },
                 "kind": {
+                    "type": "string"
+                },
+                "language": {
+                    "description": "Language, LocalizedTitle and LocalizedDescription are present only when\nthe request names a language (the lang query parameter, else the\nAccept-Language header) that the kind translates. Each falls back to\nEnglish on its own.",
+                    "type": "string"
+                },
+                "localized_description": {
+                    "type": "string"
+                },
+                "localized_setup": {
+                    "type": "string"
+                },
+                "localized_title": {
                     "type": "string"
                 },
                 "options": {
@@ -21661,12 +32722,44 @@ const docTemplate = `{
                 "sender_hint": {
                     "type": "string"
                 },
+                "setup": {
+                    "description": "Setup says in one short phrase what a binding of this kind needs from\nthe person before it works, such as \"a bot token from @BotFather\". It\nis English plain text and absent when the add-on declares none. Setups\ncarries the translations by language tag; LocalizedSetup follows the\nrule of LocalizedTitle and is absent when the kind has no setup text.",
+                    "type": "string"
+                },
+                "setups": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "thread_history": {
                     "description": "ThreadHistory is true when the platform can give the earlier messages\nof a thread. The host then reads them whenever the bot is mentioned in a\nthread.",
                     "type": "boolean"
                 },
                 "title": {
                     "type": "string"
+                },
+                "titles": {
+                    "description": "Titles and Descriptions carry the translated text of the manifest by\nlanguage tag, when it has some. Title and Description stay English.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "token_guards": {
+                    "description": "TokenGuards say which tokens of this kind are held back until the\nbinding chooses an option, and the confirm_wider_token text it needs.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsConnectorTokenGuard"
+                    }
+                },
+                "tool_only": {
+                    "description": "ToolOnly is true for a kind whose bindings only serve tools. A binding\nhas no agent, never listens and never accepts senders; the server clears\nagent_id, enabled and accept_any. Many agents can use one binding\nthrough their connections. It implies agent_optional.",
+                    "type": "boolean"
+                },
+                "wildcard_resources": {
+                    "description": "WildcardResources is true when a binding of this kind may list owner/*\nor * as resources; * needs confirm_any_resource.",
+                    "type": "boolean"
                 }
             }
         },
@@ -21696,6 +32789,91 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.ChatsConnector"
                     }
+                },
+                "shared": {
+                    "description": "Shared are the bindings of other people shared with the caller, with\ntheir name and state only.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSharedConnector"
+                    }
+                },
+                "sharing": {
+                    "description": "Sharing says whether bindings can be shared on this server: false with\nno named accounts (local-owner mode) or when the sharing policy does not\nrun.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsConnectorOAuth": {
+            "type": "object",
+            "properties": {
+                "account_label": {
+                    "description": "AccountLabel is who the login is at the service, as the add-on says.",
+                    "type": "string"
+                },
+                "expires_at": {
+                    "description": "ExpiresAt is when the access token ends; the host renews it before.\nAbsent when the service gave no end.",
+                    "type": "string"
+                },
+                "has_client": {
+                    "description": "HasClient is true when an administrator saved a client for the add-on.",
+                    "type": "boolean"
+                },
+                "reason": {
+                    "description": "Reason is a fixed code: revoked, client_rejected, refused,\nneeds_approval, credential_rejected, expired, write_failed, unreadable,\nscopes_missing, endpoint_changed or token_too_large.",
+                    "type": "string"
+                },
+                "scopes": {
+                    "description": "Scopes are the scopes the service granted.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "state": {
+                    "description": "State is connected, reconnect_needed (the login ended; reason says\nwhy), not_connected (nobody logged in yet) or needs_approval (an\nadministrator must save the add-on's client first, or approve it again\nafter its login changed; a login that exists keeps its tokens until\nthen). It is read from the shared store: a changed login of the add-on\nshows as needs_approval once a call or a refresh found it.",
+                    "type": "string",
+                    "enum": [
+                        "connected",
+                        "reconnect_needed",
+                        "not_connected",
+                        "needs_approval"
+                    ]
+                }
+            }
+        },
+        "schema.ChatsConnectorOAuthDisconnected": {
+            "type": "object",
+            "properties": {
+                "revoked": {
+                    "description": "Revoked is true when the service confirmed that it revoked the login.\nThe login is removed here in any case.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsConnectorOAuthStart": {
+            "type": "object",
+            "properties": {
+                "return_to": {
+                    "description": "ReturnTo is the page of the web app you come back to, a path under\n/app with an optional query and no fragment. Empty means the\nConnectors page.",
+                    "type": "string"
+                },
+                "scopes": {
+                    "description": "Scopes are the optional scopes of the add-on that you ticked. The\nrequired ones are always asked for.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsConnectorOAuthStarted": {
+            "type": "object",
+            "properties": {
+                "authorize_url": {
+                    "type": "string"
+                },
+                "expires": {
+                    "type": "string"
                 }
             }
         },
@@ -21761,6 +32939,10 @@ const docTemplate = `{
         "schema.ChatsConnectorPermission": {
             "type": "object",
             "properties": {
+                "binding_only": {
+                    "description": "BindingOnly says that the listing grants nothing to a role: the\ncapability belongs to the binding alone.",
+                    "type": "boolean"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -21803,6 +32985,13 @@ const docTemplate = `{
                 "allowed": {
                     "type": "boolean"
                 },
+                "chat": {
+                    "description": "Chat and ChatName say where the last message came from: the ID, and the\nname when the add-on knows it. Reason is why that message was ignored\n(not_listed or not_addressed). All three are optional.",
+                    "type": "string"
+                },
+                "chat_name": {
+                    "type": "string"
+                },
                 "count": {
                     "type": "integer"
                 },
@@ -21816,6 +33005,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "name": {
+                    "type": "string"
+                },
+                "reason": {
                     "type": "string"
                 }
             }
@@ -21831,6 +33023,19 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsConnectorShare": {
+            "type": "object",
+            "properties": {
+                "resource_id": {
+                    "description": "ResourceID names the binding in /api/shares/connection.",
+                    "type": "string"
+                },
+                "shared_with": {
+                    "description": "SharedWith counts the grants, the one to everyone included.",
+                    "type": "integer"
+                }
+            }
+        },
         "schema.ChatsConnectorTest": {
             "type": "object",
             "properties": {
@@ -21838,6 +33043,44 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "bot_username": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorTokenGuard": {
+            "type": "object",
+            "properties": {
+                "allow": {
+                    "type": "string"
+                },
+                "option": {
+                    "type": "string"
+                },
+                "prefix": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsConnectorToolApproval": {
+            "type": "object",
+            "properties": {
+                "runs_without_asking": {
+                    "description": "RunsWithoutAsking says for whom the tool runs without a confirmation\nnow: owner (the owner's own chats) and paired (a sender paired with the\nbot). Empty when the setting is on ask or the write mode is off. Every\nother sender is still asked.",
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "owner",
+                            "paired"
+                        ]
+                    }
+                },
+                "skip": {
+                    "description": "Skip is true when the owner chose not to be asked for this tool.",
+                    "type": "boolean"
+                },
+                "tool": {
+                    "description": "Tool is the name of the tool inside the add-on.",
                     "type": "string"
                 }
             }
@@ -21857,12 +33100,27 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "allow_trust": {
+                    "description": "AllowTrust sets the level of the chat entries of allow, \"answer\" or\n\"act\" (see ChatsConnector.AllowTrust). Absent keeps the saved levels; an\nentry with no level is \"answer\".",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "approval": {
-                    "description": "Approval sets how triggers that the agent proposes from a chat of the\nbinding are approved, and the limits of the automatic modes. Absent\nmeans ask for a new binding and unchanged for an update.",
+                    "description": "Approval sets how triggers that the agent proposes from a chat of the\nbinding are approved, and the limits of the automatic modes. Absent\nmeans ask for a new binding and unchanged for an update. When it is\npresent it replaces the whole approval, acts included: send the acts\nagain to keep them. An act that is not in the closed list is refused.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/schema.ChatsConnectorApproval"
                         }
+                    ]
+                },
+                "auth_kind": {
+                    "description": "AuthKind is token (the default) or oauth2. An oauth2 binding takes no\ntoken: it gets its credential from a login (see the oauth/start call).\nIt is set at create and ignored by an update.",
+                    "type": "string",
+                    "enum": [
+                        "token",
+                        "oauth2"
                     ]
                 },
                 "caps": {
@@ -21881,6 +33139,18 @@ const docTemplate = `{
                 },
                 "confirm_accept_any": {
                     "description": "ConfirmAcceptAny must be the exact text \"accept any message\" in the\nrequest that turns accept_any on (a create with accept_any, or an update\nthat changes it from off to on). Anyone who can message the bot then uses\nthe agent's tools as you, so the server asks you to say you mean it.",
+                    "type": "string"
+                },
+                "confirm_any_resource": {
+                    "description": "ConfirmAnyResource must be the exact text \"allow any resource\" in the\nrequest that adds the entry * to resources. A kind that lists\nwildcard_resources lets resources hold owner/* and *.",
+                    "type": "string"
+                },
+                "confirm_duplicate": {
+                    "description": "ConfirmDuplicate must be the exact text \"answer twice\" to save an\nenabled connection that is the same bot as another enabled connection of\nyours. Without it the request is a 409 of type duplicate_connection, and\nnothing is saved.",
+                    "type": "string"
+                },
+                "confirm_wider_token": {
+                    "description": "ConfirmWiderToken must be the exact text \"accept wider token\" in the\nrequest that chooses the option a token guard of the kind names (for\nexample a classic access token). The token is refused without it.",
                     "type": "string"
                 },
                 "conversation": {
@@ -21904,6 +33174,13 @@ const docTemplate = `{
                         "$ref": "#/definitions/schema.ChatsConnectorRoleGrant"
                     }
                 },
+                "inbound_media": {
+                    "description": "InboundMedia lists the kinds of file that the bot takes from senders\n(photo, voice, audio, video_note, document); a file of another kind is\nnever read, and the sender is told. Empty takes every kind. Absent\nmeans every kind for a new binding and unchanged for an update.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "kind": {
                     "description": "Kind is the platform, as a connector add-on declares it (see the kinds\ncall). It is required to create a binding and ignored by an update.",
                     "type": "string"
@@ -21921,8 +33198,21 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "reply_language": {
+                    "description": "ReplyLanguage is auto, en, it, de, es, fr or pt-BR. Absent means auto\nfor a new binding and unchanged for an update.",
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "en",
+                        "it",
+                        "de",
+                        "es",
+                        "fr",
+                        "pt-BR"
+                    ]
+                },
                 "reply_mode": {
-                    "description": "ReplyMode is off, progress or stream; empty means progress.",
+                    "description": "ReplyMode is off, progress, stream or reasoning; empty means progress.",
                     "type": "string"
                 },
                 "resources": {
@@ -21937,6 +33227,10 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "token": {
+                    "type": "string"
+                },
+                "ui_language": {
+                    "description": "UILanguage is the interface language of the person who saves the\nbinding (a language tag such as it or pt-BR). The page of the add-on\nsends it with each save. Absent or empty keeps the stored value; a value\nthat is not a language tag is ignored.",
                     "type": "string"
                 },
                 "window_minutes": {
@@ -21976,14 +33270,37 @@ const docTemplate = `{
                     "description": "Assistant is true for a chat that has the LocalAI management tools.",
                     "type": "boolean"
                 },
+                "collections": {
+                    "description": "Collections is the restriction of the chat's collection tools: only\nthese collections. Absent means all of the user's collections.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "created": {
                     "type": "string"
+                },
+                "dock": {
+                    "description": "Dock is the panel of pages the interface shows beside the chat, when\nsomething opened one.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsDock"
+                        }
+                    ]
                 },
                 "goal": {
                     "description": "Goal is the chat's goal, when it has one.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/schema.ChatsGoal"
+                        }
+                    ]
+                },
+                "harness": {
+                    "description": "Harness says whether the chat has the context window the chat agent\nneeds. It is set when a single chat is opened, created or changed.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsHarness"
                         }
                     ]
                 },
@@ -22009,6 +33326,27 @@ const docTemplate = `{
                 "parent_id": {
                     "type": "string"
                 },
+                "place": {
+                    "description": "Place is set on a chat that a messaging connection started, when the\nconnection kept where it lives.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsPlace"
+                        }
+                    ]
+                },
+                "project_id": {
+                    "description": "ProjectID is the project the chat belongs to; PulledProjects are the\nother projects it reads from. ProjectID can name a project that was\ndeleted since; read that as no project.",
+                    "type": "string"
+                },
+                "pulled_projects": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "resume_attempts": {
+                    "type": "integer"
+                },
                 "running": {
                     "description": "Running is true while a turn runs. LastTurn is how the last finished turn\nended: done, stopped, failed, interrupted, or paused (the tool loop\nreached its step limit; send a message to go on).",
                     "type": "boolean"
@@ -22026,6 +33364,10 @@ const docTemplate = `{
                 },
                 "updated": {
                     "type": "string"
+                },
+                "will_resume": {
+                    "description": "WillResume is true while the chat is at an interrupted turn that the\nserver resumes by itself (LOCALAI_CHATS_AUTO_RESUME): a client waits and\ndoes not resume it too. ResumeAttempts counts the tries made so far.",
+                    "type": "boolean"
                 }
             }
         },
@@ -22040,14 +33382,37 @@ const docTemplate = `{
                     "description": "Assistant is true for a chat that has the LocalAI management tools.",
                     "type": "boolean"
                 },
+                "collections": {
+                    "description": "Collections is the restriction of the chat's collection tools: only\nthese collections. Absent means all of the user's collections.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "created": {
                     "type": "string"
+                },
+                "dock": {
+                    "description": "Dock is the panel of pages the interface shows beside the chat, when\nsomething opened one.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsDock"
+                        }
+                    ]
                 },
                 "goal": {
                     "description": "Goal is the chat's goal, when it has one.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/schema.ChatsGoal"
+                        }
+                    ]
+                },
+                "harness": {
+                    "description": "Harness says whether the chat has the context window the chat agent\nneeds. It is set when a single chat is opened, created or changed.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsHarness"
                         }
                     ]
                 },
@@ -22061,6 +33426,13 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "string"
+                },
+                "jobs": {
+                    "description": "Jobs are the background jobs of the chat and of its sub-agents, running\nones first (POST /api/chats/{id}/jobs/{job}/kill stops one).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsJob"
+                    }
                 },
                 "kind": {
                     "description": "chat or subagent",
@@ -22094,6 +33466,27 @@ const docTemplate = `{
                         "$ref": "#/definitions/schema.ChatsPending"
                     }
                 },
+                "place": {
+                    "description": "Place is set on a chat that a messaging connection started, when the\nconnection kept where it lives.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsPlace"
+                        }
+                    ]
+                },
+                "project_id": {
+                    "description": "ProjectID is the project the chat belongs to; PulledProjects are the\nother projects it reads from. ProjectID can name a project that was\ndeleted since; read that as no project.",
+                    "type": "string"
+                },
+                "pulled_projects": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "resume_attempts": {
+                    "type": "integer"
+                },
                 "running": {
                     "description": "Running is true while a turn runs. LastTurn is how the last finished turn\nended: done, stopped, failed, interrupted, or paused (the tool loop\nreached its step limit; send a message to go on).",
                     "type": "boolean"
@@ -22111,6 +33504,10 @@ const docTemplate = `{
                 },
                 "updated": {
                     "type": "string"
+                },
+                "will_resume": {
+                    "description": "WillResume is true while the chat is at an interrupted turn that the\nserver resumes by itself (LOCALAI_CHATS_AUTO_RESUME): a client waits and\ndoes not resume it too. ResumeAttempts counts the tries made so far.",
+                    "type": "boolean"
                 }
             }
         },
@@ -22217,8 +33614,19 @@ const docTemplate = `{
                     "description": "Assistant starts the chat with the LocalAI management tools (install\nmodels and backends, change settings). It needs an administrator and the\nassistant setting on, and it cannot be combined with AgentID.",
                     "type": "boolean"
                 },
+                "collections": {
+                    "description": "Collections restricts the chat to these collections of yours: it can\nlist and search only them. Empty means all of your collections. A name\nyou have no collection of matches nothing. At most 100 names, each\n1 to 200 characters. It overrides the project's default list.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "model": {
                     "description": "Model is the model the conversation talks to. It cannot change later.",
+                    "type": "string"
+                },
+                "project_id": {
+                    "description": "ProjectID starts the chat in one of your projects. The project's\ndefaults set the switches the request leaves unset. An unknown or\narchived project refuses the request.",
                     "type": "string"
                 },
                 "switches": {
@@ -22231,6 +33639,46 @@ const docTemplate = `{
                 },
                 "title": {
                     "description": "Title is optional; the conversation is named after its first message otherwise.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsDock": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "type": "integer"
+                },
+                "open": {
+                    "type": "boolean"
+                },
+                "tabs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsDockTab"
+                    }
+                },
+                "width": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsDockResponse": {
+            "type": "object",
+            "properties": {
+                "dock": {
+                    "$ref": "#/definitions/schema.ChatsDock"
+                }
+            }
+        },
+        "schema.ChatsDockTab": {
+            "type": "object",
+            "properties": {
+                "folder": {
+                    "type": "integer"
+                },
+                "page": {
+                    "description": "Page is the folder name of the page (^[a-z0-9][a-z0-9-]{0,63}$).",
                     "type": "string"
                 }
             }
@@ -22693,6 +34141,105 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsExtractConflict": {
+            "type": "object",
+            "properties": {
+                "kept": {
+                    "description": "Kept is where the new content went; empty when it was dropped.",
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsExtractRequest": {
+            "type": "object",
+            "properties": {
+                "dest": {
+                    "description": "Dest is the folder to extract into. Empty: a new folder next to the\narchive, named like it without the extension.",
+                    "type": "string"
+                },
+                "path": {
+                    "description": "Path is the archive, inside your home.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsExtractResponse": {
+            "type": "object",
+            "properties": {
+                "bytes": {
+                    "type": "integer"
+                },
+                "conflicts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsExtractConflict"
+                    }
+                },
+                "dest": {
+                    "description": "Dest is the folder that holds the files.",
+                    "type": "string"
+                },
+                "files": {
+                    "type": "integer"
+                },
+                "folders": {
+                    "type": "integer"
+                },
+                "rev": {
+                    "description": "Rev is the change set; POST /api/chats/files/undo with it takes it all back.",
+                    "type": "integer"
+                },
+                "skipped": {
+                    "description": "Skipped lists up to 200 entries that were not extracted;\nskipped_count counts all of them.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsExtractSkipped"
+                    }
+                },
+                "skipped_count": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsExtractSkipped": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is symlink, hard_link, special, bad_name, not_utf8, too_deep,\ntoo_large, duplicate, encrypted, managed or unreadable.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsFailure": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "Code names the cause, such as model_not_found, upstream, timeout or agent.",
+                    "type": "string"
+                },
+                "detail": {
+                    "description": "Detail is the error text, cleaned, for the technical view.",
+                    "type": "string"
+                },
+                "model": {
+                    "description": "Model is the model the cause is about, when it is known.",
+                    "type": "string"
+                },
+                "retry_after": {
+                    "description": "RetryAfter is the seconds until a model in cooldown loads again.",
+                    "type": "integer"
+                }
+            }
+        },
         "schema.ChatsFile": {
             "type": "object",
             "properties": {
@@ -22705,7 +34252,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "managed": {
-                    "description": "Managed is set on a path LocalAI manages: \"localai\" for the LocalAI\nfolder and the settings files in it, \"chats\" for the Chats folder.",
+                    "description": "Managed is set on a path LocalAI manages: \"localai\" for the LocalAI\nfolder and the settings files in it, and for the folders LocalAI creates\nitself \"chats\" (Chats), \"memory\" (Memory), \"pages\" (pages) and \"skills\"\n(.skills). Other values may be added; a client treats any value as managed.",
                     "type": "string"
                 },
                 "modified": {
@@ -22960,6 +34507,38 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsHarness": {
+            "type": "object",
+            "properties": {
+                "admin": {
+                    "description": "Admin is true when Minimum is the administrator's.",
+                    "type": "boolean"
+                },
+                "can_fix": {
+                    "description": "CanFix is true when this user may change what limits the window: an\nadministrator for the model's window, the chat's owner for the chat's\nown context size.",
+                    "type": "boolean"
+                },
+                "minimum": {
+                    "description": "Minimum is the smallest window that works for this user's role, and\nRecommended is the window to aim at.",
+                    "type": "integer"
+                },
+                "ok": {
+                    "description": "OK is false when the window of the chat is below Minimum.",
+                    "type": "boolean"
+                },
+                "recommended": {
+                    "type": "integer"
+                },
+                "source": {
+                    "description": "Source is what limits the window when OK is false: \"model\" or \"chat\".",
+                    "type": "string"
+                },
+                "window": {
+                    "description": "Window is the window the chat runs with, in tokens (0 when unknown).",
+                    "type": "integer"
+                }
+            }
+        },
         "schema.ChatsHistory": {
             "type": "object",
             "properties": {
@@ -23006,6 +34585,10 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "string"
+                },
+                "job": {
+                    "description": "Job is set when the command starts a background job of the ` + "`" + `job` + "`" + ` tool:\nallowing it also allows the input the model writes to that job later.",
+                    "type": "boolean"
                 }
             }
         },
@@ -23042,6 +34625,13 @@ const docTemplate = `{
                 "exit": {
                     "type": "integer"
                 },
+                "job": {
+                    "type": "string"
+                },
+                "kind": {
+                    "description": "Kind is run (a command of bash, also when empty), job_start, job_input,\njob_kill or job_end. Job is the job id on the lines of a background job.",
+                    "type": "string"
+                },
                 "timed_out": {
                     "type": "boolean"
                 },
@@ -23061,6 +34651,15 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.ChatsHostExecEvent"
                     }
+                }
+            }
+        },
+        "schema.ChatsHostNote": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "Code is one of paired, unsupported, too_long, no_upload, rate,\nheld_back, new_chat or refused.",
+                    "type": "string"
                 }
             }
         },
@@ -23092,6 +34691,53 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsJob": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "boolean"
+                },
+                "bytes": {
+                    "type": "integer"
+                },
+                "chat": {
+                    "description": "Chat is the chat that started the job: this chat, or one of its\nsub-agents. Agent is set for a sub-agent's job.",
+                    "type": "string"
+                },
+                "end": {
+                    "description": "End says why a finished job ended: exit, killed, stopped, lifetime,\nchat_deleted, shell_off, group_off, fenced, sandbox_remade, agent_ended,\nshutdown or start_failed.",
+                    "type": "string"
+                },
+                "ended": {
+                    "type": "string"
+                },
+                "exit": {
+                    "description": "Exit is the exit status of a finished job (128 plus n for signal n);\n-1 when it is not known.",
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "last_output": {
+                    "description": "LastOutput is when a running job last wrote output; Bytes is how much it\nwrote. Both are absent when the node that runs it did not answer.",
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "Provider is \"builtin\" (this machine) or the id of the add-on that runs it.",
+                    "type": "string"
+                },
+                "started": {
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State is starting, running, ending, exited, killed, failed or lost (the\nnode that ran it is gone).",
+                    "type": "string"
+                }
+            }
+        },
         "schema.ChatsLoop": {
             "type": "object",
             "properties": {
@@ -23113,6 +34759,10 @@ const docTemplate = `{
                     "description": "IntervalSeconds is Interval in seconds; 0 for a self-paced loop.",
                     "type": "integer"
                 },
+                "kind": {
+                    "description": "Kind is \"wait\" for a wait (the server checks a source and wakes the\nmodel once); empty for a loop.",
+                    "type": "string"
+                },
                 "last_run": {
                     "type": "string"
                 },
@@ -23126,6 +34776,14 @@ const docTemplate = `{
                 "reason": {
                     "description": "Reason says why the loop is paused or ended, or why it waits.",
                     "type": "string"
+                },
+                "report": {
+                    "description": "Report is set when the loop tells you in a messaging app how it ended.\nA loop with no report sends nothing.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsLoopReport"
+                        }
+                    ]
                 },
                 "running": {
                     "description": "Running is true while a run of the loop goes on in the chat.",
@@ -23141,12 +34799,27 @@ const docTemplate = `{
                 "wait": {
                     "description": "Wait is what the model of a self-paced loop said it waits for.",
                     "type": "string"
+                },
+                "watch": {
+                    "description": "Watch is set when Kind is \"wait\": what it watches and how the checks go.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsWait"
+                        }
+                    ]
                 }
             }
         },
         "schema.ChatsLoopList": {
             "type": "object",
             "properties": {
+                "jobs": {
+                    "description": "Jobs are the background jobs of the chat and of its sub-agents.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsJob"
+                    }
+                },
                 "loops": {
                     "type": "array",
                     "items": {
@@ -23163,6 +34836,29 @@ const docTemplate = `{
                 },
                 "run": {
                     "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsLoopReport": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "description": "Channel is the id of the channel, and ChannelLabel its name; empty when\nthe channel has none or is gone.",
+                    "type": "string"
+                },
+                "channel_label": {
+                    "type": "string"
+                },
+                "connection": {
+                    "description": "Connection is the id of the connection, and ConnectionName the name you\ngave it; empty when the connection is gone.",
+                    "type": "string"
+                },
+                "connection_name": {
+                    "type": "string"
+                },
+                "mode": {
+                    "description": "Mode is on_done (the summary of a finished loop) or on_problem (a run\nfails, the loop stops at a limit, or the system stops it).",
+                    "type": "string"
                 }
             }
         },
@@ -23317,6 +35013,10 @@ const docTemplate = `{
                 },
                 "ok": {
                     "type": "boolean"
+                },
+                "output": {
+                    "description": "Output is what a local command wrote to its error stream before it\nfailed, with secrets removed. It is absent for a remote server and for\na silent command.",
+                    "type": "string"
                 },
                 "tool_details": {
                     "description": "ToolDetails is each tool with the description its server gives, in the\norder of tools.",
@@ -23550,6 +35250,154 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsMemoryFix": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string",
+                    "example": "open_memory_settings"
+                },
+                "target": {
+                    "type": "string",
+                    "example": "memory"
+                }
+            }
+        },
+        "schema.ChatsMemoryForget": {
+            "type": "object",
+            "properties": {
+                "done": {
+                    "description": "Done is true when the provider forgot. Otherwise the change waits for you\nto confirm it on the Add-ons page.",
+                    "type": "boolean"
+                },
+                "proposal": {
+                    "description": "Proposal names the change that waits.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsMemoryRequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "example": false
+                },
+                "messaging_save": {
+                    "description": "MessagingSave is the messaging row (see ChatsMemorySettings).",
+                    "type": "string",
+                    "enum": [
+                        "ask",
+                        "paired_private",
+                        "never"
+                    ],
+                    "example": "ask"
+                },
+                "save_mode": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "ask",
+                        "always",
+                        "never"
+                    ],
+                    "example": "ask"
+                }
+            }
+        },
+        "schema.ChatsMemorySettings": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "description": "Available is false when the server has no files, which notes need.",
+                    "type": "boolean",
+                    "example": true
+                },
+                "enabled": {
+                    "description": "Enabled is memory On or Off for all your chats and agents.",
+                    "type": "boolean",
+                    "example": true
+                },
+                "enabled_set": {
+                    "description": "EnabledSet is true once you chose. Before that memory is on, unless you\nhad disabled the Memory add-on to stop it.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "messaging_save": {
+                    "description": "MessagingSave is how a note proposed in a chat of a messaging app is\nsaved: ask (the bot asks in the chat; the default), paired_private\n(saved at once to the conversation when the sender is paired and the\nchat is one-to-one) or never. It cannot loosen save_mode: with always or\nnever the row has no looser effect.",
+                    "type": "string",
+                    "enum": [
+                        "ask",
+                        "paired_private",
+                        "never"
+                    ],
+                    "example": "ask"
+                },
+                "provider": {
+                    "description": "Provider is what serves memory: builtin.",
+                    "type": "string",
+                    "example": "builtin"
+                },
+                "save_mode": {
+                    "description": "SaveMode is how a note is saved: auto (save it and tell me), ask (ask me\nfirst, the default), always (always confirm: like ask, and nothing can\nloosen it; undo and forget by the model wait for you too) or never.",
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "ask",
+                        "always",
+                        "never"
+                    ],
+                    "example": "ask"
+                },
+                "save_mode_set": {
+                    "description": "SaveModeSet is true once you chose in this setting.",
+                    "type": "boolean",
+                    "example": false
+                }
+            }
+        },
+        "schema.ChatsMemoryState": {
+            "type": "object",
+            "properties": {
+                "blocked_by": {
+                    "description": "BlockedBy is who holds that switch: chat, agent, user or server.",
+                    "type": "string",
+                    "example": "chat"
+                },
+                "code": {
+                    "description": "Code names the level that is off: memory_off_chat, memory_off_agent,\nmemory_off_user, memory_off_files or memory_provider_unavailable (the\nadd-on you picked to serve memory cannot serve now; provider names it).\nAbsent when on.",
+                    "type": "string",
+                    "example": "memory_off_chat"
+                },
+                "fix": {
+                    "description": "Fix says where to turn memory on again: kind open_tools_menu,\nopen_memory_settings, open_agent or open_server_setting.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsMemoryFix"
+                        }
+                    ]
+                },
+                "on": {
+                    "description": "On is true when the chat reads and may save notes.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "provider": {
+                    "description": "Provider is the ID of the add-on that cannot serve, with the code\nmemory_provider_unavailable, and ProviderTitle the name it shows.",
+                    "type": "string"
+                },
+                "provider_title": {
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is an English sentence for logs; the interface words it by Code.",
+                    "type": "string"
+                }
+            }
+        },
         "schema.ChatsMessage": {
             "type": "object",
             "properties": {
@@ -23590,12 +35438,28 @@ const docTemplate = `{
                     "description": "DurMs is how long the model thought, for reasoning lines.",
                     "type": "integer"
                 },
+                "failure": {
+                    "description": "Failure is set on a failure line: why the turn ended (Text is the reason\nin English).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsFailure"
+                        }
+                    ]
+                },
                 "goal_event": {
                     "description": "GoalEvent is set on a goal line: set, replaced, continue (a message the\nserver sent by itself to go on; Text is that message and GoalTurn its\nautomatic turn), paused (Text is the reason), resumed, done (Text is the\nsummary), blocked (Text is the reason) or cleared.",
                     "type": "string"
                 },
                 "goal_turn": {
                     "type": "integer"
+                },
+                "host_note": {
+                    "description": "HostNote is set on a hostnote line: something the host did on its own\nabout a message of a messaging connection. Text is the sentence the\nsender was told, when there was one.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsHostNote"
+                        }
+                    ]
                 },
                 "invoked": {
                     "description": "Invoked is the skill or saved agent a user line was sent with.",
@@ -23618,8 +35482,16 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "role": {
-                    "description": "user, assistant, tool, checkpoint, reasoning, compacted, cleared or goal",
+                    "description": "user, assistant, tool, checkpoint, reasoning, compacted, cleared, goal, failure, thread or hostnote",
                     "type": "string"
+                },
+                "sender": {
+                    "description": "Sender is set on a user line that a messaging connection delivered: who\nwrote it, as the connection told it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsSender"
+                        }
+                    ]
                 },
                 "seq": {
                     "type": "integer"
@@ -23627,6 +35499,14 @@ const docTemplate = `{
                 "text": {
                     "description": "Text is what was written. For a user line it is the text you typed:\nthe files you attached are in Attachments.",
                     "type": "string"
+                },
+                "thread": {
+                    "description": "Thread is set on a thread line: the earlier messages of the messaging\nthread, exactly as the model's first turn got them. The line is for\nreading only; the model never gets it as a message.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsThread"
+                        }
+                    ]
                 },
                 "turn": {
                     "type": "integer"
@@ -23661,6 +35541,9 @@ const docTemplate = `{
                 "body": {
                     "type": "string"
                 },
+                "code": {
+                    "type": "string"
+                },
                 "created": {
                     "type": "string"
                 },
@@ -23672,6 +35555,10 @@ const docTemplate = `{
                 },
                 "link": {
                     "type": "string"
+                },
+                "params": {
+                    "type": "object",
+                    "additionalProperties": {}
                 },
                 "read": {
                     "type": "boolean"
@@ -23747,6 +35634,139 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsOAuthClient": {
+            "type": "object",
+            "properties": {
+                "addon": {
+                    "type": "string"
+                },
+                "approved": {
+                    "type": "boolean"
+                },
+                "approved_at": {
+                    "type": "string"
+                },
+                "approved_by": {
+                    "type": "string"
+                },
+                "approved_digest": {
+                    "description": "ApprovedDigest is the digest the stored approval is for;\nCurrentDigest the digest of the login the add-on declares now. Send\ncurrent_digest back to save.",
+                    "type": "string"
+                },
+                "callback_url": {
+                    "description": "CallbackURL is the address to register with the service, as this\nrequest reaches the server. Empty when the server cannot tell it (set\nLOCALAI_BASE_URL).",
+                    "type": "string"
+                },
+                "client_id": {
+                    "type": "string"
+                },
+                "configured": {
+                    "description": "Configured is true when a client is stored; Approved when its approval\nis for the login the add-on declares now.",
+                    "type": "boolean"
+                },
+                "current_digest": {
+                    "type": "string"
+                },
+                "descriptor": {
+                    "description": "Descriptor is the login the add-on declares, for the form to show.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsOAuthDescriptor"
+                        }
+                    ]
+                },
+                "has_secret": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsOAuthClientConflict": {
+            "type": "object",
+            "properties": {
+                "current_digest": {
+                    "type": "string"
+                },
+                "error": {
+                    "$ref": "#/definitions/schema.APIError"
+                }
+            }
+        },
+        "schema.ChatsOAuthClientWrite": {
+            "type": "object",
+            "properties": {
+                "client_id": {
+                    "type": "string"
+                },
+                "client_secret": {
+                    "description": "ClientSecret is write-only. Absent keeps the stored secret; a public\nclient (client_auth none) has none.",
+                    "type": "string"
+                },
+                "descriptor_digest": {
+                    "description": "DescriptorDigest is the current_digest the form showed. When the\nadd-on's login changed since, the save is a 409 with the new digest.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsOAuthDescriptor": {
+            "type": "object",
+            "properties": {
+                "authorize_params": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsOAuthParam"
+                    }
+                },
+                "authorize_url": {
+                    "type": "string"
+                },
+                "client_auth": {
+                    "type": "string",
+                    "enum": [
+                        "basic",
+                        "post",
+                        "none"
+                    ]
+                },
+                "hosts": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "optional_scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "pkce": {
+                    "type": "string"
+                },
+                "required_scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "revoke_url": {
+                    "type": "string"
+                },
+                "token_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsOAuthParam": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.ChatsPending": {
             "type": "object",
             "properties": {
@@ -23772,6 +35792,509 @@ const docTemplate = `{
             "properties": {
                 "text": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.ChatsPlace": {
+            "type": "object",
+            "properties": {
+                "direct": {
+                    "description": "Direct is true for a conversation with one person; Thread when the chat\nbelongs to a thread of the platform.",
+                    "type": "boolean"
+                },
+                "link": {
+                    "description": "Link opens the thread or message on the platform. It is an https address.",
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is the channel or group name, when the connection told it.",
+                    "type": "string"
+                },
+                "thread": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsProject": {
+            "type": "object",
+            "properties": {
+                "agent_count": {
+                    "description": "AgentCount is the number of saved agents that belong to the project.",
+                    "type": "integer"
+                },
+                "attached": {
+                    "description": "Attached lists the tools the project holds. Every chat and agent of the\nproject has them on, with no per-chat step, on each turn, and a chat\ncannot switch them off. Defaults stay the limit: an attached entry\noutside a non-empty limit is refused on write. The list is empty while\nAttachedBlocked is true.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsProjectDefaults"
+                        }
+                    ]
+                },
+                "attached_blocked": {
+                    "description": "AttachedBlocked is true when the project file holds an attached block\nthat is ignored because another person may write the project folder (a\nshare with write access). The skills of the project have the same rule\n(SkillsBlocked).",
+                    "type": "boolean"
+                },
+                "chat_count": {
+                    "description": "ChatCount is the number of chats in the project, counted up to 500.",
+                    "type": "integer"
+                },
+                "defaults": {
+                    "$ref": "#/definitions/schema.ChatsProjectDefaults"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "owner": {
+                    "description": "Owner is the id of the user that owns the project. Every response\ncarries it: the caller's own id, or the user an administrator acts for\nwith ?user_id=.",
+                    "type": "string"
+                },
+                "skills_blocked": {
+                    "description": "SkillsBlocked is true when the project's own skills are off because\nanother person may write the project folder (a share with write access).\nIt is set on a read of one project; the list leaves it out.",
+                    "type": "boolean"
+                },
+                "slug": {
+                    "description": "Slug is the name of the project's folder under Projects/ in the caller's files.",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Status is active, archived or broken. Error says why a project is broken.",
+                    "type": "string"
+                },
+                "updated": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectAgent": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "files_mode": {
+                    "description": "FilesMode is read or write: how the agent uses the files of the project.",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "memory_write": {
+                    "description": "MemoryWrite is true when the agent holds the grant project.memory.write.",
+                    "type": "boolean"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "unavailable": {
+                    "description": "Unavailable is true while the agent cannot start: its project is\narchived, deleted or broken, or its folders changed.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsProjectAgentList": {
+            "type": "object",
+            "properties": {
+                "agents": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProjectAgent"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectConnection": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string"
+                },
+                "agent_name": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectConnectionList": {
+            "type": "object",
+            "properties": {
+                "connections": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProjectConnection"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectDefaults": {
+            "type": "object",
+            "properties": {
+                "addons": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "collections": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "connectors": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "mcp_servers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectList": {
+            "type": "object",
+            "properties": {
+                "projects": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProject"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectLoop": {
+            "type": "object",
+            "properties": {
+                "chat_id": {
+                    "type": "string"
+                },
+                "chat_title": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "prompt": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectLoopList": {
+            "type": "object",
+            "properties": {
+                "loops": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProjectLoop"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectMemory": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProjectMemoryFile"
+                    }
+                },
+                "index": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectMemoryFile": {
+            "type": "object",
+            "properties": {
+                "modified": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "size": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsProjectMemoryWrite": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectTrigger": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string"
+                },
+                "agent_name": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "folder": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "next": {
+                    "description": "Next is when a schedule trigger runs next. It is absent for a trigger\nthat is off, a file trigger, or a schedule with no later time.",
+                    "type": "string"
+                },
+                "proposed": {
+                    "description": "Proposed is always false for now: a trigger that a model proposed and\nyou have not confirmed is not listed. The field keeps the shape stable.",
+                    "type": "boolean"
+                },
+                "schedule": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProjectTriggerList": {
+            "type": "object",
+            "properties": {
+                "triggers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProjectTrigger"
+                    }
+                }
+            }
+        },
+        "schema.ChatsProjectWrite": {
+            "type": "object",
+            "properties": {
+                "attached": {
+                    "$ref": "#/definitions/schema.ChatsProjectDefaults"
+                },
+                "defaults": {
+                    "$ref": "#/definitions/schema.ChatsProjectDefaults"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProvider": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "description": "Available is false for an add-on that cannot serve now.",
+                    "type": "boolean"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID is builtin, off or the ID of an add-on.",
+                    "type": "string",
+                    "example": "builtin"
+                },
+                "kind": {
+                    "description": "Kind is builtin, addon or off.",
+                    "type": "string",
+                    "enum": [
+                        "builtin",
+                        "addon",
+                        "off"
+                    ],
+                    "example": "builtin"
+                },
+                "properties": {
+                    "description": "Properties are the facts the add-on declared about itself, such as\nremote and undo.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "roles": {
+                    "description": "Roles are the roles of the slot that the add-on fills with tools.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "selected": {
+                    "type": "boolean"
+                },
+                "title": {
+                    "type": "string",
+                    "example": "Built-in"
+                }
+            }
+        },
+        "schema.ChatsProviderHealth": {
+            "type": "object",
+            "properties": {
+                "cooling_down": {
+                    "description": "CoolingDown is true while the host does not call the provider.",
+                    "type": "boolean"
+                },
+                "last": {
+                    "description": "Last is the outcome of the failure that stopped the calls: failed,\ntimeout or bad_result.",
+                    "type": "string",
+                    "example": "timeout"
+                },
+                "notice": {
+                    "description": "Notice is a plain sentence for the person.",
+                    "type": "string"
+                },
+                "retry_at": {
+                    "description": "RetryAt is when the host calls the provider again (RFC 3339).",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsProviderRequest": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "description": "Provider is builtin, off (when the slot allows it) or the ID of an add-on\nthat declares the slot.",
+                    "type": "string",
+                    "example": "builtin"
+                }
+            }
+        },
+        "schema.ChatsProviderResolution": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "description": "Active is what serves: builtin, an add-on ID or off.",
+                    "type": "string",
+                    "example": "builtin"
+                },
+                "addon_id": {
+                    "description": "AddonID and AddonTitle name the add-on a failure is about.",
+                    "type": "string"
+                },
+                "addon_title": {
+                    "type": "string"
+                },
+                "code": {
+                    "description": "Code says why the slot is off: provider_off, provider_unavailable (the\nadd-on you picked cannot serve; the slot does not move to the built-in\nprovider) or provider_unreadable. Absent when on.",
+                    "type": "string",
+                    "example": "provider_unavailable"
+                },
+                "off": {
+                    "type": "boolean"
+                },
+                "reason": {
+                    "description": "Reason is an English sentence for logs; the interface words it by Code.",
+                    "type": "string"
+                },
+                "selected": {
+                    "description": "Selected is your stored choice, or the default of the slot.",
+                    "type": "string",
+                    "example": "builtin"
+                },
+                "slot": {
+                    "type": "string",
+                    "example": "memory"
+                },
+                "stored": {
+                    "description": "Stored is true once you chose.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ChatsProviderSlot": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "health": {
+                    "description": "Health says when the host leaves the provider alone after repeated\nfailures. Absent while the provider answers.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsProviderHealth"
+                        }
+                    ]
+                },
+                "id": {
+                    "type": "string",
+                    "example": "memory"
+                },
+                "off_means": {
+                    "description": "OffMeans is what Off does for this slot.",
+                    "type": "string"
+                },
+                "providers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProvider"
+                    }
+                },
+                "resolution": {
+                    "$ref": "#/definitions/schema.ChatsProviderResolution"
+                },
+                "title": {
+                    "type": "string",
+                    "example": "Memory"
+                },
+                "version": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
+        },
+        "schema.ChatsProviderSlots": {
+            "type": "object",
+            "properties": {
+                "slots": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsProviderSlot"
+                    }
                 }
             }
         },
@@ -23810,6 +36333,165 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsSandboxProfile": {
+            "type": "object",
+            "properties": {
+                "allowed": {
+                    "description": "Allowed says whether the administrator's policy lets you use it.",
+                    "type": "boolean"
+                },
+                "cpus": {
+                    "description": "CPUs, MemoryMiB and DiskMiB are the limits of one sandbox of the\nprofile, before the administrator's quota.",
+                    "type": "integer"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "disk_mib": {
+                    "type": "integer",
+                    "example": 20480
+                },
+                "has_previous": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "media"
+                },
+                "memory_mib": {
+                    "type": "integer",
+                    "example": 4096
+                },
+                "state": {
+                    "$ref": "#/definitions/schema.ChatsSandboxProfileState"
+                },
+                "title": {
+                    "type": "string",
+                    "example": "Media"
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ChatsSandboxProfileChoices": {
+            "type": "object",
+            "properties": {
+                "addon": {
+                    "type": "string"
+                },
+                "default": {
+                    "type": "string"
+                },
+                "profiles": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSandboxProfile"
+                    }
+                }
+            }
+        },
+        "schema.ChatsSandboxProfileSet": {
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "description": "Profile is a profile ID, or empty for the agent's or the default one.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsSandboxProfileState": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "percent": {
+                    "type": "integer"
+                },
+                "phase": {
+                    "description": "Phase is idle (not pulled yet; the first use pulls it), pulling, ready,\nfailed or absent (this release has no image for it).",
+                    "type": "string",
+                    "enum": [
+                        "idle",
+                        "pulling",
+                        "ready",
+                        "failed",
+                        "absent"
+                    ]
+                }
+            }
+        },
+        "schema.ChatsSandboxProfileView": {
+            "type": "object",
+            "properties": {
+                "addon": {
+                    "type": "string"
+                },
+                "applies": {
+                    "description": "Applies is false when the commands of the chat run in no sandbox with\nprofiles (built-in bash, no add-on, or commands on this machine).",
+                    "type": "boolean"
+                },
+                "default": {
+                    "type": "string"
+                },
+                "fallback": {
+                    "description": "Fallback is true when the next command cannot use Profile because its\nimage is not available, and runs base. FallbackReason says why.",
+                    "type": "boolean"
+                },
+                "fallback_reason": {
+                    "type": "string"
+                },
+                "newer_image": {
+                    "description": "NewerImage is true when the running sandbox was made from an older image\nthan the current one. The newer image applies when the sandbox restarts.",
+                    "type": "boolean"
+                },
+                "profile": {
+                    "description": "Profile is the one the next command runs. Selected is your own choice\nfor the chat (\"\" when none). Source says where Profile comes from.",
+                    "type": "string"
+                },
+                "profiles": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSandboxProfile"
+                    }
+                },
+                "selected": {
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string",
+                    "enum": [
+                        "chat",
+                        "agent",
+                        "default"
+                    ]
+                }
+            }
+        },
+        "schema.ChatsSandboxProfilesAdmin": {
+            "type": "object",
+            "properties": {
+                "addon": {
+                    "type": "string"
+                },
+                "profiles": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSandboxProfile"
+                    }
+                },
+                "roles": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "schema.ChatsSearchHit": {
             "type": "object",
             "properties": {
@@ -23838,6 +36520,17 @@ const docTemplate = `{
                 },
                 "snippet": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.ChatsSearchRange": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "integer"
+                },
+                "start": {
+                    "type": "integer"
                 }
             }
         },
@@ -23894,6 +36587,25 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsSender": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "description": "ID is the platform's id of the sender, for the small print; the name is\nwhat to read.",
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "standing": {
+                    "description": "Standing is how the host saw the sender: owner, verified, listed,\nchannel or anyone.",
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.ChatsSettings": {
             "type": "object",
             "properties": {
@@ -23919,6 +36631,108 @@ const docTemplate = `{
                 "top_p": {
                     "description": "TopP is above 0 and at most 1.",
                     "type": "number"
+                }
+            }
+        },
+        "schema.ChatsSharedConnector": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "description": "Active is false when the add-on that serves it does not run; Reason\nthen says so.",
+                    "type": "boolean"
+                },
+                "addon": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "description": "Enabled says whether the owner listens with it.",
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "owner": {
+                    "description": "Owner is the display name of the person who shared it.",
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "role": {
+                    "description": "Role is always use: a binding is never shared with everyone.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsSharedProject": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error says why a broken project cannot be read.",
+                    "type": "string"
+                },
+                "mode": {
+                    "description": "Mode is what you may do in the project folder: \"read\" or \"write\".",
+                    "type": "string",
+                    "enum": [
+                        "read",
+                        "write"
+                    ]
+                },
+                "name": {
+                    "type": "string"
+                },
+                "owner_name": {
+                    "description": "OwnerName is the display name of the owner.",
+                    "type": "string"
+                },
+                "ref": {
+                    "description": "Ref names the project in the other shared-project routes and in the\nlist a chat pulls from.",
+                    "type": "string",
+                    "example": "s:12"
+                },
+                "status": {
+                    "description": "Status is \"active\", \"archived\" or \"broken\". An archived or broken\nproject is listed but is not available.",
+                    "type": "string",
+                    "enum": [
+                        "active",
+                        "archived",
+                        "broken"
+                    ]
+                }
+            }
+        },
+        "schema.ChatsSharedProjectList": {
+            "type": "object",
+            "properties": {
+                "projects": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSharedProject"
+                    }
+                }
+            }
+        },
+        "schema.ChatsSharedProjectMemory": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "index": {
+                    "type": "string"
                 }
             }
         },
@@ -23963,14 +36777,29 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "layer": {
-                    "description": "Layer is where it comes from: folder (a .skills folder of your files),\nagent (a saved agent proposed it), personal, shared, addon (an installed\nadd-on ships it) or builtin.",
+                    "description": "Layer is where it comes from: folder (a .skills folder of your files),\nproject (the skills folder of a project), agent (a saved agent proposed\nit), personal, shared, addon (an installed\nadd-on ships it) or builtin.",
                     "type": "string"
+                },
+                "locked": {
+                    "type": "boolean"
                 },
                 "name": {
                     "type": "string"
                 },
+                "new": {
+                    "description": "New is true for a personal skill that was imported and that no chat has\nused yet. The first use clears it.",
+                    "type": "boolean"
+                },
                 "path": {
                     "description": "Path is the path of its SKILL.md as the model sees it.",
+                    "type": "string"
+                },
+                "project": {
+                    "description": "Project is the folder name of the project that owns a skill of the\nproject layer.",
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "Provider names the provider slot whose active provider ships the skill\n(\"memory\"), and Locked is true then: the host grants it to a chat that\nuses the slot, an agent does not list it. Both are absent for any other\nskill.",
                     "type": "string"
                 },
                 "removable": {
@@ -24007,6 +36836,42 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsSkillImportResult": {
+            "type": "object",
+            "properties": {
+                "rev": {
+                    "description": "Rev is the revision of the change set; undo it from the file history.",
+                    "type": "integer"
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsSkillImported"
+                    }
+                }
+            }
+        },
+        "schema.ChatsSkillImported": {
+            "type": "object",
+            "properties": {
+                "bytes": {
+                    "type": "integer"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "files": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "scripts": {
+                    "description": "Scripts counts the files below scripts/. They are stored, never run by\nthe import.",
+                    "type": "integer"
+                }
+            }
+        },
         "schema.ChatsSkillList": {
             "type": "object",
             "properties": {
@@ -24022,6 +36887,10 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.ChatsSkill"
                     }
+                },
+                "skills_blocked": {
+                    "description": "SkillsBlocked is true when the list is for a project (layer=project) and\nits skills are off because another person may write the project folder.",
+                    "type": "boolean"
                 }
             }
         },
@@ -24057,10 +36926,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "layer": {
-                    "description": "personal or shared",
+                    "description": "personal, shared or project",
                     "type": "string"
                 },
                 "name": {
+                    "type": "string"
+                },
+                "project": {
+                    "description": "Project is the project's ID, for the project layer.",
                     "type": "string"
                 }
             }
@@ -24076,6 +36949,14 @@ const docTemplate = `{
                 },
                 "last_turn": {
                     "type": "string"
+                },
+                "loop": {
+                    "description": "Loop is the loop or wait that keeps the run going, when it has one. The\nrun shows as running while it is set.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsLoop"
+                        }
+                    ]
                 },
                 "running": {
                     "description": "Running is true while the run's turn is going. LastTurn is how its last\nturn ended: done, stopped, failed, interrupted or paused.",
@@ -24151,6 +37032,22 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsThread": {
+            "type": "object",
+            "properties": {
+                "cut": {
+                    "description": "Cut is true when older messages were left out.",
+                    "type": "boolean"
+                },
+                "lines": {
+                    "description": "Lines are the messages, oldest first, each as \"Author: text\".",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "schema.ChatsToolApp": {
             "type": "object",
             "properties": {
@@ -24184,6 +37081,57 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "schema.ChatsToolCap": {
+            "type": "object",
+            "properties": {
+                "addons": {
+                    "description": "Addons are the add-ons that lost tools, by ID.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.ChatsToolCapAddon"
+                    }
+                },
+                "cut": {
+                    "description": "Cut is how many tools were left out.",
+                    "type": "integer",
+                    "example": 16
+                },
+                "limit": {
+                    "description": "Limit is the most add-on tools one chat is offered.",
+                    "type": "integer",
+                    "example": 64
+                },
+                "offered": {
+                    "description": "Offered is how many add-on tools are offered.",
+                    "type": "integer",
+                    "example": 64
+                },
+                "total": {
+                    "description": "Total is how many your add-ons declare: offered plus cut.",
+                    "type": "integer",
+                    "example": 80
+                }
+            }
+        },
+        "schema.ChatsToolCapAddon": {
+            "type": "object",
+            "properties": {
+                "cut": {
+                    "description": "Cut is how many tools of the add-on were left out.",
+                    "type": "integer",
+                    "example": 16
+                },
+                "id": {
+                    "type": "string",
+                    "example": "notes"
+                },
+                "title": {
+                    "description": "Title is what the add-on declares for people, or empty.",
+                    "type": "string",
+                    "example": "Notes"
                 }
             }
         },
@@ -24320,6 +37268,14 @@ const docTemplate = `{
                         "$ref": "#/definitions/schema.ChatsToolFallback"
                     }
                 },
+                "memory": {
+                    "description": "Memory says whether memory works in this chat and, when it does not,\nwhich level turned it off and where to turn it on again.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsMemoryState"
+                        }
+                    ]
+                },
                 "off": {
                     "description": "Off is the list of MCP switches in force.",
                     "type": "array",
@@ -24332,6 +37288,14 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.ChatsMCPServerSwitch"
                     }
+                },
+                "tool_cap": {
+                    "description": "ToolCap is present only when the server limits how many add-on tools a\nchat is offered and that limit left some out. Absent otherwise.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsToolCap"
+                        }
+                    ]
                 }
             }
         },
@@ -24418,16 +37382,37 @@ const docTemplate = `{
                 "agent_id": {
                     "type": "string"
                 },
+                "binding": {
+                    "description": "Binding is the ID of the messaging connection that a trigger belongs to\nwhen it was made without asking under that connection's approval. Such a\ntrigger stays within the acts the connection allows. Empty otherwise.",
+                    "type": "string"
+                },
                 "cost": {
                     "$ref": "#/definitions/schema.ChatsTriggerCost"
                 },
                 "daily_cap": {
                     "type": "integer"
                 },
+                "delivery": {
+                    "description": "Delivery says where the answer of each run goes.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsTriggerDelivery"
+                        }
+                    ]
+                },
+                "effective_run_limit": {
+                    "type": "string"
+                },
                 "enabled": {
                     "type": "boolean"
                 },
+                "event_type": {
+                    "type": "string"
+                },
                 "folder": {
+                    "type": "string"
+                },
+                "hook_path": {
                     "type": "string"
                 },
                 "id": {
@@ -24446,6 +37431,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/schema.ChatsTriggerRun"
                         }
                     ]
+                },
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "min_gap_seconds": {
                     "description": "MinGapSeconds is the shortest time between two runs of a file trigger.",
@@ -24480,7 +37471,15 @@ const docTemplate = `{
                 "read_only_why": {
                     "type": "string"
                 },
+                "run_limit": {
+                    "description": "RunLimit is the longest one run may take, as a duration such as 30m;\nempty means the administrator's run limit. EffectiveRunLimit is what\napplies now: the least of RunLimit and the administrator's limit.",
+                    "type": "string"
+                },
                 "schedule": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source, EventType and Matches say which events an event trigger takes.\nHookPath is the path of its hook; add the address of the server.",
                     "type": "string"
                 },
                 "source_chat_id": {
@@ -24568,6 +37567,187 @@ const docTemplate = `{
                 },
                 "runs": {
                     "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsTriggerCreated": {
+            "type": "object",
+            "properties": {
+                "acts": {
+                    "description": "Acts are the action classes that a run with nobody present may use:\nact.files, act.addons, act.addons:\u003cid\u003e, act.send, act.spend. A run\nwithout any only reads.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "acts_held": {
+                    "description": "ActsHeld are the act.* names that apply to a run now: Acts within the\ngrants of the agent, plus act.files when the plan names a file it writes.\nReadOnly is true when a run can only read, and ReadOnlyWhy says why:\ndeclared (the proposal said so), binding (a connection in read only mode\nmade it), no_acts (it holds none) or agent (its agent holds none of them).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "agent_id": {
+                    "type": "string"
+                },
+                "binding": {
+                    "description": "Binding is the ID of the messaging connection that a trigger belongs to\nwhen it was made without asking under that connection's approval. Such a\ntrigger stays within the acts the connection allows. Empty otherwise.",
+                    "type": "string"
+                },
+                "cost": {
+                    "$ref": "#/definitions/schema.ChatsTriggerCost"
+                },
+                "daily_cap": {
+                    "type": "integer"
+                },
+                "delivery": {
+                    "description": "Delivery says where the answer of each run goes.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsTriggerDelivery"
+                        }
+                    ]
+                },
+                "effective_run_limit": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "event_type": {
+                    "type": "string"
+                },
+                "folder": {
+                    "type": "string"
+                },
+                "hook_path": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "last_done": {
+                    "type": "string"
+                },
+                "last_run": {
+                    "description": "LastRun is the newest run, if any, and LastDone the end of the newest\nrun that finished without an error.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsTriggerRun"
+                        }
+                    ]
+                },
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "min_gap_seconds": {
+                    "description": "MinGapSeconds is the shortest time between two runs of a file trigger.",
+                    "type": "integer"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "next_run": {
+                    "type": "string"
+                },
+                "plan": {
+                    "description": "Plan says what a run reads and writes and which Home widget shows the\nfile it writes; Cost what a run costs.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.ChatsTriggerPlan"
+                        }
+                    ]
+                },
+                "prompt": {
+                    "type": "string"
+                },
+                "quiet_seconds": {
+                    "type": "integer"
+                },
+                "read_only": {
+                    "type": "boolean"
+                },
+                "read_only_why": {
+                    "type": "string"
+                },
+                "run_limit": {
+                    "description": "RunLimit is the longest one run may take, as a duration such as 30m;\nempty means the administrator's run limit. EffectiveRunLimit is what\napplies now: the least of RunLimit and the administrator's limit.",
+                    "type": "string"
+                },
+                "schedule": {
+                    "type": "string"
+                },
+                "secret": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source, EventType and Matches say which events an event trigger takes.\nHookPath is the path of its hook; add the address of the server.",
+                    "type": "string"
+                },
+                "source_chat_id": {
+                    "type": "string"
+                },
+                "summary": {
+                    "description": "Summary says when it runs in plain words. NextRun is set for a schedule\ntrigger that is on.",
+                    "type": "string"
+                },
+                "time_zone": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ChatsTriggerDelivery": {
+            "type": "object",
+            "properties": {
+                "channel_label": {
+                    "type": "string"
+                },
+                "channel_ref": {
+                    "description": "ChannelRef and ChatRef are the channel ID (target channel) or the chat\n(target origin), shortened: never a whole ID.",
+                    "type": "string"
+                },
+                "chat_ref": {
+                    "type": "string"
+                },
+                "connection_addon": {
+                    "type": "string"
+                },
+                "connection_id": {
+                    "description": "ConnectionID, ConnectionKind, ConnectionKindTitle and ConnectionAddon\nsay which connection the channel or chat belongs to and which service it\nis. ConnectionID is empty when the connection is gone.",
+                    "type": "string"
+                },
+                "connection_kind": {
+                    "type": "string"
+                },
+                "connection_kind_title": {
+                    "type": "string"
+                },
+                "connection_name": {
+                    "description": "ConnectionName is the name the owner gave the connection of the channel,\nfor a trigger that was proposed in Studio and reports there.",
+                    "type": "string"
+                },
+                "in_thread": {
+                    "type": "boolean"
+                },
+                "mode": {
+                    "description": "Mode is when a run reports: always (the default), on_change (only when\nthe answer differs from the run before) or on_problem (only when a run\nfails).",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "State says whether the destination can receive a report now: ok, off\n(the connection is switched off), gone (deleted), unavailable (its\nadd-on does not run or it cannot receive reports), no_channel (the\nchannel is not listed and approved any more) or blocked (the owner does\nnot let the connection write there). Empty for the inbox.",
+                    "type": "string"
+                },
+                "target": {
+                    "type": "string"
                 }
             }
         },
@@ -24676,6 +37856,14 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ChatsTriggerSecret": {
+            "type": "object",
+            "properties": {
+                "secret": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.ChatsTriggerWrite": {
             "type": "object",
             "properties": {
@@ -24700,11 +37888,20 @@ const docTemplate = `{
                     "description": "EstimatedTokens is about how many tokens one run uses; 0 keeps the\ntrigger's value.",
                     "type": "integer"
                 },
+                "event_type": {
+                    "type": "string"
+                },
                 "folder": {
                     "type": "string"
                 },
                 "kind": {
                     "type": "string"
+                },
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "min_gap_seconds": {
                     "description": "MinGapSeconds is the shortest time between two runs of a file trigger;\n0 keeps the trigger's value (one minute for a new one).",
@@ -24730,7 +37927,15 @@ const docTemplate = `{
                 "quiet_seconds": {
                     "type": "integer"
                 },
+                "run_limit": {
+                    "description": "RunLimit is the longest one run may take, a duration from 1m to 24h such\nas 30m. Empty or 0 means the administrator's run limit, which is also\nthe ceiling: a longer value is accepted and runs cut to it.",
+                    "type": "string"
+                },
                 "schedule": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Source, EventType and Matches are for an event trigger: the sender name\n(required), the event type (empty takes any), and up to 8 \"field=value\"\nmatches on the JSON payload. The secret is made by the server; a secret\nin the body is ignored.",
                     "type": "string"
                 },
                 "source_chat_id": {
@@ -24816,6 +38021,65 @@ const docTemplate = `{
                 "used": {
                     "description": "Used is the number of tokens in the context the request sent.",
                     "type": "integer"
+                }
+            }
+        },
+        "schema.ChatsWait": {
+            "type": "object",
+            "properties": {
+                "checks": {
+                    "description": "Checks is how many checks were made. LastCheck is when the last one\nended and Outcome what it found: unchanged, changed or error. LastError\nis a short message with the URLs cut to host and path; it is set while\nthe source fails.",
+                    "type": "integer"
+                },
+                "condition": {
+                    "type": "string"
+                },
+                "deadline": {
+                    "description": "Deadline is when the wait times out.",
+                    "type": "string"
+                },
+                "end": {
+                    "description": "End says how the wait ended: condition_met, source_failing, timed_out or\nstopped. It is set when Phase is waking or ended, and absent before.",
+                    "type": "string"
+                },
+                "errors": {
+                    "description": "Errors is the number of failed checks in a row; MaxErrors ends the wait.",
+                    "type": "integer"
+                },
+                "last_check": {
+                    "type": "string"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "max_errors": {
+                    "type": "integer"
+                },
+                "mode": {
+                    "description": "Mode is change, match, json_equals, exit_zero, exit or stall; Condition says it in\nwords.",
+                    "type": "string"
+                },
+                "next_check": {
+                    "description": "NextCheck is when the next check is due; absent unless Phase is waiting.",
+                    "type": "string"
+                },
+                "outcome": {
+                    "type": "string"
+                },
+                "phase": {
+                    "description": "Phase is pending (waits for your yes), waiting (the server checks the\nsource), waking (the condition is settled and the model is about to be\nasked, or is being asked), paused, or ended.",
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason is the line the model gave for the wait.",
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "source_kind": {
+                    "description": "SourceKind is \"tool\", \"url\", \"script\", \"job\" or \"agent\". Source is the\nname of the tool, the host and path of the URL without the query, \"a\nscript\", the id and label of the job, or the id of the background\nsub-agent: the text of a command is never in this object.",
+                    "type": "string"
                 }
             }
         },
@@ -24962,6 +38226,13 @@ const docTemplate = `{
                 "version": {
                     "description": "Version is what a write sends back in If-Match. It is 0 when the file\ndoes not exist.",
                     "type": "integer"
+                },
+                "withheld": {
+                    "description": "Withheld names the keys of the file that the server leaves out of data\nbecause an administrator turned their feature off (pageArea of home\nwhile the page area of Home is off). The file keeps them.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -25143,6 +38414,9 @@ const docTemplate = `{
         "schema.CollectionList": {
             "type": "object",
             "properties": {
+                "chunk_overlap": {
+                    "type": "integer"
+                },
                 "collections": {
                     "type": "array",
                     "items": {
@@ -25157,6 +38431,32 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "embedding_model_installed": {
+                    "type": "boolean"
+                },
+                "max_chunk_size": {
+                    "description": "MaxChunkSize and ChunkOverlap are the chunking of a text, in characters.\nA text is cut into passages of at most MaxChunkSize characters, and each\npassage is embedded once.",
+                    "type": "integer"
+                },
+                "search_mode": {
+                    "description": "SearchMode is how a search finds passages: \"semantic\" (by meaning only)\nor \"hybrid\" (by meaning and by keyword).",
+                    "type": "string"
+                },
+                "shared": {
+                    "description": "Shared are the collections of other people shared with the caller.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.SharedCollection"
+                    }
+                },
+                "shares": {
+                    "description": "Shares are the shares of the caller's own collections, by name, for\nthose that were made shareable.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/schema.CollectionShare"
+                    }
+                },
+                "sharing": {
+                    "description": "Sharing is false when this server cannot share collections.",
                     "type": "boolean"
                 },
                 "user_groups": {
@@ -25191,6 +38491,19 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.CollectionHit"
                     }
+                }
+            }
+        },
+        "schema.CollectionShare": {
+            "type": "object",
+            "properties": {
+                "resource_id": {
+                    "description": "ResourceID names the collection in /api/shares/collection.",
+                    "type": "string"
+                },
+                "shared_with": {
+                    "description": "SharedWith counts the grants, the one to everyone included.",
+                    "type": "integer"
                 }
             }
         },
@@ -26131,6 +39444,117 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.FolderGrant": {
+            "type": "object",
+            "properties": {
+                "displayName": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FolderGrantList": {
+            "type": "object",
+            "properties": {
+                "grants": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.FolderGrant"
+                    }
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FolderGrantRequest": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FolderShare": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "description": "Everyone is true when the folder is shared with every account.",
+                    "type": "boolean"
+                },
+                "id": {
+                    "description": "ID is the folder's stable ID in the sharing routes.",
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "path": {
+                    "description": "Path is the folder's path in your home, for example /Projects.",
+                    "type": "string"
+                },
+                "sharedWith": {
+                    "description": "SharedWith counts the grants, the one to every account included.",
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.FolderShareList": {
+            "type": "object",
+            "properties": {
+                "folders": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.FolderShare"
+                    }
+                },
+                "sharing": {
+                    "description": "Sharing is false when folders cannot be shared on this server\n(local-owner mode, no accounts, files off).",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.FolderSharePathRequest": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FolderShareUser": {
+            "type": "object",
+            "properties": {
+                "displayName": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FolderShareUserList": {
+            "type": "object",
+            "properties": {
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.FolderShareUser"
+                    }
+                }
+            }
+        },
         "schema.ForecastRequest": {
             "type": "object",
             "properties": {
@@ -26613,7 +40037,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "installed": {
-                    "description": "Installed is true when the backend is currently present on disk — i.e. it\nappears in gallery.ListSystemBackends(systemState). Importer-registered or\ncurated pref-only backends default to false unless they also show up on\ndisk. The import form uses this to warn users that submitting an import\nmay trigger an automatic backend download.",
+                    "description": "Installed is true when the backend is currently present on disk — i.e. it\nappears in gallery.ListSystemBackends(systemState) — or, in distributed\nmode, on any worker node. Importer-registered or curated pref-only\nbackends default to false unless they are installed somewhere. The import\nform uses this to warn users that submitting an import may trigger an\nautomatic backend download.",
                     "type": "boolean"
                 },
                 "modality": {
@@ -26773,6 +40197,37 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ModelAdoptRequest": {
+            "type": "object",
+            "properties": {
+                "entry": {
+                    "description": "Entry names the gallery entry, when it differs from the model's name.",
+                    "type": "string"
+                },
+                "gallery": {
+                    "description": "Gallery names the gallery the model came from.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ModelAdoptResponse": {
+            "type": "object",
+            "properties": {
+                "entry": {
+                    "type": "string"
+                },
+                "filesMatch": {
+                    "description": "FilesMatch is true when the model has the files the entry lists now;\nfalse means the next check offers an update.",
+                    "type": "boolean"
+                },
+                "gallery": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.ModelCapabilities": {
             "type": "object",
             "properties": {
@@ -26786,6 +40241,10 @@ const docTemplate = `{
                 "context_size": {
                     "description": "ContextSize is the effective context window in tokens the backend will\nrun with: the configured context_size, or the default when unset. 0 means\nthe value is unknown (e.g. a loose file with no config). Clients can use\nthis to size their context budget for auto-compaction and pruning.",
                     "type": "integer"
+                },
+                "description": {
+                    "description": "Description is the short text the model's configuration carries, when it\nhas one. It never includes paths or settings.",
+                    "type": "string"
                 },
                 "id": {
                     "type": "string"
@@ -26828,6 +40287,25 @@ const docTemplate = `{
                     }
                 },
                 "object": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.ModelHoldRequest": {
+            "type": "object",
+            "properties": {
+                "hold": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ModelHoldResponse": {
+            "type": "object",
+            "properties": {
+                "hold": {
+                    "type": "boolean"
+                },
+                "name": {
                     "type": "string"
                 }
             }
@@ -26944,6 +40422,92 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.ModelRemoveOldResponse": {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "description": "Errors say why files stayed. Set when only some files could be removed.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "kept": {
+                    "description": "Kept are the old files that stayed, listed for a later removal. Set\nwhen only some files could be removed.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "removed": {
+                    "description": "Removed are the old files that were deleted, relative to the models\ndirectory.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ModelUpgradeError": {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "code": {
+                    "description": "Code is a stable code when the refusal has one, such as run_active\n(another upgrade run is running) or the error key of an upgrade run\nitem that could not start.",
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "keys": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "schema.ModelUpgradeRequest": {
+            "type": "object",
+            "properties": {
+                "choices": {
+                    "description": "Choices give, for each key a person edited that the update also\nchanges (the conflicts of GET /api/models/updates), \"mine\" to keep the\nedit or \"gallery\" to take the new value, by dotted key. The upgrade is\nrefused while a conflict has no choice.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "config_only": {
+                    "description": "ConfigOnly applies the new model config and prompt templates and\ndownloads nothing. It fails when the update needs new files.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.ModelUpgradeResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "jobID": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "status_url": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.ModelsDataResponse": {
             "type": "object",
             "properties": {
@@ -27035,26 +40599,6 @@ const docTemplate = `{
                 },
                 "url": {
                     "description": "URL to fetch from",
-                    "type": "string"
-                }
-            }
-        },
-        "schema.NodeData": {
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string"
-                },
-                "lastSeen": {
-                    "type": "string"
-                },
-                "name": {
-                    "type": "string"
-                },
-                "serviceID": {
-                    "type": "string"
-                },
-                "tunnelAddress": {
                     "type": "string"
                 }
             }
@@ -27927,29 +41471,6 @@ const docTemplate = `{
                 }
             }
         },
-        "schema.P2PNodesResponse": {
-            "type": "object",
-            "properties": {
-                "federated_nodes": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/schema.NodeData"
-                    }
-                },
-                "llama_cpp_nodes": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/schema.NodeData"
-                    }
-                },
-                "mlx_nodes": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/schema.NodeData"
-                    }
-                }
-            }
-        },
         "schema.PIIAnalyzeRequest": {
             "type": "object",
             "properties": {
@@ -28040,6 +41561,57 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.PageShareGrant": {
+            "type": "object",
+            "properties": {
+                "consent": {
+                    "type": "string"
+                },
+                "displayName": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.PageShareList": {
+            "type": "object",
+            "properties": {
+                "allowedCount": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "grants": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.PageShareGrant"
+                    }
+                },
+                "hash": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.PageShareRequest": {
+            "type": "object",
+            "properties": {
+                "principal": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
         "schema.PagesChatRequest": {
             "type": "object",
             "properties": {
@@ -28073,12 +41645,25 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.PagesCompact": {
+            "type": "object",
+            "properties": {
+                "width": {
+                    "description": "Width is the width of the tile in CSS pixels, 72 to 220.",
+                    "type": "integer"
+                }
+            }
+        },
         "schema.PagesConsent": {
             "type": "object",
             "properties": {
                 "allowed_at": {
                     "description": "The version you allowed: when, and the size of its index.html and\npage.json and the lines of its index.html, to say what changed.",
                     "type": "string"
+                },
+                "embed": {
+                    "description": "Embed is true when you also allowed this version to run on Home and in\nthe slots of the app (ui.json slots), where it starts without a click.",
+                    "type": "boolean"
                 },
                 "lines": {
                     "type": "integer"
@@ -28098,6 +41683,10 @@ const docTemplate = `{
         "schema.PagesConsentRequest": {
             "type": "object",
             "properties": {
+                "embed": {
+                    "description": "Embed also allows the version on Home and in the slots of the app. It\nis a lasting consent: it cannot go with once.",
+                    "type": "boolean"
+                },
                 "hash": {
                     "type": "string"
                 },
@@ -28109,6 +41698,9 @@ const docTemplate = `{
         "schema.PagesConsentResponse": {
             "type": "object",
             "properties": {
+                "embed": {
+                    "type": "boolean"
+                },
                 "expires": {
                     "type": "string"
                 },
@@ -28123,6 +41715,40 @@ const docTemplate = `{
                 },
                 "token": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.PagesErrorRequest": {
+            "type": "object",
+            "properties": {
+                "column": {
+                    "type": "integer"
+                },
+                "count": {
+                    "description": "Count is how many times the frame saw this error since its last report.",
+                    "type": "integer"
+                },
+                "file": {
+                    "description": "File is the script file of the page that threw; empty for index.html.",
+                    "type": "string"
+                },
+                "line": {
+                    "description": "Line and Column are 0 when the browser gave none.",
+                    "type": "integer"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "stack": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.PagesErrorResponse": {
+            "type": "object",
+            "properties": {
+                "recorded": {
+                    "type": "boolean"
                 }
             }
         },
@@ -28191,6 +41817,10 @@ const docTemplate = `{
         "schema.PagesList": {
             "type": "object",
             "properties": {
+                "page_area_enabled": {
+                    "description": "PageAreaEnabled is false when an administrator turned the page area of\nHome off: a pageArea of home.json is then ignored.",
+                    "type": "boolean"
+                },
                 "pages": {
                     "type": "array",
                     "items": {
@@ -28243,11 +41873,29 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "others_can_edit": {
+                    "description": "OthersCanEdit is set on one of your own pages that another account may\nedit (an edit grant). Its code can change without you, so it runs for you\nonly after you allow its version, as a shared page does: hash, code_files,\nmeta_size and consent (none, allowed, changed) are set, the bridge calls\ncarry X-LocalAI-Page-Hash, PUT and DELETE /api/chats/pages/{name}/consent\nallow and revoke, and the page never runs on Home, in a slot or in the\ndock by itself (embed is refused with 400).",
+                    "type": "boolean"
+                },
+                "owner_name": {
+                    "type": "string"
+                },
                 "path": {
                     "description": "inside the home: /pages/\u003cname\u003e",
                     "type": "string"
                 },
                 "rev": {
+                    "type": "integer"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "shared_allowed": {
+                    "description": "SharedAllowed is, on the page you read with GET /api/chats/pages/{name},\nhow many of the named accounts it is shared with allowed its current\nversion, so that the page can say how many will be asked again. The page\nthen also has hash, the version they allowed or not.",
+                    "type": "integer"
+                },
+                "shared_with": {
+                    "description": "SharedWith is, on one of your own pages, how many accounts you shared it\nwith (everyone counts as one).",
                     "type": "integer"
                 },
                 "size": {
@@ -28260,12 +41908,19 @@ const docTemplate = `{
                 "title": {
                     "type": "string"
                 },
+                "turned_off": {
+                    "type": "boolean"
+                },
                 "updated_at": {
                     "description": "UpdatedAt and UpdatedBy are the last change to anything in the folder.",
                     "type": "string"
                 },
                 "updated_by": {
                     "type": "string"
+                },
+                "user_shared": {
+                    "description": "A page that a person shared from their own home (not an administrator's\nshared folder) has user_shared set: no administrator checked it, and the\ntrust sheet says who wrote it. role is what you may do with it: view\n(run it and read its data), use (also save data through it) or edit\n(also change its code). owner_name is the person whose home\nholds it; author_name is who last wrote its index.html. turned_off is set\nwhen an administrator turned such pages off: the page is listed and does\nnot open. Such a page has no folder and no path, which would name the\nowner's account.",
+                    "type": "boolean"
                 },
                 "widget": {
                     "description": "Widget is the widget block of page.json: the page can be a tile on Home\n(a widget of type page in LocalAI/home.json). Absent when the page has\nnone.",
@@ -28291,6 +41946,10 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.PagesPage"
                     }
+                },
+                "user_shares_enabled": {
+                    "description": "UserSharesEnabled is false when an administrator turned off the pages\nthat people share from their own homes: those pages have turned_off\nset, are listed and do not open.",
+                    "type": "boolean"
                 }
             }
         },
@@ -28314,8 +41973,15 @@ const docTemplate = `{
         "schema.PagesSource": {
             "type": "object",
             "properties": {
+                "consent": {
+                    "$ref": "#/definitions/schema.PagesConsent"
+                },
                 "html": {
                     "type": "string"
+                },
+                "lines": {
+                    "description": "Lines and Consent are set when others_can_edit is true: your consent to\nthe version of this page, in the shape of the shared pages.",
+                    "type": "integer"
                 },
                 "page": {
                     "$ref": "#/definitions/schema.PagesPage"
@@ -28353,6 +42019,14 @@ const docTemplate = `{
         "schema.PagesWidget": {
             "type": "object",
             "properties": {
+                "compact": {
+                    "description": "Compact is set when the page has a layout for a slot, a strip about\n40 px high (ui.json slots). Without it a slot shows a button that opens\nthe page.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.PagesCompact"
+                        }
+                    ]
+                },
                 "size": {
                     "description": "Size is the height of the tile: small, medium or large.",
                     "type": "string"
@@ -28374,6 +42048,17 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.RemovedRouteResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "replacement": {
                     "type": "string"
                 }
             }
@@ -28556,9 +42241,38 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.SharedCollection": {
+            "type": "object",
+            "properties": {
+                "everyone": {
+                    "description": "Everyone says that the role comes from the grant to every account.",
+                    "type": "boolean"
+                },
+                "name": {
+                    "description": "Name is the name to use in the other calls: the collection's own name,\nor shared:\u003cid\u003e when that name is taken.",
+                    "type": "string"
+                },
+                "owner": {
+                    "description": "Owner is the display name of the person who shared it.",
+                    "type": "string"
+                },
+                "role": {
+                    "description": "Role is viewer (search and read) or editor (also add and remove entries).",
+                    "type": "string"
+                },
+                "title": {
+                    "description": "Title is the collection's own name.",
+                    "type": "string"
+                }
+            }
+        },
         "schema.SharedFolder": {
             "type": "object",
             "properties": {
+                "everyone": {
+                    "description": "Everyone is true when you reach a folder of someone's home only\nthrough its grant to every account. Only in your own list.",
+                    "type": "boolean"
+                },
                 "id": {
                     "description": "ID is the folder's stable ID. The shared pages use it as folder_id.",
                     "type": "integer"
@@ -28575,6 +42289,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "name": {
+                    "type": "string"
+                },
+                "owner": {
+                    "description": "Owner is the display name of the person who shared a folder of their\nown home with you. Such a folder has no path: it would name the\nowner's account. Only in your own list.",
                     "type": "string"
                 },
                 "pages": {
@@ -29788,6 +43506,9 @@ const docTemplate = `{
         "studio.ContextGroup": {
             "type": "object",
             "properties": {
+                "deleted": {
+                    "type": "boolean"
+                },
                 "files": {
                     "type": "array",
                     "items": {
@@ -29795,6 +43516,10 @@ const docTemplate = `{
                     }
                 },
                 "key": {
+                    "type": "string"
+                },
+                "label": {
+                    "description": "Label is the name of the saved agent of an agent group. Deleted is true\nwhen no saved agent of the user has that ID any more: its notes were\nkept when the agent was deleted, and the Memory page lists them apart.",
                     "type": "string"
                 },
                 "max_bytes": {
@@ -29936,6 +43661,232 @@ const docTemplate = `{
                 }
             }
         },
+        "upgraderun.Item": {
+            "type": "object",
+            "properties": {
+                "cancellable": {
+                    "type": "boolean"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "error_key": {
+                    "type": "string"
+                },
+                "expected_to": {
+                    "description": "ExpectedTo is the version or digest the item had to move to when the\nrun was requested (for an add-on the digest of its candidate). A later\nchange of the target fails the item as stale instead of installing\nsomething nobody looked at.",
+                    "type": "string"
+                },
+                "from": {
+                    "description": "From and To are the versions for display: the version, or the digest\nwhen there is no version.",
+                    "type": "string"
+                },
+                "job_id": {
+                    "type": "string"
+                },
+                "key": {
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/upgraderun.Kind"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/upgraderun.NodeState"
+                    }
+                },
+                "phase": {
+                    "$ref": "#/definitions/upgraderun.Phase"
+                },
+                "progress": {
+                    "type": "integer"
+                },
+                "queued_reason": {
+                    "description": "QueuedReason says why a queued item waits.",
+                    "type": "string"
+                },
+                "retryable": {
+                    "type": "boolean"
+                },
+                "title": {
+                    "description": "Title is the name a person knows the item by (an add-on's title);\nempty when it is Name.",
+                    "type": "string"
+                },
+                "to": {
+                    "type": "string"
+                }
+            }
+        },
+        "upgraderun.ItemRef": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "$ref": "#/definitions/upgraderun.Kind"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "upgraderun.Kind": {
+            "type": "string",
+            "enum": [
+                "gallery",
+                "library",
+                "addon",
+                "model"
+            ],
+            "x-enum-varnames": [
+                "KindGallery",
+                "KindLibrary",
+                "KindAddon",
+                "KindModel"
+            ]
+        },
+        "upgraderun.NodeState": {
+            "type": "object",
+            "properties": {
+                "error_key": {
+                    "description": "ErrorKey is the failure code of the upgrade on this node, when its\nphase is error or rolled_back.",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "phase": {
+                    "type": "string"
+                },
+                "progress": {
+                    "type": "integer"
+                }
+            }
+        },
+        "upgraderun.Phase": {
+            "type": "string",
+            "enum": [
+                "queued",
+                "running",
+                "updated",
+                "failed",
+                "rolled_back",
+                "cancelled",
+                "skipped",
+                "unconfirmed"
+            ],
+            "x-enum-varnames": [
+                "PhaseQueued",
+                "PhaseRunning",
+                "PhaseUpdated",
+                "PhaseFailed",
+                "PhaseRolledBack",
+                "PhaseCancelled",
+                "PhaseSkipped",
+                "PhaseUnconfirmed"
+            ]
+        },
+        "upgraderun.Run": {
+            "type": "object",
+            "properties": {
+                "actor": {
+                    "type": "string"
+                },
+                "cancel_requested": {
+                    "description": "CancelRequested is set when the whole run was cancelled; nothing new\nstarts, and the run ends cancelled once the running items settle.",
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "dismissed": {
+                    "description": "Dismissed hides a finished run from the default list.",
+                    "type": "boolean"
+                },
+                "finished_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/upgraderun.Item"
+                    }
+                },
+                "source": {
+                    "$ref": "#/definitions/upgraderun.Source"
+                },
+                "state": {
+                    "$ref": "#/definitions/upgraderun.RunState"
+                }
+            }
+        },
+        "upgraderun.RunState": {
+            "type": "string",
+            "enum": [
+                "running",
+                "finished",
+                "cancelled"
+            ],
+            "x-enum-varnames": [
+                "RunRunning",
+                "RunFinished",
+                "RunCancelled"
+            ]
+        },
+        "upgraderun.Source": {
+            "type": "string",
+            "enum": [
+                "manual",
+                "auto"
+            ],
+            "x-enum-varnames": [
+                "SourceManual",
+                "SourceAuto"
+            ]
+        },
+        "upgraderun.StartItem": {
+            "type": "object",
+            "properties": {
+                "expected_to": {
+                    "description": "ExpectedTo is the version or digest the caller saw as the target\n(PlanItem.ExpectedTo). A start whose target moved since is refused.",
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/upgraderun.Kind"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "upgraderun.StartRequest": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/upgraderun.StartItem"
+                    }
+                },
+                "source": {
+                    "$ref": "#/definitions/upgraderun.Source"
+                }
+            }
+        },
         "voiceprofile.AudioMetadata": {
             "type": "object",
             "properties": {
@@ -29954,6 +43905,10 @@ const docTemplate = `{
                 "sample_rate": {
                     "type": "integer"
                 },
+                "sha256": {
+                    "description": "SHA256 is set only by a check of a clip held in memory (the voice_profile\ntool before a person confirms); the store does not fill it.",
+                    "type": "string"
+                },
                 "size_bytes": {
                     "type": "integer"
                 }
@@ -29964,6 +43919,10 @@ const docTemplate = `{
             "properties": {
                 "audio": {
                     "$ref": "#/definitions/voiceprofile.AudioMetadata"
+                },
+                "can_delete": {
+                    "description": "CanDelete tells the caller whether it may delete the profile. It is\nworked out for each caller (see Viewer) and never stored.",
+                    "type": "boolean"
                 },
                 "consent_confirmed_at": {
                     "type": "string"
@@ -29981,6 +43940,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "name": {
+                    "type": "string"
+                },
+                "owner_id": {
+                    "description": "OwnerID is the user who created the profile. Empty means the profile\nbelongs to the instance: every user may use it and only an\nadministrator may delete it. Profiles stored before ownership existed\nhave no owner, so they stay instance-wide.",
                     "type": "string"
                 },
                 "references": {
@@ -30007,6 +43970,20 @@ const docTemplate = `{
                     "$ref": "#/definitions/voiceprofile.AudioMetadata"
                 },
                 "transcript": {
+                    "type": "string"
+                }
+            }
+        },
+        "vram.VRAMAt": {
+            "type": "object",
+            "properties": {
+                "contextLength": {
+                    "type": "integer"
+                },
+                "vramBytes": {
+                    "type": "integer"
+                },
+                "vramDisplay": {
                     "type": "string"
                 }
             }

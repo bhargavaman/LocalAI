@@ -30,6 +30,10 @@ var _ = ginkgo.Describe("the cause of a failed turn", func() {
 			CodeBackendMissing, "test", 8, `The model "test"`, "backend is not installed"),
 		ginkgo.Entry("backend missing, first failure", errors.New(`the model failed 4 times in a row (last: HTTP 500 failed to load model with internal loader: backend not found: default)`),
 			CodeBackendMissing, "", 0, "backend is not installed"),
+		ginkgo.Entry("backend too old, from the cooldown", errors.New(`the model could not be loaded `+MarkBackendOutdated+` backend "metal-llama-cpp": model "qwen" load is in cooldown after a recent failure; retry after 8s`),
+			CodeBackendOutdated, "qwen", 8, "backend may be too old", "Update the backend"),
+		ginkgo.Entry("backend too old, from the load error", errors.New(`the model failed 4 times in a row (last: HTTP 500 llama_model_load: error loading model architecture: unknown model architecture: 'qwen35')`),
+			CodeBackendOutdated, "", 0, "backend may be too old"),
 		ginkgo.Entry("cooling down", errors.New(cooldownText),
 			CodeCooldown, "test", 8, `"test"`, "8 seconds"),
 		ginkgo.Entry("cooling down for minutes", errors.New(`the model could not be loaded: model "big" load is in cooldown after a recent failure; retry after 1m30s`),
@@ -54,6 +58,17 @@ var _ = ginkgo.Describe("the cause of a failed turn", func() {
 		ginkgo.Entry("unknown", errors.New("connection reset"), CodeAgent, "", 0, "stopped because of an error"),
 	)
 
+	ginkgo.It("names the backend that is too old", func() {
+		f := Classify(errors.New(`the model could not be loaded ` + MarkBackendOutdated + ` backend "metal-llama-cpp": model "qwen" load is in cooldown after a recent failure; retry after 8s`))
+		Expect(f.Backend).To(Equal("metal-llama-cpp"))
+		Expect(Classify(errors.New("unknown model architecture: 'x'")).Backend).To(BeEmpty())
+	})
+
+	ginkgo.It("keeps the backend through the transcript line", func() {
+		got := ParseFailure(FailureEntry(1, Failure{Code: CodeBackendOutdated, Reason: "r", Backend: "llama-cpp"}))
+		Expect(got.Backend).To(Equal("llama-cpp"))
+	})
+
 	ginkgo.It("tells the size of the window when the tools do not fit", func() {
 		f := Classify(errors.New(`tool schemas use 4k of the 4k context window — session-tools 3k (18 tools): disable MCP servers or filter their tools, or increase the backend's context size.`))
 		Expect(f.Code).To(Equal(CodeContext))
@@ -63,10 +78,29 @@ var _ = ginkgo.Describe("the cause of a failed turn", func() {
 	})
 
 	ginkgo.It("tells the size of the window when the conversation does not fit", func() {
-		f := Classify(errors.New("context window full: the prompt is about 3746 tokens of a 4096-token window, leaving less than 1024 for the reply"))
+		f := Classify(errors.New("context window full: the prompt is about 19746 tokens of a 20480-token window, leaving less than 1024 for the reply"))
 		Expect(f.Code).To(Equal(CodeContext))
-		Expect(f.Reason).To(ContainSubstring("3746 tokens of a 4096-token window"))
+		Expect(f.Reason).To(ContainSubstring("19746 tokens of a 20480-token window"))
+		Expect(f.Reason).To(ContainSubstring("Start a new chat"))
 	})
+
+	// A window below the chat minimum fails on every turn, from the first one:
+	// a new chat is no remedy, so the text names the window and the minimum.
+	ginkgo.DescribeTable("explains a window that is too small for the chat itself",
+		func(window string) {
+			f := Classify(errors.New("context window full: the prompt is about 7400 tokens of a " + window + "-token window, leaving less than 1024 for the reply"))
+			Expect(f.Code).To(Equal(CodeContext))
+			Expect(f.Reason).To(HavePrefix(reasonContextPrefix))
+			Expect(f.Reason).To(ContainSubstring("a window of " + window + " tokens"))
+			Expect(f.Reason).To(ContainSubstring("at least 16384"))
+			Expect(f.Reason).To(ContainSubstring("administrator"))
+			Expect(f.Reason).NotTo(ContainSubstring("Start a new chat"))
+			Expect(fixedReason(f.Reason)).To(Equal(f.Reason))
+		},
+		ginkgo.Entry("8192", "8192"),
+		ginkgo.Entry("4096", "4096"),
+		ginkgo.Entry("12288", "12288"),
+	)
 
 	ginkgo.It("names a refused tool definition", func() {
 		f := Classify(errors.New("invalid tool schema for http://10.0.0.1/x"))

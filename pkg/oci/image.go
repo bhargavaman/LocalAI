@@ -324,6 +324,90 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// createDownloadDir makes the per-download working directory inside
+// stagingDir, or in the OS temp directory when stagingDir is empty.
+//
+// The default staging directory hangs off the base path, which is "/" in
+// most container images: there it resolves to a root-owned /downloading
+// that a non-root process cannot create, or to a read-only root
+// filesystem. Failing every backend install over that would be a
+// regression from the OS temp behaviour that preceded the staging
+// directory, so a staging directory that cannot be written for those
+// reasons falls back to the OS temp directory with a warning instead.
+func createDownloadDir(stagingDir string) (string, error) {
+	if stagingDir != "" {
+		dir, err := createDownloadDirIn(stagingDir)
+		if err == nil {
+			return dir, nil
+		}
+		if !isUnwritableDirError(err) {
+			return "", err
+		}
+		xlog.Warn("Download staging directory is not writable, staging in the OS temp directory instead; set LOCALAI_DOWNLOAD_STAGING_PATH to a writable directory on a large enough filesystem",
+			"path", stagingDir, "error", err)
+	}
+	dir, err := os.MkdirTemp("", "localai-oci-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create download directory: %w", err)
+	}
+	return dir, nil
+}
+
+func createDownloadDirIn(stagingDir string) (string, error) {
+	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create staging directory: %w", err)
+	}
+	dir, err := os.MkdirTemp(stagingDir, downloadDirPrefix+"*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create download directory: %w", err)
+	}
+	return dir, nil
+}
+
+// downloadDirPrefix starts the name of the working directory of each
+// download in the staging directory.
+const downloadDirPrefix = "localai-oci-"
+
+// SweepStagingDir removes the working directories of downloads that a crash
+// left in stagingDir: a partial image tar and its layers. Each download makes
+// its own directory with a random name and removes it when it ends, so none
+// can be resumed after a restart. Call it once at start, before any download
+// can run, and only on a staging directory that no other process uses. It
+// returns the names it removed. The OS temp directory is never swept.
+func SweepStagingDir(stagingDir string) []string {
+	if stagingDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			xlog.Warn("Could not read the download staging directory to clean interrupted downloads", "error", err)
+		}
+		return nil
+	}
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), downloadDirPrefix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(stagingDir, e.Name())); err != nil {
+			xlog.Warn("Could not remove an interrupted download", "path", e.Name(), "error", err)
+			continue
+		}
+		removed = append(removed, e.Name())
+	}
+	if len(removed) > 0 {
+		xlog.Info("Removed the files of interrupted downloads from the staging directory", "dirs", len(removed))
+	}
+	return removed
+}
+
+// isUnwritableDirError reports whether err means the directory exists or
+// could exist but this process may not write to it.
+func isUnwritableDirError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
 // ExtractOCIImage will extract a given targetImage into a given
 // targetDestination. A non-empty stagingDir holds the in-flight image
 // tar and layers (the caller picks a directory whose filesystem can
@@ -333,18 +417,9 @@ func ExtractOCIImage(ctx context.Context, img v1.Image, imageRef string, targetD
 	// Every download works in its own directory: the image tar and the
 	// layer staging below both live there, nothing is shared between
 	// concurrent downloads, and one removal cleans a download up.
-	var downloadDir string
-	var err error
-	if stagingDir != "" {
-		if err := os.MkdirAll(stagingDir, 0755); err != nil {
-			return fmt.Errorf("failed to create staging directory: %v", err)
-		}
-		downloadDir, err = os.MkdirTemp(stagingDir, "localai-oci-*")
-	} else {
-		downloadDir, err = os.MkdirTemp("", "localai-oci-*")
-	}
+	downloadDir, err := createDownloadDir(stagingDir)
 	if err != nil {
-		return fmt.Errorf("failed to create download directory: %v", err)
+		return err
 	}
 	defer func() {
 		if err := os.RemoveAll(downloadDir); err != nil {
@@ -381,7 +456,7 @@ func ParseImageParts(image string) (tag, repository, dstimage string) {
 		image = parts[0]
 		tag = parts[1]
 	}
-	if strings.Contains("/", image) {
+	if strings.Contains(image, "/") {
 		parts := strings.Split(image, "/")
 		repository = parts[0]
 		image = parts[1]
@@ -677,13 +752,26 @@ var (
 // mounts). Such filesystems surface ENOTSUP/EOPNOTSUPP, or EPERM in some
 // configurations; the error text is also matched because containerd wraps the
 // syscall error into a formatted string.
+//
+// On Windows a user without the "Create symbolic links" privilege (no
+// administrator rights and no Developer Mode) gets ERROR_PRIVILEGE_NOT_HELD
+// from os.Symlink. The links are then copied in place too.
 func isLinkUnsupportedError(err error) bool {
 	if errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.EPERM) {
 		return true
 	}
+	var errno syscall.Errno
+	if runtime.GOOS == "windows" && errors.As(err, &errno) && errno == errorPrivilegeNotHeld {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "operation not supported") || strings.Contains(msg, "operation not permitted")
+	return strings.Contains(msg, "operation not supported") || strings.Contains(msg, "operation not permitted") ||
+		strings.Contains(msg, "a required privilege is not held")
 }
+
+// errorPrivilegeNotHeld is the Windows error ERROR_PRIVILEGE_NOT_HELD. It is
+// a number here because the syscall package names it on no system.
+const errorPrivilegeNotHeld = syscall.Errno(1314)
 
 // cleanDirContents removes the entries inside dir without removing dir itself,
 // preserving the directory (and its permissions) the caller created.

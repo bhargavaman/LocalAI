@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -50,11 +51,23 @@ type catalogRelease struct {
 	// SkillShadows repeats catalog.Release.SkillShadows: the built-in skills
 	// the manifest's skill definitions replace.
 	SkillShadows []string `json:"skillShadows,omitempty"`
-	UI           struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		MainPage    string `json:"mainPage"`
-		Icon        string `json:"icon"`
+	// HostOperations repeats catalog.Release.HostOperations: the host
+	// operations the manifest requests. A pointer, so an empty declaration
+	// stays different from an index that has no hint.
+	HostOperations *contract.HostOperations `json:"hostOperations,omitempty"`
+	// Requires repeats catalog.Release.Requires for the one field the
+	// generator writes: the feature level of a package that needs more than
+	// the base level.
+	Requires struct {
+		FeatureLevel uint64 `json:"featureLevel,omitempty"`
+	} `json:"requires,omitzero"`
+	UI struct {
+		Title        string            `json:"title"`
+		Description  string            `json:"description"`
+		Titles       map[string]string `json:"titles,omitempty"`
+		Descriptions map[string]string `json:"descriptions,omitempty"`
+		MainPage     string            `json:"mainPage"`
+		Icon         string            `json:"icon"`
 	} `json:"ui"`
 }
 
@@ -110,6 +123,72 @@ func skillFieldsYAML(shadows []string, indent string) string {
 	return b.String()
 }
 
+// hostOperationsFieldsYAML renders the hostOperations field of a library
+// entry from the manifest. When it is written, every entry has it, so a reader can tell a manifest
+// that requests nothing from an index that predates the hint. Names are sorted
+// so the file does not change when a manifest reorders them.
+func hostOperationsFieldsYAML(ops *contract.HostOperations, indent string) string {
+	if ops == nil || len(ops.Required)+len(ops.Optional) == 0 {
+		return indent + "hostOperations: {}\n"
+	}
+	var b strings.Builder
+	b.WriteString(indent + "hostOperations:\n")
+	for _, list := range []struct {
+		key   string
+		names []string
+	}{{"required", ops.Required}, {"optional", ops.Optional}} {
+		if len(list.names) == 0 {
+			continue
+		}
+		b.WriteString(indent + "  " + list.key + ":\n")
+		for _, name := range slices.Sorted(slices.Values(list.names)) {
+			b.WriteString(indent + "    - \"" + jsonString(name) + "\"\n")
+		}
+	}
+	return b.String()
+}
+
+// translationFieldsYAML renders the titles and descriptions fields of the ui
+// block of a catalog entry: the languages of the manifest's ui.title and
+// ui.description other than English, sorted, so the file is stable. English is
+// the title and description of the entry itself.
+func translationFieldsYAML(ui *contract.UI, indent string) string {
+	if ui == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, f := range []struct {
+		key  string
+		text *contract.Localized
+	}{{"titles", ui.Title}, {"descriptions", ui.Description}} {
+		if f.text == nil {
+			continue
+		}
+		tags := f.text.Languages()
+		if len(tags) == 0 {
+			continue
+		}
+		b.WriteString(indent + f.key + ":\n")
+		for _, tag := range tags {
+			b.WriteString(indent + "  \"" + jsonString(tag) + "\": \"" + jsonString(f.text.ByLanguage[tag]) + "\"\n")
+		}
+	}
+	return b.String()
+}
+
+// requiresFieldsYAML renders the requires block of a library entry: the
+// feature level of a manifest that needs more than the base level. A manifest
+// at the base level has no block. The index reader of a host that predates
+// the field refuses the whole index when one entry has it (the reader is
+// strict), so the catalog command writes it only with
+// --feature-level-in-index.
+func requiresFieldsYAML(m contract.Manifest, indent string) string {
+	if m.RequiredFeatureLevel() <= contract.BaseFeatureLevel {
+		return ""
+	}
+	return fmt.Sprintf("%srequires:\n%s  featureLevel: %d\n", indent, indent, m.RequiredFeatureLevel())
+}
+
 // cmdCatalogTools adds the toolCount and tools fields to the entries of an
 // existing library index, reading each manifest from addons/<id>/manifest.json
 // of the repository. It touches no other field, so the digests and artifacts
@@ -118,6 +197,7 @@ func cmdCatalogTools(args []string) error {
 	fs := flag.NewFlagSet("catalog-tools", flag.ContinueOnError)
 	index := fs.String("index", "gallery/addons/index.yaml", "library index to update")
 	addons := fs.String("addons", "addons", "directory that holds addons/<id>/manifest.json")
+	withHostOps := fs.Bool("host-operations-in-index", false, "write the hostOperations hint of each add-on. A host that predates the field refuses the whole index")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -159,10 +239,10 @@ func cmdCatalogTools(args []string) error {
 			switch {
 			case strings.HasPrefix(line, "  toolCount:"):
 				continue
-			case strings.HasPrefix(line, "  tools:"), strings.HasPrefix(line, "  shadows:"), strings.HasPrefix(line, "  skillShadows:"):
+			case strings.HasPrefix(line, "  tools:"), strings.HasPrefix(line, "  shadows:"), strings.HasPrefix(line, "  skillShadows:"), strings.HasPrefix(line, "  hostOperations:"):
 				skip = true
 				continue
-			case skip && strings.HasPrefix(line, "    - "):
+			case skip && (strings.HasPrefix(line, "    - ") || strings.HasPrefix(line, "    required:") || strings.HasPrefix(line, "    optional:") || strings.HasPrefix(line, "      - ")):
 				continue
 			}
 			skip = false
@@ -171,6 +251,9 @@ func cmdCatalogTools(args []string) error {
 		text := strings.TrimRight(strings.Join(kept, ""), "\n") + "\n"
 		blocks[i] = text + toolFieldsYAML(m.Capabilities.Tools, "  ", contract.ShadowedTools(m.Capabilities.ToolDefinitions)...) +
 			skillFieldsYAML(contract.ShadowedSkills(m.Capabilities.SkillDefinitions), "  ")
+		if *withHostOps {
+			blocks[i] += hostOperationsFieldsYAML(m.Capabilities.HostOperations, "  ")
+		}
 	}
 	out := strings.Join(blocks, "")
 	if _, err := readCatalogIndex([]byte(out)); err != nil {
@@ -201,6 +284,8 @@ func cmdCatalog(args []string) error {
 	out := fs.String("out", "", "output file")
 	root := fs.String("root", ".", "with --from-manifest: repository root that the manifest path of the platform matrix is relative to")
 	fromManifest := fs.Bool("from-manifest", false, "development channel only: render from the manifest and the enabled platforms, without a built package")
+	featureLevelInIndex := fs.Bool("feature-level-in-index", false, "write requires.featureLevel for an add-on that needs more than level 1. A host that predates the field refuses the whole index, so leave it off while such hosts are in use")
+	hostOpsInIndex := fs.Bool("host-operations-in-index", false, "write the hostOperations hint of each add-on entry. A host that predates the field refuses the whole index")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -263,8 +348,16 @@ func cmdCatalog(args []string) error {
 			"title": title, "description": description, "main_page": mainPage, "icon": icon,
 		}
 		text := string(tmpl)
-		text = strings.TrimRight(text, "\n") + "\n" + toolFieldsYAML(manifest.Capabilities.Tools, "", contract.ShadowedTools(manifest.Capabilities.ToolDefinitions)...) +
+		// The ui block is the last block of every template, so the translated
+		// text lands inside it.
+		text = strings.TrimRight(text, "\n") + "\n" + translationFieldsYAML(ui, "  ") + toolFieldsYAML(manifest.Capabilities.Tools, "", contract.ShadowedTools(manifest.Capabilities.ToolDefinitions)...) +
 			skillFieldsYAML(contract.ShadowedSkills(manifest.Capabilities.SkillDefinitions), "")
+		if *hostOpsInIndex {
+			text += hostOperationsFieldsYAML(manifest.Capabilities.HostOperations, "")
+		}
+		if *featureLevelInIndex {
+			text += requiresFieldsYAML(*manifest, "")
+		}
 		if mutable {
 			text = strings.Replace(text, "digest: \"{{digest}}\"", "mutable: true", 1)
 		}

@@ -32,12 +32,41 @@ type PagesPage struct {
 	// of the page's folder that the page names: the UI puts no other text
 	// file into a shared page.
 	CodeFiles []string `json:"code_files,omitempty"`
-	Folder    string   `json:"folder,omitempty"`
-	FolderID  int64    `json:"folder_id,omitempty"`
-	Writable  bool     `json:"writable,omitempty"`
-	Hash      string   `json:"hash,omitempty"`
-	Consent   string   `json:"consent,omitempty"`
-	MetaSize  int64    `json:"meta_size,omitempty"`
+	// A page that a person shared from their own home (not an administrator's
+	// shared folder) has user_shared set: no administrator checked it, and the
+	// trust sheet says who wrote it. role is what you may do with it: view
+	// (run it and read its data), use (also save data through it) or edit
+	// (also change its code). owner_name is the person whose home
+	// holds it; author_name is who last wrote its index.html. turned_off is set
+	// when an administrator turned such pages off: the page is listed and does
+	// not open. Such a page has no folder and no path, which would name the
+	// owner's account.
+	UserShared bool   `json:"user_shared,omitempty"`
+	Role       string `json:"role,omitempty"`
+	OwnerName  string `json:"owner_name,omitempty"`
+	TurnedOff  bool   `json:"turned_off,omitempty"`
+	// OthersCanEdit is set on one of your own pages that another account may
+	// edit (an edit grant). Its code can change without you, so it runs for you
+	// only after you allow its version, as a shared page does: hash, code_files,
+	// meta_size and consent (none, allowed, changed) are set, the bridge calls
+	// carry X-LocalAI-Page-Hash, PUT and DELETE /api/chats/pages/{name}/consent
+	// allow and revoke, and the page never runs on Home, in a slot or in the
+	// dock by itself (embed is refused with 400).
+	OthersCanEdit bool `json:"others_can_edit,omitempty"`
+	// SharedAllowed is, on the page you read with GET /api/chats/pages/{name},
+	// how many of the named accounts it is shared with allowed its current
+	// version, so that the page can say how many will be asked again. The page
+	// then also has hash, the version they allowed or not.
+	SharedAllowed int `json:"shared_allowed,omitempty"`
+	// SharedWith is, on one of your own pages, how many accounts you shared it
+	// with (everyone counts as one).
+	SharedWith int    `json:"shared_with,omitempty"`
+	Folder     string `json:"folder,omitempty"`
+	FolderID   int64  `json:"folder_id,omitempty"`
+	Writable   bool   `json:"writable,omitempty"`
+	Hash       string `json:"hash,omitempty"`
+	Consent    string `json:"consent,omitempty"`
+	MetaSize   int64  `json:"meta_size,omitempty"`
 	// UpdatedAt and UpdatedBy are the last change to anything in the folder.
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
@@ -51,17 +80,34 @@ type PagesWidget struct {
 	Size string `json:"size"`
 	// Title is the tile's title when it should differ from the page's.
 	Title string `json:"title,omitempty"`
+	// Compact is set when the page has a layout for a slot, a strip about
+	// 40 px high (ui.json slots). Without it a slot shows a button that opens
+	// the page.
+	Compact *PagesCompact `json:"compact,omitempty"`
+}
+
+// PagesCompact is the compact tile of a page in a slot.
+type PagesCompact struct {
+	// Width is the width of the tile in CSS pixels, 72 to 220.
+	Width int `json:"width"`
 }
 
 // PagesList is the user's pages, sorted by name.
 type PagesList struct {
 	Pages []PagesPage `json:"pages"`
+	// PageAreaEnabled is false when an administrator turned the page area of
+	// Home off: a pageArea of home.json is then ignored.
+	PageAreaEnabled bool `json:"page_area_enabled"`
 }
 
 // PagesSource is a page with the text of its index.html.
 type PagesSource struct {
 	Page PagesPage `json:"page"`
 	HTML string    `json:"html"`
+	// Lines and Consent are set when others_can_edit is true: your consent to
+	// the version of this page, in the shape of the shared pages.
+	Lines   int           `json:"lines,omitempty"`
+	Consent *PagesConsent `json:"consent,omitempty"`
 }
 
 // PagesFile is an entry of a page's folder. Path is relative to the folder.
@@ -133,8 +179,12 @@ type PagesStarterList struct {
 // administrator switched shared pages off: the pages are listed, but none
 // opens.
 type PagesSharedList struct {
-	Enabled bool        `json:"enabled"`
-	Pages   []PagesPage `json:"pages"`
+	Enabled bool `json:"enabled"`
+	// UserSharesEnabled is false when an administrator turned off the pages
+	// that people share from their own homes: those pages have turned_off
+	// set, are listed and do not open.
+	UserSharesEnabled bool        `json:"user_shares_enabled"`
+	Pages             []PagesPage `json:"pages"`
 }
 
 // PagesConsent is your consent to a shared page.
@@ -147,6 +197,9 @@ type PagesConsent struct {
 	Size      int64      `json:"size,omitempty"`
 	MetaSize  int64      `json:"meta_size,omitempty"`
 	Lines     int        `json:"lines,omitempty"`
+	// Embed is true when you also allowed this version to run on Home and in
+	// the slots of the app (ui.json slots), where it starts without a click.
+	Embed bool `json:"embed,omitempty"`
 }
 
 // PagesSharedSource is a shared page with the text of its index.html, its
@@ -163,6 +216,9 @@ type PagesSharedSource struct {
 type PagesConsentRequest struct {
 	Hash string `json:"hash"`
 	Once bool   `json:"once,omitempty"`
+	// Embed also allows the version on Home and in the slots of the app. It
+	// is a lasting consent: it cannot go with once.
+	Embed bool `json:"embed,omitempty"`
 }
 
 // PagesConsentResponse is the consent you gave. A visit (kind once) has a
@@ -173,4 +229,25 @@ type PagesConsentResponse struct {
 	Hash    string     `json:"hash"`
 	Token   string     `json:"token,omitempty"`
 	Expires *time.Time `json:"expires,omitempty"`
+	Embed   bool       `json:"embed,omitempty"`
+}
+
+// PagesErrorRequest is a runtime error that the frame of a page caught, which
+// the UI of the page's owner reports. The server cuts the texts, drops the
+// browser's own noise and counts repeats of the same error.
+type PagesErrorRequest struct {
+	Message string `json:"message"`
+	Stack   string `json:"stack,omitempty"`
+	// File is the script file of the page that threw; empty for index.html.
+	File string `json:"file,omitempty"`
+	// Line and Column are 0 when the browser gave none.
+	Line   int `json:"line,omitempty"`
+	Column int `json:"column,omitempty"`
+	// Count is how many times the frame saw this error since its last report.
+	Count int `json:"count,omitempty"`
+}
+
+// PagesErrorResponse says whether the error was kept.
+type PagesErrorResponse struct {
+	Recorded bool `json:"recorded"`
 }

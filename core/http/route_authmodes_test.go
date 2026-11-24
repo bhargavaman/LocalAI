@@ -41,15 +41,22 @@ type authModesServer struct {
 	creds map[string]authModesCredential
 }
 
-// routesUnderTest lists every chats and add-on route the server registers.
+// routesUnderTest lists every chats, notification and add-on route the server
+// registers.
 func (s *authModesServer) routesUnderTest() []*echo.Route {
 	seen := map[string]bool{}
 	found := []*echo.Route{}
 	for _, r := range s.e.Routes() {
-		if !isChatsRoute(r.Path) && !strings.HasPrefix(r.Path, "/api/addons") {
+		if !isChatsRoute(r.Path) && !isNotificationsRoute(r.Path) && !strings.HasPrefix(r.Path, "/api/addons") && !isModelUpdatesRoute(r.Method+" "+r.Path) {
 			continue
 		}
 		key := r.Method + " " + r.Path
+		// The hook of an event trigger is public by design: its caller has no
+		// login, and the secret of the trigger is the credential. Its own specs
+		// (routes/studio_triggerhook_test.go) cover it.
+		if r.Method == http.MethodPost && r.Path == "/api/chats/triggers/:id/hook" {
+			continue
+		}
 		if seen[key] || r.Method == http.MethodOptions || r.Method == http.MethodHead {
 			continue
 		}
@@ -66,6 +73,33 @@ func (s *authModesServer) routesUnderTest() []*echo.Route {
 // the change feed of their files.
 func isChatsRoute(p string) bool {
 	return strings.HasPrefix(p, "/api/chats") || strings.HasPrefix(p, "/api/workspace")
+}
+
+// isNotificationsRoute says whether a path belongs to the notification center,
+// which works with the chats on or off and has no feature of its own.
+func isNotificationsRoute(p string) bool { return strings.HasPrefix(p, "/api/notifications") }
+
+// modelUpdatesRoutes are the routes of the model update center. They are for
+// administrators only, like the backend update routes.
+var modelUpdatesRoutes = []string{
+	"GET /api/models/updates",
+	"POST /api/models/updates/check",
+	"POST /api/models/upgrade/:name",
+	"POST /api/models/:name/upgrade/retry",
+	"POST /api/models/:name/remove-old",
+	"PUT /api/models/:name/hold",
+	"POST /api/models/:name/adopt",
+	// Removed, answers 410 Gone for one release; still administrators only.
+	"POST /api/models/config/:id",
+}
+
+func isModelUpdatesRoute(methodPath string) bool {
+	for _, r := range modelUpdatesRoutes {
+		if r == methodPath {
+			return true
+		}
+	}
+	return false
 }
 
 func authModesConcretize(pattern string) string {
@@ -147,6 +181,33 @@ var adminOnlyAddonRoutes = []string{
 	"POST /api/addons/:id/recovery/delete-backup",
 }
 
+// chatsRoutesNeedingAddons are the chats routes that also need the add-ons
+// feature: the OAuth calls of a connection are add-on calls, which the add-on
+// owner checks against that feature. alice has the chats features but not the
+// add-ons one, so she is refused there with a session and a key alike. The
+// start of a login is not listed: this server has no base URL, so it answers
+// 409 before it asks the owner.
+var chatsRoutesNeedingAddons = map[string]bool{
+	"POST /api/chats/connectors/:id/oauth/disconnect": true,
+}
+
+// humanOnlyChatsRoutes accept only the person's own browser session with the
+// confirmation header (see the sharing routes), so the matrix's session, which
+// carries no confirmation, is refused like a key.
+var humanOnlyChatsRoutes = map[string]bool{
+	"GET /api/chats/files/shares/:id/grants":               true,
+	"PUT /api/chats/files/shares/:id/grants/:principal":    true,
+	"DELETE /api/chats/files/shares/:id/grants/:principal": true,
+	"GET /api/chats/files/shares/:id/users":                true,
+	// Sharing a page and allowing it to run are the owner's decisions too.
+	"PUT /api/chats/pages/:name/consent":              true,
+	"DELETE /api/chats/pages/:name/consent":           true,
+	"GET /api/chats/pages/shares/search":              true,
+	"GET /api/chats/pages/:name/shares":               true,
+	"PUT /api/chats/pages/:name/shares":               true,
+	"DELETE /api/chats/pages/:name/shares/:principal": true,
+}
+
 // A route's answer in each mode. The expectations below do not depend on what
 // the handler answers once it is reached (400, 404 and 409 all mean "reached");
 // they pin who is let in.
@@ -171,7 +232,7 @@ var _ = Describe("Route auth modes", func() {
 			paths[r.Method+" "+r.Path] = true
 		}
 		Expect(len(paths)).To(BeNumerically(">", 100))
-		for _, want := range append([]string{"GET /api/chats", "POST /api/chats", "GET /api/addons/builtin"}, adminOnlyAddonRoutes...) {
+		for _, want := range append(append([]string{"GET /api/chats", "POST /api/chats", "GET /api/addons/builtin", "GET /api/notifications", "GET /api/notifications/events", "POST /api/notifications/read"}, adminOnlyAddonRoutes...), modelUpdatesRoutes...) {
 			Expect(paths).To(HaveKey(want))
 		}
 	})
@@ -271,14 +332,33 @@ var _ = Describe("Route auth modes", func() {
 			problems := []string{}
 			count := 0
 			for _, r := range server.routesUnderTest() {
-				if !isChatsRoute(r.Path) {
+				if !isChatsRoute(r.Path) && !isNotificationsRoute(r.Path) {
 					continue
 				}
 				count++
 				name := r.Method + " " + r.Path
 				users := []string{"alice", "root"}
+				if humanOnlyChatsRoutes[name] {
+					// Sharing a folder of one's home is never a key, a tool or
+					// an agent: without the browser session and its
+					// confirmation header every credential is refused.
+					for _, cred := range []string{"alice", "alice-key", "root", "root-key"} {
+						if code := server.status(r, cred); code != http.StatusForbidden {
+							problems = append(problems, fmt.Sprintf("%s: %s got %d, not 403", name, cred, code))
+						}
+					}
+					continue
+				}
 				if strings.HasPrefix(r.Path, "/api/chats/admin/") {
 					// The administrator routes are closed to a user who is not one.
+					for _, cred := range []string{"alice", "alice-key"} {
+						if code := server.status(r, cred); code != http.StatusForbidden {
+							problems = append(problems, fmt.Sprintf("%s: %s got %d, not 403", name, cred, code))
+						}
+					}
+					users = []string{"root"}
+				}
+				if chatsRoutesNeedingAddons[name] {
 					for _, cred := range []string{"alice", "alice-key"} {
 						if code := server.status(r, cred); code != http.StatusForbidden {
 							problems = append(problems, fmt.Sprintf("%s: %s got %d, not 403", name, cred, code))
@@ -312,6 +392,24 @@ var _ = Describe("Route auth modes", func() {
 			Expect(problems).To(BeEmpty())
 		})
 
+		It("keeps the notification routes open to a user whose chats feature was revoked", func() {
+			problems := []string{}
+			seen := 0
+			for _, r := range server.routesUnderTest() {
+				if !isNotificationsRoute(r.Path) {
+					continue
+				}
+				seen++
+				for _, cred := range []string{"carol", "carol-key"} {
+					if code := server.status(r, cred); isDenied(code) {
+						problems = append(problems, fmt.Sprintf("%s %s: %s got %d", r.Method, r.Path, cred, code))
+					}
+				}
+			}
+			Expect(seen).To(BeNumerically(">=", 8), "the inbox and push routes")
+			Expect(problems).To(BeEmpty())
+		})
+
 		It("answers a session and an API key of the same user alike on every add-on route", func() {
 			problems := []string{}
 			for _, r := range server.routesUnderTest() {
@@ -337,6 +435,29 @@ var _ = Describe("Route auth modes", func() {
 				r, ok := byName[name]
 				Expect(ok).To(BeTrue(), name)
 				for _, cred := range []string{"alice", "alice-key", "carol"} {
+					if code := server.status(r, cred); code != http.StatusForbidden {
+						problems = append(problems, fmt.Sprintf("%s: %s got %d", name, cred, code))
+					}
+				}
+				for _, cred := range []string{"root", "root-key"} {
+					if code := server.status(r, cred); isDenied(code) {
+						problems = append(problems, fmt.Sprintf("%s: %s got %d", name, cred, code))
+					}
+				}
+			}
+			Expect(problems).To(BeEmpty())
+		})
+
+		It("keeps the model update routes from a user who is not an administrator", func() {
+			byName := map[string]*echo.Route{}
+			for _, r := range server.routesUnderTest() {
+				byName[r.Method+" "+r.Path] = r
+			}
+			problems := []string{}
+			for _, name := range modelUpdatesRoutes {
+				r, ok := byName[name]
+				Expect(ok).To(BeTrue(), name)
+				for _, cred := range []string{"alice", "alice-key", "carol", "carol-key"} {
 					if code := server.status(r, cred); code != http.StatusForbidden {
 						problems = append(problems, fmt.Sprintf("%s: %s got %d", name, cred, code))
 					}

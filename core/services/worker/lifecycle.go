@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/services/nodes"
 	"github.com/mudler/LocalAI/core/services/workerctl"
+	"github.com/mudler/LocalAI/pkg/downloader"
 	grpc "github.com/mudler/LocalAI/pkg/grpc"
 	"github.com/mudler/xlog"
 	"google.golang.org/grpc/codes"
@@ -160,19 +162,42 @@ func (s *backendSupervisor) serveInstall(_ context.Context, req workerctl.Backen
 		return workerctl.BackendInstallReply{Success: false, Error: "load operation expired during install"}
 	}
 
-	advertiseAddr := addr
-	advAddr := s.cfg.advertiseAddr()
-	if advAddr != addr {
-		_, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			xlog.Error("Failed to parse backend listen address; using it unchanged", "addr", addr, "error", err)
-		} else if advertiseHost, _, err := net.SplitHostPort(advAddr); err != nil {
-			xlog.Error("Failed to parse worker advertise address; using backend listen address", "addr", advAddr, "error", err)
-		} else {
-			advertiseAddr = net.JoinHostPort(advertiseHost, port)
-		}
+	advertiseAddr, err := advertisedBackendAddr(addr, s.cfg.advertiseAddr())
+	if err != nil {
+		xlog.Error("Failed to derive the advertised backend address; using the listen address", "addr", addr, "error", err)
 	}
 	return workerctl.BackendInstallReply{Success: true, Address: advertiseAddr, ProcessInstance: instance, ReportsOperations: true}
+}
+
+// advertisedBackendAddr returns the address a frontend uses to reach the
+// backend listening on listen: the worker's advertised host with the backend's
+// port. The install reply hands the frontend this form, and the requests that
+// name a process (model.unload, model.stop) carry it back. On a parse error it
+// returns listen unchanged.
+func advertisedBackendAddr(listen, advertise string) (string, error) {
+	if advertise == listen {
+		return listen, nil
+	}
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen, fmt.Errorf("parsing backend listen address %q: %w", listen, err)
+	}
+	host, _, err := net.SplitHostPort(advertise)
+	if err != nil {
+		return listen, fmt.Errorf("parsing worker advertise address %q: %w", advertise, err)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// namesProcess reports whether addr, taken from a frontend request, names the
+// backend process bp: its listen address, or the advertised form of it that
+// the install reply gave the frontend.
+func (s *backendSupervisor) namesProcess(bp *backendProcess, addr string) bool {
+	if addr == bp.addr {
+		return true
+	}
+	advertised, err := advertisedBackendAddr(bp.addr, s.cfg.advertiseAddr())
+	return err == nil && addr == advertised
 }
 
 // serveUpgrade answers backend.upgrade: force-reinstall a backend. It is its
@@ -185,28 +210,59 @@ func (s *backendSupervisor) serveUpgrade(_ context.Context, req workerctl.Backen
 	downloadCb, flush := s.downloadProgress(req.OpID, req.Backend, progress)
 	defer flush()
 
-	// stopped is meaningful even on the error paths: it lists processes
-	// already terminated (and ports already recycled) before the failure, so
-	// the controller must drop those rows regardless of the outcome.
 	upgrade := s.upgradeFn
 	if upgrade == nil {
 		upgrade = s.upgradeBackend
 	}
-	stopped, err := upgrade(req, downloadCb)
+	out, err := upgrade(req, downloadCb)
+	reply := upgradeReply(out, err)
 	if err != nil {
-		xlog.Error("Failed to upgrade backend via NATS", "error", err)
-		return workerctl.BackendUpgradeReply{
-			Success:                 false,
-			Error:                   err.Error(),
-			StoppedProcessKeys:      stopped,
-			ReportsStoppedProcesses: true,
-		}
+		xlog.Error("Failed to upgrade backend", "backend", req.Backend, "code", reply.Code, "rolledBack", reply.RolledBack, "error", err)
 	}
-	return workerctl.BackendUpgradeReply{
-		Success:                 true,
-		StoppedProcessKeys:      stopped,
+	return reply
+}
+
+// upgradeReply builds the answer of backend.upgrade from what the upgrade did
+// and its error. The stopped keys are reported on every outcome: their ports
+// are recycled whatever happened, so the controller drops those rows.
+func upgradeReply(out upgradeOutcome, err error) workerctl.BackendUpgradeReply {
+	reply := workerctl.BackendUpgradeReply{
+		Success:                 err == nil,
+		Verified:                out.verified,
+		StoppedProcessKeys:      out.stopped,
 		ReportsStoppedProcesses: true,
+		RestartedProcessKeys:    out.restarted,
 	}
+	if out.restartErr != nil {
+		reply.RestartError = workerctl.BoundCause(out.restartErr.Error())
+	}
+	if err == nil {
+		return reply
+	}
+	reply.Error = err.Error()
+	reply.Code = string(upgradeFailureCode(err))
+	reply.RolledBack = gallery.UpgradeRolledBack(err)
+	var startErr *workerStartError
+	if errors.As(err, &startErr) {
+		reply.Cause = workerctl.BoundCause(startErr.output)
+	}
+	return reply
+}
+
+// upgradeFailureCode is the code of a failed worker upgrade. A step that
+// tagged its error keeps its code; a refused checksum or signature is verify;
+// anything else is unknown, so the frontend never has to parse the text.
+func upgradeFailureCode(err error) gallery.UpgradeFailureCode {
+	if code := gallery.UpgradeCodeOf(err); code != "" {
+		return code
+	}
+	if errors.Is(err, downloader.ErrIntegrity) {
+		return gallery.UpgradeFailureVerify
+	}
+	if errors.Is(err, gallery.ErrBackendNotFound) {
+		return gallery.UpgradeFailureNotInstalled
+	}
+	return gallery.UpgradeFailureUnknown
 }
 
 // downloadProgress returns the gallery download callback for one install or
@@ -419,9 +475,10 @@ func (s *backendSupervisor) unloadTargets(req workerctl.ModelUnloadRequest) []st
 }
 
 // unloadModel answers model.unload: call gRPC Free() to release GPU memory
-// without killing the backend process. A backend that answers Unimplemented
-// cannot free anything and may not survive a second LoadModel, so its process
-// is stopped instead.
+// without killing the backend process. A backend whose Free does not succeed
+// (Unimplemented, an error or a timeout) may still hold its model and may not
+// survive a second LoadModel, so its process is stopped instead. Every branch
+// logs what it did.
 //
 // The target is the address in the request, or else every replica of the model
 // the request names (see unloadTargets). There is no fallback to "any running
@@ -444,28 +501,50 @@ func (s *backendSupervisor) unloadModel(ctx context.Context, req workerctl.Model
 		s.mu.Lock()
 		var target *backendProcess
 		var key string
+		stoppingAtAddr := false
 		for k, bp := range s.processes {
-			if bp.addr == addr && !bp.stopping {
-				target, key = bp, k
-				break
+			if !s.namesProcess(bp, addr) {
+				continue
 			}
+			if bp.stopping {
+				stoppingAtAddr = true
+				continue
+			}
+			target, key = bp, k
+			break
 		}
-		if target == nil || (req.ProcessInstance != "" && target.instance != req.ProcessInstance) {
+		if target == nil {
 			s.mu.Unlock()
+			if stoppingAtAddr {
+				xlog.Info("model.unload target is already stopping; nothing to free", "model", req.ModelName, "addr", addr)
+			} else {
+				xlog.Info("model.unload target has no process in this worker; nothing to free", "model", req.ModelName, "addr", addr)
+			}
+			continue
+		}
+		if req.ProcessInstance != "" && target.instance != req.ProcessInstance {
+			current := target.instance
+			s.mu.Unlock()
+			xlog.Info("model.unload names an older process instance; leaving the current process running",
+				"model", req.ModelName, "addr", addr, "requestedInstance", req.ProcessInstance, "currentInstance", current)
 			continue
 		}
 		instance := target.instance
+		processAddr := target.addr
 		s.mu.Unlock()
 
 		// Best-effort bounded gRPC Free(), outside the lock. A model.unload
 		// request must not occupy the reply handler forever when a backend
-		// is wedged.
-		client := grpc.NewClientWithToken(addr, false, nil, false, s.cfg.RegistrationToken)
+		// is wedged. Dial the process's own address: the request may name it
+		// by the advertised form.
+		client := grpc.NewClientWithToken(processAddr, false, nil, false, s.cfg.dataToken)
 		freeCtx, cancel := context.WithTimeout(ctx, workerBackendFreeTimeout)
 		freeErr := client.Free(freeCtx)
 		cancel()
 		if freeErr != nil {
-			xlog.Warn("Free() failed during model.unload", "error", freeErr, "addr", addr)
+			xlog.Warn("Free() failed during model.unload", "error", freeErr, "addr", addr, "processKey", key)
+		} else {
+			xlog.Info("Free() succeeded during model.unload; process kept running", "addr", addr, "processKey", key)
 		}
 
 		// The process may have been replaced while Free() ran. Say so instead of
@@ -475,19 +554,26 @@ func (s *backendSupervisor) unloadModel(ctx context.Context, req workerctl.Model
 		if !ok || current != target || current.instance != instance {
 			replaced = append(replaced, addr)
 			s.mu.Unlock()
+			xlog.Warn("Process was replaced while model.unload ran", "addr", addr, "processKey", key)
 			continue
 		}
 		s.mu.Unlock()
 
-		// A backend that does not implement Free cannot release its model, and
-		// a second LoadModel on the live process is not safe for all of them
-		// (llama-cpp aborts while it re-initializes its server context). Stop
-		// the process, so the next install starts a fresh one. Free was already
+		// A backend whose Free did not succeed may still hold its model, and a
+		// second LoadModel on that live process is not safe for all of them
+		// (llama-cpp aborts while it re-initializes its server context). This
+		// covers a backend with no Free (Unimplemented) and one whose Free
+		// failed or timed out: the model state is unknown, so the process must
+		// not stay reusable by the already-running path of the next install.
+		// Stop it, so that install starts a fresh process. Free was already
 		// attempted, so skip the courtesy call.
-		if status.Code(freeErr) == codes.Unimplemented {
-			xlog.Info("Backend has no Free(); stopping its process on model.unload", "addr", addr, "processKey", key)
+		if freeErr != nil {
+			xlog.Info("Stopping backend process after Free() did not succeed on model.unload",
+				"addr", addr, "processKey", key, "unimplemented", status.Code(freeErr) == codes.Unimplemented)
 			if err := s.stopBackendExactBP(key, target, true); err != nil {
 				xlog.Warn("Failed to stop backend process after model.unload", "error", err, "addr", addr)
+			} else {
+				xlog.Info("Stopped backend process after model.unload", "addr", addr, "processKey", key)
 			}
 		}
 	}

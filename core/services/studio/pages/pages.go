@@ -70,6 +70,12 @@ var (
 	// ErrFolderReadOnly means the viewer may only read the shared folder of the
 	// page, so the page cannot write there either.
 	ErrFolderReadOnly = errors.New("pages: you can only read this shared folder, so the page cannot save here")
+	// ErrUserSharesOff means an administrator turned off the pages that
+	// people share from their own homes.
+	ErrUserSharesOff = errors.New("pages: pages that people share are turned off by an administrator")
+	// ErrNoEmbed means a page that a person shared cannot run on Home or in
+	// a slot, where it would start without a click.
+	ErrNoEmbed = errors.New("pages: a page that a person shared cannot run on Home or in a slot; open it to run it")
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -139,6 +145,21 @@ type Page struct {
 	PageID    int64
 	Hash      string
 	MetaSize  int64 // of page.json, 0 when it has none
+	// UserShared is set on a shared page that a person shared from their own
+	// home through the page routes: no administrator vouched for it. Role is
+	// then what the viewer may do (RoleView, RoleUse or RoleEdit), OwnerID is
+	// the principal of the person whose home holds the page, and TurnedOff
+	// says that an administrator turned such pages off, so the page is listed
+	// and does not open.
+	UserShared bool
+	// OthersCanEdit is set on an own page that another account may write (an
+	// edit grant): what they write is their code, not the owner's, so the
+	// page runs for its owner only after a consent to its version, as a
+	// shared page does, and never on Home or in a slot by itself.
+	OthersCanEdit bool
+	Role          string
+	OwnerID       string
+	TurnedOff     bool
 	// UpdatedAt and UpdatedBy are the last change to anything in the folder.
 	UpdatedAt time.Time
 	UpdatedBy string
@@ -155,11 +176,29 @@ const (
 	maxWidgetTitle = 60
 )
 
+// The width of a compact tile in a slot, in CSS pixels: a slot is about 40 px
+// high, so the width is the only room a page can ask for.
+const (
+	CompactWidthMin     = 72
+	CompactWidthDefault = 120
+	CompactWidthMax     = 220
+)
+
 // Widget is the "widget" block of page.json: the page can be a tile on Home,
 // where it runs in its compact mode at Size.
 type Widget struct {
 	Size  string // WidgetSmall, WidgetMedium or WidgetLarge
 	Title string // optional short title of the tile
+	// Compact is set when the page also has a layout for a slot (the chat
+	// header, the sidebar footer, the composer toolbar): a strip about 40 px
+	// high. Without it a slot shows the page as a button that opens it.
+	Compact *Compact
+}
+
+// Compact is the "compact" entry of the widget block: true, or an object with
+// the width the tile wants.
+type Compact struct {
+	Width int // CSS pixels, CompactWidthMin to CompactWidthMax
 }
 
 // ValidWidgetSize says whether s is a widget size.
@@ -189,6 +228,11 @@ type Service struct {
 	writes *limiter
 	sends  *limiter
 	refs   refCache
+	// errs keeps the runtime errors of the pages (see errors.go).
+	errs      ErrorStore
+	errorRate *limiter
+	// userShares says whether the pages that people share are on. Nil: on.
+	userShares func() bool
 }
 
 // Option configures a Service.
@@ -196,6 +240,22 @@ type Option func(*Service)
 
 // WithClock sets the clock of the rate limits, for tests.
 func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = now } }
+
+// WithErrorStore sets where the errors of the pages are kept. Without it they
+// are kept in memory.
+func WithErrorStore(st ErrorStore) Option {
+	return func(s *Service) {
+		if st != nil {
+			s.errs = st
+		}
+	}
+}
+
+// WithUserShares sets the switch of the pages that people share from their own
+// homes. Without it they are on.
+func WithUserShares(on func() bool) Option { return func(s *Service) { s.userShares = on } }
+
+func (s *Service) userSharesOn() bool { return s.userShares == nil || s.userShares() }
 
 // New returns the service on the files of the chats.
 func New(f *files.Service, opts ...Option) *Service {
@@ -206,6 +266,12 @@ func New(f *files.Service, opts ...Option) *Service {
 	// A page that saves on every keystroke must debounce; 30 writes a minute
 	// with a burst of 20 is plenty for a person using a page.
 	s.writes = newLimiter(20, 2*time.Second, s.now)
+	// A throw in an animation frame repeats 60 times a second; the frame
+	// counts repeats and the server keeps a burst, then one report in 2 s.
+	s.errorRate = newLimiter(20, 2*time.Second, s.now)
+	if s.errs == nil {
+		s.errs, _ = NewJSONErrors("")
+	}
 	// A message to the assistant starts a turn, which costs far more.
 	s.sends = newLimiter(3, 20*time.Second, s.now)
 	return s
@@ -225,10 +291,17 @@ type loc struct {
 	// shared pages run only with a consent to their code, so their hash
 	// covers the files of code too.
 	shared bool
+	// guarded marks an own page that others may write: it needs a consent
+	// like a shared page.
+	guarded bool
 }
 
-// own returns the location of a page of the user's home.
-func (s *Service) own(principal, name string) (loc, error) {
+// own returns the location of a page of the user's home. A page that another
+// person may write (files.Service.OthersWrite) is the user's page, but it
+// would run as the user's own with code they did not write: it is guarded,
+// so it runs only after a consent to its version (Trust.OwnAllow), as a shared
+// page does.
+func (s *Service) own(ctx context.Context, principal, name string) (loc, error) {
 	if !ValidName(name) {
 		return loc{}, ErrBadName
 	}
@@ -236,7 +309,12 @@ func (s *Service) own(principal, name string) (loc, error) {
 	if err != nil {
 		return loc{}, err
 	}
-	return loc{a: s.actor(principal), folder: folder, name: name, key: principal + "/" + name}, nil
+	others, err := s.f.OthersWrite(ctx, principal)
+	if err != nil {
+		return loc{}, err
+	}
+	guarded := others.Covers(folder)
+	return loc{a: s.actor(principal), folder: folder, name: name, key: principal + "/" + name, shared: guarded, guarded: guarded}, nil
 }
 
 // path returns the workspace path of rel, a path that CleanPath accepted,
@@ -262,7 +340,7 @@ func (s *Service) List(ctx context.Context, principal string) ([]Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.listIn(ctx, s.actor(principal), dir, func(name string) (loc, error) { return s.own(principal, name) }, func(p *Page) {
+	return s.listIn(ctx, s.actor(principal), dir, func(name string) (loc, error) { return s.own(ctx, principal, name) }, func(p *Page) {
 		p.Path = "/" + Dir + "/" + p.Name
 	})
 }
@@ -317,7 +395,7 @@ func (s *Service) existsAt(ctx context.Context, l loc) error {
 
 // Get returns one page.
 func (s *Service) Get(ctx context.Context, principal, name string) (Page, error) {
-	l, err := s.own(principal, name)
+	l, err := s.own(ctx, principal, name)
 	if err != nil {
 		return Page{}, err
 	}
@@ -337,7 +415,7 @@ func (s *Service) getAt(ctx context.Context, l loc) (Page, error) {
 	if index.Kind != workspace.KindFile {
 		return Page{}, ErrNotFound
 	}
-	p := Page{Name: l.name, Title: l.name, Source: SourceOwn, Author: AuthorYou, UpdatedBy: AuthorYou, Rev: index.Rev, Size: index.Size}
+	p := Page{Name: l.name, Title: l.name, Source: SourceOwn, Author: AuthorYou, UpdatedBy: AuthorYou, Rev: index.Rev, Size: index.Size, OthersCanEdit: l.guarded}
 	meta := s.readMeta(ctx, l.a, l.folder, &p)
 	p.MetaSize = meta.Size
 	var code []codeFile
@@ -424,8 +502,9 @@ func parseWidget(raw json.RawMessage) *Widget {
 		return nil
 	}
 	var w struct {
-		Size  any `json:"size"`
-		Title any `json:"title"`
+		Size    any             `json:"size"`
+		Title   any             `json:"title"`
+		Compact json.RawMessage `json:"compact"`
 	}
 	if raw[0] != '{' || json.Unmarshal(raw, &w) != nil {
 		return nil
@@ -436,6 +515,33 @@ func parseWidget(raw json.RawMessage) *Widget {
 	}
 	if title, ok := w.Title.(string); ok {
 		out.Title = clip(title, maxWidgetTitle)
+	}
+	out.Compact = parseCompact(w.Compact)
+	return out
+}
+
+// parseCompact reads the compact entry of the widget block: true or an object
+// makes the page a compact tile, anything else does not. A width out of its
+// bounds is clamped, so a typo still shows a tile.
+func parseCompact(raw json.RawMessage) *Compact {
+	raw = bytes.TrimSpace(raw)
+	switch {
+	case len(raw) == 0:
+		return nil
+	case bytes.Equal(raw, []byte("true")):
+		return &Compact{Width: CompactWidthDefault}
+	case raw[0] != '{':
+		return nil
+	}
+	var c struct {
+		Width any `json:"width"`
+	}
+	if json.Unmarshal(raw, &c) != nil {
+		return nil
+	}
+	out := &Compact{Width: CompactWidthDefault}
+	if w, ok := c.Width.(float64); ok {
+		out.Width = min(max(int(w), CompactWidthMin), CompactWidthMax)
 	}
 	return out
 }
@@ -471,7 +577,7 @@ func (s *Service) Source(ctx context.Context, principal, name string) (Page, str
 
 // Read returns a text file of the page's folder.
 func (s *Service) Read(ctx context.Context, principal, name, rel string) (Content, error) {
-	l, err := s.own(principal, name)
+	l, err := s.own(ctx, principal, name)
 	if err != nil {
 		return Content{}, err
 	}
@@ -545,7 +651,7 @@ type Image struct {
 // extensions of ImageType are read; anything else is ErrNotImage, so this is
 // no way to read an arbitrary binary file.
 func (s *Service) ReadImage(ctx context.Context, principal, name, rel string) (Image, error) {
-	l, err := s.own(principal, name)
+	l, err := s.own(ctx, principal, name)
 	if err != nil {
 		return Image{}, err
 	}
@@ -578,7 +684,7 @@ func (s *Service) Write(ctx context.Context, principal, name, rel string, body [
 	if _, err := CleanPath(rel); err != nil {
 		return File{}, err
 	}
-	l, err := s.own(principal, name)
+	l, err := s.own(ctx, principal, name)
 	if err != nil {
 		return File{}, ErrBadPath
 	}
@@ -592,6 +698,16 @@ func (s *Service) writeAt(ctx context.Context, l loc, rel string, body []byte, b
 	}
 	if first := workspace.FoldName(strings.SplitN(rel, "/", 2)[0]); first == workspace.FoldName(IndexFile) || first == workspace.FoldName(MetaFile) || IsCodeFile(rel) {
 		return File{}, ErrReadOnly
+	}
+	if l.shared {
+		// A file that the page's code names is code too.
+		p, err := s.getAt(ctx, l)
+		if err != nil {
+			return File{}, err
+		}
+		if isCode(p, rel) {
+			return File{}, ErrReadOnly
+		}
 	}
 	if len(body) > MaxFileSize {
 		return File{}, ErrTooLarge
@@ -633,7 +749,7 @@ func (l loc) file(n workspace.Node) File {
 
 // ListFiles lists a folder of the page; dir "" is the page's folder.
 func (s *Service) ListFiles(ctx context.Context, principal, name, dir string) ([]File, error) {
-	l, err := s.own(principal, name)
+	l, err := s.own(ctx, principal, name)
 	if err != nil {
 		return nil, err
 	}
@@ -659,6 +775,13 @@ func (s *Service) listAt(ctx context.Context, l loc, dir string) ([]File, error)
 		out = append(out, l.file(k))
 	}
 	return out, nil
+}
+
+// Guarded says whether the own page name needs a consent to run: another
+// account may write it.
+func (s *Service) Guarded(ctx context.Context, principal, name string) (bool, error) {
+	l, err := s.own(ctx, principal, name)
+	return l.guarded, err
 }
 
 // AllowSend says whether a page may send another message to a chat now.

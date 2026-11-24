@@ -42,4 +42,25 @@ const (
 	// KeyChatsLoops elects the one frontend that fires the loops of the
 	// chats. It is held for as long as the frontend lives.
 	KeyChatsLoops int64 = 116
+	// KeyOpenResponsesSweep elects the one frontend that ends the Open
+	// Responses runs whose owner stopped renewing their lease and deletes the
+	// expired ones.
+	KeyOpenResponsesSweep int64 = 117
+	// KeyRemotesRefresh elects the one frontend that refreshes the
+	// remotes at startup. It is held for one pass, not for the life of the
+	// frontend.
+	KeyRemotesRefresh int64 = 118
+	// KeyModelUpdateCheck elects the one frontend that checks the galleries
+	// for updates of the installed models and writes the model digest. It is
+	// held for one check.
+	KeyModelUpdateCheck int64 = 119
+	// 120 is reserved: it was the key of the removed change of carrier. Do not
+	// give it to another lock.
+
+	// KeyUpgradeRuns makes one frontend at a time start an upgrade run, so
+	// two frontends never start two runs at once. It is held for one
+	// admission, or for one removal of the finished runs beyond the
+	// retention (tried, never waited for). Each run is then held by its runner on a key of its own,
+	// KeyFromString("upgrade-run:" + id), for as long as it runs it.
+	KeyUpgradeRuns int64 = 121
 )

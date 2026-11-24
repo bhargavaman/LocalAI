@@ -38,7 +38,7 @@ var (
 	// ErrNotExist is what a Reader returns for a file that is not there.
 	ErrNotExist = errors.New("contextfiles: no such file")
 	// ErrBadTopic means the topic or the scope is not acceptable.
-	ErrBadTopic = errors.New("contextfiles: the topic must be a plain name and the scope user, agent or channel")
+	ErrBadTopic = errors.New("contextfiles: the topic must be a plain name and the scope user, project, agent or channel")
 	// ErrNoTopic means no scope that applies to the chat holds the topic.
 	ErrNoTopic = errors.New("contextfiles: no such topic; check the index")
 )
@@ -70,10 +70,17 @@ type Subject struct {
 	// already has it. It wins over Channel. The host builds it from the chat,
 	// never from the model; the loader accepts a plain name only.
 	ChannelDir string
+	// ProjectDir is the folder name of the project the chat belongs to, when
+	// it has one. The host reads it from the chat's project each turn and
+	// never from the model; the loader accepts a plain name only.
+	ProjectDir string
 	// SaveTool is the tool this chat has to save a note, if any. It wins over
 	// the Writer, which knows the host but not the chat: a chat whose agent
 	// cannot propose changes must not be told to.
 	SaveTool string
+	// OmitEmpty leaves the block out when no index has text, instead of
+	// sending the header alone.
+	OmitEmpty bool
 }
 
 // Block is text for the prompt of a turn and a key that changes with it.
@@ -96,7 +103,7 @@ var (
 	segment   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 	slugBad   = regexp.MustCompile(`[^a-z0-9]+`)
 	topicName = segment
-	// channelDirName is the folder name a host gives a channel.
+	// channelDirName is the folder name a host gives a channel or a project.
 	channelDirName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`)
 )
 
@@ -166,6 +173,11 @@ func (s Source) resolve(sub Subject) (string, bool) {
 	switch s.Scope {
 	case ScopeUser:
 		return s.Path, true
+	case ScopeProject:
+		if !channelDirName.MatchString(sub.ProjectDir) {
+			return "", false
+		}
+		return strings.ReplaceAll(s.Path, "{project}", sub.ProjectDir), true
 	case ScopeAgent:
 		if !segment.MatchString(sub.AgentID) {
 			return "", false
@@ -231,6 +243,7 @@ func (l *Loader) Block(ctx context.Context, sub Subject, extra ...Source) Block 
 		sb.WriteString(" Save new facts with " + tool + ".")
 	}
 	budget := MaxTotalBytes
+	found := false
 	for _, src := range sources {
 		rel, ok := src.resolve(sub)
 		if !ok || budget < minIndexBytes {
@@ -241,7 +254,11 @@ func (l *Loader) Block(ctx context.Context, sub Subject, extra ...Source) Block 
 			continue
 		}
 		budget -= len(text)
+		found = true
 		fmt.Fprintf(&sb, "\n\n[%s notes: %s]\n%s", src.Scope, src.ID, text)
+	}
+	if sub.OmitEmpty && !found {
+		return Block{}
 	}
 	return blockOf(sb.String())
 }
@@ -327,7 +344,7 @@ func clean(s string) string {
 
 // Detail reads the file of a topic that sits next to the index of a source.
 // scope narrows the search; empty looks in the channel, then the agent, then
-// the user. The path comes from the registry and the subject, so the model can
+// the project, then the user. The path comes from the registry and the subject, so the model can
 // only name a topic: it cannot leave the folder of an index, and it cannot name
 // another agent or channel.
 func (l *Loader) Detail(ctx context.Context, sub Subject, scope Scope, topic string, extra ...Source) (string, error) {

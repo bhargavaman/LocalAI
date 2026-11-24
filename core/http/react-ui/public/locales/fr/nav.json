@@ -42,7 +42,8 @@
       "addons": "Install, turn on and open add-ons.",
       "triggers": "Démarrez un chat automatiquement, selon un calendrier ou à l'arrivée d'un fichier."
     },
-    "operateSupporting": "Ce qui tourne sur ce serveur, comment il est utilisé et comment il est configuré."
+    "operateSupporting": "Ce qui tourne sur ce serveur, comment il est utilisé et comment il est configuré.",
+    "updates": "Mises à jour"
   },
   "operate": {
     "inference": "Inférence",
@@ -69,9 +70,10 @@
     "audioTransform": "Transformation audio",
     "faceRecognition": "Reconnaissance faciale",
     "voiceRecognition": "Reconnaissance vocale",
+    "projects": "Projets",
     "agents": "Agents",
     "skills": "Compétences",
-    "memory": "Mémoire",
+    "memory": "Connaissances",
     "mcpJobs": "Tâches MCP CI",
     "usage": "Utilisation",
     "users": "Utilisateurs",
@@ -79,8 +81,8 @@
     "backends": "Backends",
     "voiceLibrary": "Bibliothèque de voix",
     "traces": "Traces",
-    "nodes": "Nœuds",
-    "scheduling": "Ordonnancement",
+    "nodes": "Workers",
+    "scheduling": "Placement",
     "swarm": "Essaim",
     "system": "Système",
     "settings": "Paramètres",
@@ -91,17 +93,19 @@
     "failover": "Bascule",
     "gpuHost": "GPU et hôte",
     "logs": "Journaux",
-    "p2p": "P2P",
+    "p2p": "Partage",
     "prometheus": "Prometheus",
     "trafficModels": "Modèles",
     "addons": "Add-ons",
     "chats": "Chats",
     "files": "Fichiers",
     "triggers": "Déclencheurs",
-    "mcpConnectors": "Connecteurs MCP",
+    "connections": "Connexions",
     "chatsAdmin": "Chats de tous les utilisateurs",
     "pages": "Pages",
-    "allChats": "Toutes les conversations"
+    "allChats": "Toutes les conversations",
+    "inbox": "Notifications",
+    "apiKeys": "Clés API"
   },
   "footer": {
     "github": "GitHub",
@@ -122,5 +126,57 @@
   "untitledChat": "Conversation sans titre",
   "chatRunning": "En cours",
   "automatedWaiting": "Chats automatiques qui vous attendent : {{count}}",
-  "automatedRunning": "Chats automatiques en cours : {{count}}"
+  "automatedRunning": "Chats automatiques en cours : {{count}}",
+  "inboxUnread_one": "Notifications, {{count}} non lue",
+  "inboxUnread_other": "Notifications, {{count}} non lues",
+  "inboxArrived": "Nouvelle notification : {{title}}",
+  "inboxArrivedMany_one": "{{count}} nouvelle notification",
+  "inboxArrivedMany_other": "{{count}} nouvelles notifications",
+  "updatesBadge_one": "{{count}} mise à jour a besoin de vous",
+  "updatesBadge_other": "{{count}} mises à jour ont besoin de vous",
+  "inboxOps_one": "{{count}} opération en cours",
+  "inboxOps_other": "{{count}} opérations en cours",
+  "inboxOpsFailed_one": "{{count}} opération a échoué",
+  "inboxOpsFailed_other": "{{count}} opérations ont échoué",
+  "inboxOpsFailedAnnounce": "Une opération a échoué. Voir l'onglet Activité dans les notifications.",
+  "activityEntry": "Activité",
+  "navLinkExternal": "Ouvre {{site}} dans un nouvel onglet après confirmation",
+  "navLinkAsk": "Ouvrir ce lien ?",
+  "startPage": "Page de démarrage",
+  "admin": {
+    "nav": {
+      "overview": "Vue d'ensemble",
+      "apiReference": "Référence de l'API",
+      "back": "Retour à {{name}}",
+      "search": "Rechercher",
+      "label": "Administration",
+      "crumbs": "Fil d'Ariane"
+    },
+    "groups": {
+      "machine": "Cette machine",
+      "cluster": "Cluster",
+      "runtime": "Modèles et exécution",
+      "access": "Accès"
+    },
+    "palette": {
+      "label": "Rechercher dans l'administration",
+      "input": "Rechercher pages, personnes, workers et réglages",
+      "placeholder": "Pages, personnes, workers, réglages",
+      "results": "Résultats",
+      "none": "Rien ne correspond à « {{query}} ».",
+      "move": "naviguer",
+      "open": "ouvrir",
+      "kinds": {
+        "page": "Pages",
+        "setting": "Réglages",
+        "worker": "Workers",
+        "person": "Personnes"
+      }
+    },
+    "filters": {
+      "label": "Filtres",
+      "active": "{{count}} actif(s)",
+      "sort": "Trier"
+    }
+  }
 }

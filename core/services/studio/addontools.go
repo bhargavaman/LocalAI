@@ -9,9 +9,12 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 
 	addontools "github.com/mudler/LocalAI/core/services/addons/tools"
+	"github.com/mudler/LocalAI/core/services/studio/agents"
 	"github.com/mudler/LocalAI/core/services/studio/builtins"
+	"github.com/mudler/LocalAI/core/services/studio/resourcesets"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 	"github.com/mudler/LocalAI/core/services/studio/workspace"
 	"github.com/mudler/LocalAI/pkg/addons/contract"
@@ -45,6 +48,24 @@ type AddonTool struct {
 	// enabled for the chat (see Connectors.ConnectionsOf); until then a chat
 	// does not offer it.
 	Credentialed bool
+	// OwnerData is true for a tool of an add-on that keeps the owner's own
+	// data. Its write tools are held to tools.write, which the owner and the
+	// paired senders of a messaging chat have without a tick.
+	OwnerData bool
+	// ApprovalOverridable is true for a write tool whose confirmation the
+	// person can relax with their own setting. Tool is its name inside the
+	// add-on, the key of that setting.
+	ApprovalOverridable bool
+	Tool                string
+	// ResourceScoped is true for a tool of an add-on whose manifest opts in to
+	// per-agent resources: a chat of a saved agent reaches only the resources
+	// on the list of the agent (see Agent.Resources).
+	ResourceScoped bool
+	// Deferred is true for a tool the add-on marked deferred: a chat offers it
+	// through the tool search instead of as a typed tool (see
+	// contract.ToolDefinition.Deferred). A tool that shadows a built-in one is
+	// never deferred.
+	Deferred bool
 }
 
 // AddonTools is the add-on broker as the chats see it. Both calls run as the
@@ -70,6 +91,17 @@ type AddonGate interface {
 	// when the broker cannot tell, it answers "".
 	Unavailable(ctx context.Context, user, addonID string, workspace bool) string
 }
+
+// holdForPerson marks a call whose write must wait for the person, even in a
+// chat that applies the writes of an add-on at once.
+func holdForPerson(ctx context.Context) context.Context { return addontools.HoldForPerson(ctx) }
+
+// roleToolName is the name a chat sees for a tool of an add-on.
+func roleToolName(addonID, tool string) string { return addontools.ToolName(addonID, tool) }
+
+// ProviderToolName is the name the broker gives the tool of an add-on, for a
+// caller that runs a provider's tool through AddonProviderCaller.
+func ProviderToolName(addonID, tool string) string { return roleToolName(addonID, tool) }
 
 // unavailableToolName is the name of the stand-in tool of an add-on that
 // cannot work. It has the shape of the broker's tool names.
@@ -99,18 +131,108 @@ type AddonInfo struct {
 	// Title and Description are what the add-on declares for people, when its
 	// broker can say (see AddonLister). Empty otherwise.
 	Title, Description string
+	// ToolList names the tools of the add-on the user may use and says which
+	// change things.
+	ToolList []AddonToolEntry
+	// Resources is set when the add-on scopes its resources per agent.
+	Resources *ResourceLabel
+}
+
+// AddonToolEntry is the name of a tool of an add-on, as the add-on declares
+// it, and whether it changes things.
+type AddonToolEntry struct {
+	Name  string
+	Write bool
 }
 
 // AddonListing is the title and the description an add-on declares in its
 // manifest.
 type AddonListing struct {
 	AddonID, Title, Description string
+	// Resources is set for an add-on whose manifest scopes its resources per
+	// agent (see AddonTool.ResourceScoped).
+	Resources *ResourceLabel
 }
+
+// ResourceLabel is the word an add-on uses for one of its resources: the
+// singular, the plural, and the translations by language tag.
+type ResourceLabel struct {
+	Noun, NounPlural string
+	Translations     map[string]contract.ResourceText
+}
+
+// AddonResourceChooser is implemented by a broker that can list the resources
+// of an add-on that a person may give to a saved agent.
+type AddonResourceChooser interface {
+	// ResourceChoices lists the resources the user may use now for the add-on,
+	// before any limit of an agent. The bool says the list is cut short. An
+	// add-on that does not scope its resources per agent is ErrNotScoped.
+	ResourceChoices(ctx context.Context, user, addonID string) ([]ResourceChoice, bool, error)
+}
+
+// ResourceChoice is one resource a person may give to an agent. Role is the
+// person's own role on it: viewer, editor or owner.
+type ResourceChoice struct{ ID, Name, Role string }
+
+// ErrNotScoped means the add-on does not scope its resources per agent, or is
+// not there for the user.
+var ErrNotScoped = errors.New("studio: the add-on has no resources to give to an agent")
 
 // AddonLister is implemented by a broker that knows what each add-on declares
 // for people. It is optional: without it the lists show the add-on IDs only.
 type AddonLister interface {
 	AddonListings(ctx context.Context, user string) ([]AddonListing, error)
+}
+
+// ToolCap says that the add-on tool cap left tool definitions out of what the
+// user's add-ons declare. Cap is the limit, Offered how many definitions were
+// offered, Cut how many were left out. Addons names the add-ons that lost
+// tools.
+type ToolCap struct {
+	Cap, Offered, Cut int
+	Addons            []ToolCapAddon
+}
+
+// ToolCapAddon is one add-on that lost tools to the cap.
+type ToolCapAddon struct {
+	ID, Title string
+	Cut       int
+}
+
+// AddonToolScoper is implemented by a broker that caps the tools it offers. It
+// lists the tools of the user as Tools does, but without the add-ons that
+// excluded names, which neither count against the cap nor are returned, and
+// says what the cap left out of the rest (nil when nothing). It is optional:
+// without it Tools answers and no notice is shown.
+type AddonToolScoper interface {
+	ToolsScoped(ctx context.Context, user string, excluded func(addonID string) bool) ([]AddonTool, *ToolCap, error)
+}
+
+// addonToolsScoped lists the tools of user less the add-ons excluded names,
+// with the cap report of that list.
+func (s *Service) addonToolsScoped(ctx context.Context, user string, excluded func(string) bool) ([]AddonTool, *ToolCap, error) {
+	if sc, ok := s.d.AddonTools.(AddonToolScoper); ok {
+		return sc.ToolsScoped(ctx, user, excluded)
+	}
+	tools, err := s.d.AddonTools.Tools(ctx, user)
+	if err != nil || excluded == nil {
+		return tools, nil, err
+	}
+	out := tools[:0:0]
+	for _, t := range tools {
+		if !excluded(t.AddonID) {
+			out = append(out, t)
+		}
+	}
+	return out, nil, nil
+}
+
+// addonExcluder says which add-ons a chat does not use: those it switched off
+// and, for a chat with a saved agent, those the agent does not grant. The cap
+// on add-on tools applies to what is left, so it describes this chat.
+func addonExcluder(rec session.ChatRecord, sc *scope) func(string) bool {
+	off := set(rec.AddonsOff)
+	return func(id string) bool { return off[id] || (sc != nil && !sc.addons[id]) }
 }
 
 // SetAddonsOff sets the add-ons a chat has switched off, replacing the earlier
@@ -145,21 +267,45 @@ func cleanAddonSwitches(off []string) ([]string, error) {
 // Addons lists the add-ons whose tools the user may use, with the chat's
 // switch for each. Without the add-on host it lists none.
 func (s *Service) Addons(ctx context.Context, user, conv string) ([]AddonInfo, error) {
-	rec, err := s.d.Store.GetChat(ctx, principal(user), conv)
+	rec, err := s.getChatEffective(ctx, principal(user), conv)
 	if err != nil {
 		return nil, err
 	}
-	return s.addonsFor(ctx, user, rec)
+	list, _, err := s.addonsFor(ctx, user, rec, s.scopeOf(ctx, rec))
+	return list, err
 }
 
-// addonsFor lists the add-ons of Addons with the switches of rec.
-func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRecord) ([]AddonInfo, error) {
+// addonsFor lists the add-ons of Addons with the switches of rec, and says what
+// the cap on add-on tools leaves out for this chat. The tools of an add-on the
+// chat uses are the ones the chat is really offered, with the cap applied to
+// the add-ons the chat uses; an add-on the chat does not use (switched off, or
+// outside its agent) keeps the tools it would have, so it can be switched on
+// again.
+func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRecord, sc *scope) ([]AddonInfo, *ToolCap, error) {
 	if s.d.AddonTools == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	tools, err := s.d.AddonTools.Tools(ctx, principal(user))
-	if err != nil {
-		return nil, err
+	var tools []AddonTool
+	var capped *ToolCap
+	var err error
+	if _, ok := s.d.AddonTools.(AddonToolScoper); ok {
+		excluded := addonExcluder(rec, sc)
+		if tools, capped, err = s.addonToolsScoped(ctx, principal(user), excluded); err != nil {
+			return nil, nil, err
+		}
+		if len(rec.AddonsOff) > 0 || sc != nil {
+			all, _, err := s.addonToolsScoped(ctx, principal(user), nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, t := range all {
+				if excluded(t.AddonID) {
+					tools = append(tools, t)
+				}
+			}
+		}
+	} else if tools, err = s.d.AddonTools.Tools(ctx, principal(user)); err != nil {
+		return nil, nil, err
 	}
 	off := map[string]bool{}
 	for _, id := range rec.AddonsOff {
@@ -167,9 +313,11 @@ func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRe
 	}
 	n := map[string]int{}
 	credentialed := map[string]bool{}
+	list := map[string][]AddonToolEntry{}
 	for _, t := range tools {
 		n[t.AddonID]++
 		credentialed[t.AddonID] = credentialed[t.AddonID] || t.Credentialed
+		list[t.AddonID] = append(list[t.AddonID], AddonToolEntry{Name: t.Tool, Write: t.Action})
 	}
 	listed := map[string]AddonListing{}
 	if l, ok := s.d.AddonTools.(AddonLister); ok {
@@ -183,7 +331,9 @@ func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRe
 	}
 	out := make([]AddonInfo, 0, len(n))
 	for id, c := range n {
-		info := AddonInfo{ID: id, Tools: c, Off: off[id], Title: listed[id].Title, Description: listed[id].Description, Credentialed: credentialed[id]}
+		info := AddonInfo{ID: id, Tools: c, Off: off[id], Title: listed[id].Title, Description: listed[id].Description, Credentialed: credentialed[id],
+			ToolList: list[id], Resources: listed[id].Resources}
+		slices.SortFunc(info.ToolList, func(a, b AddonToolEntry) int { return strings.Compare(a.Name, b.Name) })
 		if info.Credentialed && s.connectors != nil {
 			var err error
 			if info.Connections, err = s.connectors.Connections(ctx, user, id); err != nil {
@@ -196,7 +346,7 @@ func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRe
 		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return out, capped, nil
 }
 
 // addonTools turns the add-on tools the chat's user may use, less the add-ons
@@ -205,20 +355,31 @@ func (s *Service) addonsFor(ctx context.Context, user string, rec session.ChatRe
 // it never fails the chat. The second result names the add-ons the agent grants
 // that the user cannot use.
 func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session.ChatRecord, sc *scope) ([]session.Tool, []string, error) {
+	tools, missing, _, err := s.addonToolsHeld(ctx, a, rec, sc)
+	return tools, missing, err
+}
+
+// addonToolsHeld is addonTools that also says which tools of an add-on the chat
+// would use but must not have, and why, so a messaging chat can tell the model
+// (see deniedToolsNote). Only a tool the agent and the chat switches let in is
+// reported: a tool the owner never gave to the agent is not "held back".
+func (s *Service) addonToolsHeld(ctx context.Context, a workspace.Actor, rec session.ChatRecord, sc *scope) ([]session.Tool, []string, []builtins.Built, error) {
 	pins, err := s.toolPins(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if s.d.AddonTools == nil {
 		if sc != nil {
-			return nil, prefixed("add-on", sc.addonNames), nil
+			return nil, prefixed("add-on", sc.addonNames), nil, nil
 		}
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	defs, err := s.d.AddonTools.Tools(ctx, a.Principal)
+	// The cap on add-on tools applies to the add-ons this chat uses, so a
+	// switched-off add-on frees room for the others.
+	defs, _, err := s.addonToolsScoped(ctx, a.Principal, addonExcluder(rec, sc))
 	if err != nil {
 		s.log.Warn("studio: add-on tools unavailable", "chat", a.ChatID, "error", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	off := make(map[string]bool, len(rec.AddonsOff))
 	for _, id := range rec.AddonsOff {
@@ -238,8 +399,18 @@ func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session
 	gate, _ := s.d.AddonTools.(AddonGate)
 	reasons := map[string]string{}
 	enabled := map[string]ConnectionSet{}
+	providers := s.providerGateFor(ctx, a.Principal, &rec)
+	// The writes of a provider count against the same limit of a turn as the
+	// notes the built-in provider saves at once.
+	writes := &autoTurn{}
+	held := &heldTools{}
 	for _, d := range defs {
 		have[d.AddonID] = true
+		// The tools a provider fills a role with are offered only while it is
+		// the provider the person picked and the chat has the slot on.
+		if providers.hidden(d.AddonID, d.Name) {
+			continue
+		}
 		// A tool that runs with a credential is offered only once the person
 		// has enabled at least one connection for the chat. The host picks
 		// none for the person.
@@ -251,6 +422,9 @@ func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session
 				enabled[d.AddonID] = conns
 			}
 			if len(conns.Items) == 0 {
+				if !off[d.AddonID] && (sc == nil || sc.addons[d.AddonID]) {
+					held.add(d, "no connection is selected for the "+d.AddonID+" add-on in this agent, so its tools are not available")
+				}
 				continue
 			}
 		}
@@ -290,17 +464,31 @@ func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session
 			}
 		}
 		if t, ok := s.shadowTool(a, d, schema); ok {
+			if d.Shadows == commandTool && d.Execution != nil {
+				if len(d.Execution.Profiles) > 0 {
+					t = s.withSandboxProfile(ctx, a, rec, d, t)
+				} else {
+					t = s.withWorkDir(a, t)
+				}
+			}
+			if d.ResourceScoped {
+				t.Run = s.agentResourceRun(a, t.Run)
+			}
 			if d.Credentialed {
 				t.Run = s.connectionRun(a, d.AddonID, conns, t.Run)
 			}
 			if guarded {
 				t = s.gateAddonAct(rec, pol, t, d)
 			}
+			t.Run = s.outcomeRun(rec, a, d, t.Run)
 			tools = append(tools, t)
 			continue
 		}
 		run := func(ctx context.Context, args json.RawMessage) (string, error) {
 			return s.d.AddonTools.Call(ctx, a.Principal, a.ChatID, name, args)
+		}
+		if d.ResourceScoped {
+			run = s.agentResourceRun(a, run)
 		}
 		if d.Credentialed {
 			run = s.connectionRun(a, d.AddonID, conns, run)
@@ -310,16 +498,42 @@ func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session
 			// The user and the conversation come from the chat, never from the
 			// arguments the model wrote.
 			Run: run,
+			// The add-on declares the kind of each tool: only a read tool is
+			// safe to run again after a restart (see session.Tool.ReadOnly).
+			ReadOnly: !d.Action,
+			// A tool the add-on marked deferred may go behind the tool search
+			// (see deferrableAddonTools). It keeps this Run, so every gate
+			// below wraps it for both ways of calling it.
+			Deferrable: d.Deferred && d.Shadows == "",
+		}
+		// A write of the provider that serves the notes follows the save
+		// level, the grants and the messaging rules of the host.
+		if ref, ok := providers.roleOf(d.AddonID, d.Name); ok && ref.Slot == MemorySlot && (ref.Role == roleWrite || ref.Role == roleForget) {
+			var offered bool
+			if tool, offered = s.gateMemoryWrite(rec, tool, ref, writes); !offered {
+				continue
+			}
 		}
 		if d.Permission != "" && rec.Origin == session.OriginConnector {
 			var ok bool
-			if tool, ok = s.gateAddonTool(tool, d.Permission, a.ChatID); !ok {
+			var why string
+			var connected bool
+			if d.Permission == contract.CapToolsWrite && d.Credentialed {
+				connected = s.agentConnectedForWrite(ctx, a.Principal, d.AddonID, conns)
+			} else if d.Permission == contract.CapToolsWrite && d.OwnerData {
+				// The data is the owner's and the agent was given the add-on:
+				// the owner and paired senders write, every other sender reads.
+				connected = true
+			}
+			if tool, ok, why = s.gateAddonToolFor(tool, d.Permission, a.ChatID, connected, d.OwnerData); !ok {
+				held.add(d, strings.TrimSuffix(why, "."))
 				continue
 			}
 		}
 		if guarded {
 			tool = s.gateAddonAct(rec, pol, tool, d)
 		}
+		tool.Run = s.outcomeRun(rec, a, d, tool.Run)
 		tools = append(tools, tool)
 	}
 	installed := map[string]string{}
@@ -330,12 +544,12 @@ func (s *Service) addonTools(ctx context.Context, a workspace.Actor, rec session
 	var missing []string
 	if sc != nil {
 		for _, id := range sc.addonNames {
-			if !have[id] {
+			if !have[id] && !off[id] {
 				missing = append(missing, "add-on "+id)
 			}
 		}
 	}
-	return tools, missing, nil
+	return tools, missing, held.built(), nil
 }
 
 // unavailableTool is the one tool a chat gets for an add-on that cannot work:
@@ -358,20 +572,140 @@ func unavailableTool(addonID, reason string) session.Tool {
 // offered. The second result is false when the tool must not be offered. A chat
 // that no connector started has no sender and is not gated here: the write
 // mode of the binding and the confirmation of the proposal govern it.
-func (s *Service) gateAddonTool(t session.Tool, permission, chat string) (session.Tool, bool) {
+//
+// connected says the agent selected a connection of the add-on whose write
+// mode is not off. A sender who holds tools.write only by that connection (see
+// impliedWrite) then passes for this tool, at the offer and at each call; the
+// write mode and the approval of the connection still decide whether the call
+// runs or waits for a confirmation.
+func (s *Service) gateAddonTool(t session.Tool, permission, chat string, connected bool) (session.Tool, bool, string) {
+	return s.gateAddonToolFor(t, permission, chat, connected, false)
+}
+
+// gateAddonToolFor is gateAddonTool with ownerData set for a tool of an add-on
+// that keeps the owner's own data. When the owner ticked tools.write for the
+// bot, every sender the bot let in passes for such a tool (see everyoneWrite);
+// without the tick nothing changes.
+func (s *Service) gateAddonToolFor(t session.Tool, permission, chat string, connected, ownerData bool) (session.Tool, bool, string) {
 	allow, audit := s.turnAllow(chat)
+	if ownerData && permission == contract.CapToolsWrite {
+		plain := allow
+		allow = func(capability string) (bool, string) {
+			ok, why := plain(capability)
+			if ok || capability != contract.CapToolsWrite {
+				return ok, why
+			}
+			if g, found := s.access.get(chat); found && g.EveryoneWrite {
+				return true, ""
+			}
+			return false, why
+		}
+	}
+	if connected && permission == contract.CapToolsWrite {
+		plain := allow
+		allow = func(capability string) (bool, string) {
+			ok, why := plain(capability)
+			if ok || capability != contract.CapToolsWrite {
+				return ok, why
+			}
+			if g, found := s.access.get(chat); found && g.ImpliedWrite {
+				return true, ""
+			}
+			return false, why
+		}
+	}
 	c := builtins.Chat{Allow: allow, Audit: audit}
-	if held, _ := c.Holds(permission); !held {
-		return t, false
+	if held, why := c.Holds(permission); !held {
+		return t, false, why
 	}
 	run := t.Run
 	t.Run = func(ctx context.Context, args json.RawMessage) (string, error) {
 		if err := c.Require(permission); err != nil {
+			addontools.OutcomeFrom(ctx).Deny(s.deniedCode(chat, permission))
 			return "", err
 		}
 		return run(ctx, args)
 	}
-	return t, true
+	return t, true, ""
+}
+
+// deniedCode is the code of the link that refuses a capability to the sender of
+// the turn of chat: the code of the refusal that was computed with the grant,
+// or no_grant when no sender of this chat holds a grant now.
+func (s *Service) deniedCode(chat, capability string) string {
+	g, ok := s.access.get(chat)
+	switch {
+	case !ok:
+		return "no_grant"
+	case g.DeniedCodes[capability] != "":
+		return g.DeniedCodes[capability]
+	}
+	return CodeConnectionPermissionOff
+}
+
+// agentConnectedForWrite says whether the agent selected a connection for the
+// add-on, and at least one of them is in a write mode other than off. A
+// connection that the chat or the only-connection rule picked does not count:
+// the owner connected the agent to it, or did not.
+func (s *Service) agentConnectedForWrite(ctx context.Context, user, addonID string, set ConnectionSet) bool {
+	if s.connectors == nil || set.By != ConnectionByAgent {
+		return false
+	}
+	return len(writeModeOn(s.connectors.agentConnections(ctx, user, addonID, set))) > 0
+}
+
+// heldTools collects, for one turn, the tools of an add-on that the chat would
+// use but was refused, grouped by add-on and reason.
+type heldTools struct {
+	order []string
+	by    map[string]*heldGroup
+}
+
+type heldGroup struct {
+	addon, why string
+	tools      []string
+}
+
+// maxHeldNames bounds the tool names one reason lists: the note is short.
+const maxHeldNames = 3
+
+func (h *heldTools) add(d AddonTool, why string) {
+	if why == "" {
+		return
+	}
+	if h.by == nil {
+		h.by = map[string]*heldGroup{}
+	}
+	k := d.AddonID + "\x00" + why
+	g := h.by[k]
+	if g == nil {
+		g = &heldGroup{addon: d.AddonID, why: why}
+		h.by[k] = g
+		h.order = append(h.order, k)
+	}
+	name := d.Tool
+	if name == "" {
+		name = d.Name
+	}
+	g.tools = append(g.tools, name)
+}
+
+// built turns the groups into the entries deniedToolsNote reads: one reason per
+// add-on and cause, naming the tools it holds back.
+func (h *heldTools) built() []builtins.Built {
+	var out []builtins.Built
+	for _, k := range h.order {
+		g := h.by[k]
+		names := g.tools
+		more := ""
+		if len(names) > maxHeldNames {
+			more = fmt.Sprintf(", and %d more", len(names)-maxHeldNames)
+			names = names[:maxHeldNames]
+		}
+		out = append(out, builtins.Built{ID: g.addon, Reason: builtins.ReasonNotPermitted + ": " + g.why +
+			" " + heldMark + g.addon + " add-on: " + strings.Join(names, ", ") + more + ")"})
+	}
+	return out
 }
 
 // enabledConnections is the set of connections the chat rec may use for the
@@ -404,7 +738,7 @@ func (s *Service) enabledConnections(ctx context.Context, user string, rec sessi
 func (s *Service) connectionRun(a workspace.Actor, addonID string, offered ConnectionSet, run func(context.Context, json.RawMessage) (string, error)) func(context.Context, json.RawMessage) (string, error) {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		set := offered
-		rec, err := s.d.Store.GetChat(ctx, a.Principal, a.ChatID)
+		rec, err := s.getChatEffective(ctx, a.Principal, a.ChatID)
 		switch {
 		case err == nil:
 			set = s.enabledConnections(ctx, a.Principal, rec, addonID)
@@ -424,12 +758,14 @@ func (s *Service) connectionRun(a workspace.Actor, addonID string, offered Conne
 		var chosen Connection
 		switch {
 		case len(set.Items) == 0:
+			addontools.OutcomeFrom(ctx).Deny(addontools.CodeSelectConnection)
 			return connectionSentence(nil, "", false), nil
 		case len(set.Items) == 1 && !present:
 			chosen = set.Items[0]
 		default:
 			var ok bool
 			if chosen, ok = pickConnection(set.Items, given); !ok {
+				addontools.OutcomeFrom(ctx).Deny(addontools.CodeSelectConnection)
 				return connectionSentence(set.Items, given, present && given != ""), nil
 			}
 		}
@@ -440,4 +776,143 @@ func (s *Service) connectionRun(a workspace.Actor, addonID string, offered Conne
 		}
 		return run(addontools.WithConnection(ctx, chosen.ID), args)
 	}
+}
+
+// maxAgentChain bounds how far a sub-agent looks up for the agents it works
+// for.
+const maxAgentChain = 8
+
+// limitOf turns the resources of an agent into the limit the add-on tools
+// read.
+func limitOf(r resourcesets.Sets) addontools.ResourceLimit {
+	out := make(addontools.ResourceLimit, len(r))
+	for addon, entries := range r {
+		m := make(map[string]string, len(entries))
+		for _, e := range entries {
+			m[e.ID] = e.Mode
+		}
+		out[addon] = m
+	}
+	return out
+}
+
+// agentResourceLayers returns one limit for each saved agent that a chat works
+// for: the agent of the chat, and for a sub-agent also the agents above it, so
+// a sub-agent never reaches more than the agent that started it. A chat with
+// no agent has no layer, which means no limit. An agent that cannot be read
+// gives an empty layer: the chat reaches no scoped resource until it can.
+// Everything is read from the stored chats and agents at the call, so a change
+// of the list holds at once.
+func (s *Service) agentResourceLayers(ctx context.Context, user, chatID string) ([]addontools.ResourceLimit, error) {
+	var layers []addontools.ResourceLimit
+	id := chatID
+	for range maxAgentChain {
+		rec, err := s.getChatEffective(ctx, user, id)
+		if errors.Is(err, session.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if rec.AgentID != "" {
+			var layer addontools.ResourceLimit
+			if s.d.Agents != nil {
+				if ag, aerr := s.chatAgent(ctx, rec.Principal, rec.AgentID); aerr == nil {
+					layer = limitOf(ag.Resources)
+				} else if !errors.Is(aerr, agents.ErrNotFound) {
+					s.log.Warn("studio: agent resources unavailable", "chat", rec.ID, "agent", rec.AgentID, "error", aerr)
+				}
+			}
+			if layer == nil {
+				layer = addontools.ResourceLimit{}
+			}
+			layers = append(layers, layer)
+		}
+		if rec.Kind != session.KindSubAgent || rec.ParentID == "" {
+			break
+		}
+		id = rec.ParentID
+	}
+	return layers, nil
+}
+
+// agentResourceRun wraps the call of a tool of an add-on whose resources are
+// scoped per agent. The host, not the model, sets the limit: it is read from
+// the stored agent at each call and rides in the context, where only host code
+// sets it. The add-on does not know the agent.
+func (s *Service) agentResourceRun(a workspace.Actor, run func(context.Context, json.RawMessage) (string, error)) func(context.Context, json.RawMessage) (string, error) {
+	return func(ctx context.Context, args json.RawMessage) (string, error) {
+		layers, err := s.agentResourceLayers(ctx, a.Principal, a.ChatID)
+		if err != nil {
+			return "", err
+		}
+		if len(layers) > 0 {
+			ctx = addontools.WithResourceLimits(ctx, addontools.ResourceLimits{Layers: layers})
+		}
+		return run(ctx, args)
+	}
+}
+
+// ResourceSelectable says whether the chat may select the resource of an
+// add-on whose resources are scoped per agent. A chat of an agent selects only
+// a resource on the list of the agent; a chat with no agent, and an add-on
+// that is not scoped, have no such limit. The selection a chat made earlier is
+// checked again at every call, so a list that shrinks later holds too.
+func (s *Service) ResourceSelectable(ctx context.Context, user, chatID, addonID, resourceID string) (bool, error) {
+	if s.d.AddonTools == nil {
+		return true, nil
+	}
+	defs, err := s.d.AddonTools.Tools(ctx, principal(user))
+	if err != nil {
+		return false, err
+	}
+	scoped := false
+	for _, d := range defs {
+		if d.AddonID == addonID && d.ResourceScoped {
+			scoped = true
+			break
+		}
+	}
+	if !scoped {
+		return true, nil
+	}
+	layers, err := s.agentResourceLayers(ctx, principal(user), chatID)
+	if err != nil {
+		return false, err
+	}
+	return addontools.ResourceLimits{Layers: layers}.Allows(addonID, resourceID, false), nil
+}
+
+// AgentResourceChoices is what a person may give a saved agent for one add-on:
+// the resources they may use now and the add-on's word for them.
+type AgentResourceChoices struct {
+	Items     []ResourceChoice
+	Truncated bool
+	Label     *ResourceLabel
+}
+
+// AgentResourceChoices lists the resources of an add-on that scopes its
+// resources per agent which the user may use now, through the listing the
+// manifest declares. It is the choice for Agent.Resources. An add-on that does
+// not scope its resources, or that the user cannot see, is ErrNotScoped.
+func (s *Service) AgentResourceChoices(ctx context.Context, user, addonID string) (AgentResourceChoices, error) {
+	chooser, ok := s.d.AddonTools.(AddonResourceChooser)
+	if !ok {
+		return AgentResourceChoices{}, ErrNotScoped
+	}
+	items, truncated, err := chooser.ResourceChoices(ctx, principal(user), addonID)
+	if err != nil {
+		return AgentResourceChoices{}, err
+	}
+	out := AgentResourceChoices{Items: items, Truncated: truncated}
+	if l, ok := s.d.AddonTools.(AddonLister); ok {
+		if list, err := l.AddonListings(ctx, principal(user)); err == nil {
+			for _, a := range list {
+				if a.AddonID == addonID {
+					out.Label = a.Resources
+				}
+			}
+		}
+	}
+	return out, nil
 }

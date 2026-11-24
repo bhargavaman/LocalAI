@@ -13,6 +13,7 @@ import (
 	"github.com/mudler/LocalAI/core/services/addons"
 	"github.com/mudler/LocalAI/core/services/addons/packages"
 	"github.com/mudler/LocalAI/core/services/storage"
+	"github.com/mudler/LocalAI/core/services/studio/adminskills"
 	"github.com/mudler/LocalAI/core/services/studio/builtinskills"
 	"github.com/mudler/LocalAI/core/services/studio/files"
 	"github.com/mudler/LocalAI/core/services/studio/textindex"
@@ -122,8 +123,14 @@ func (a *Application) initStudioFilesWithS3(newS3 func(context.Context, storage.
 	}
 	// The office skills ship with the server. A copy that fails leaves the
 	// chats as they are: the skills are help, not a need.
-	if err := f.SyncBuiltin(context.Background(), builtinskills.FS()); err != nil {
+	if err := f.SyncBuiltin(context.Background(), adminskills.With(builtinskills.FS())); err != nil {
 		xlog.Warn("Could not write the built-in skills", "error", err)
+	}
+	// A project's old .skills folder loaded for every chat of its owner. The
+	// project layer replaces it, so each skill is copied there once. The
+	// source stays; a failed copy leaves the chats as they are.
+	if _, err := f.MigrateProjectSkills(context.Background()); err != nil {
+		xlog.Warn("Could not copy the .skills folders of projects to their skills folders", "error", err)
 	}
 	a.studioFiles, a.studioFilesIndex = f, closer
 	a.initStudioTextIndex(f, root)
@@ -160,7 +167,13 @@ func (a *Application) initStudioTextIndex(f *files.Service, root string) {
 	if cfg.Distributed.ChatWorker {
 		return
 	}
-	go ix.Run(a.backgroundContext())
+	ctx, cancel := context.WithCancel(a.backgroundContext())
+	done := make(chan struct{})
+	a.studioTextIndexStop = func() { cancel(); <-done }
+	go func() {
+		defer close(done)
+		ix.Run(ctx)
+	}()
 }
 
 // syncAddonSkills lets the add-on owner keep the add-on skill layer in step

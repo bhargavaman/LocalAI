@@ -53,6 +53,11 @@ type ManagementOp[T any, E any] struct {
 	// on workers.
 	BackendAvailability gallery.BackendAvailability
 
+	// ModelLock is the cluster-wide lock of the model, taken around the commit
+	// of an install; set by the gallery service when it dispatches a model op.
+	// Nil takes none.
+	ModelLock gallery.ModelLock
+
 	// Variant pins a model install to one of the gallery entry's declared
 	// variants, by that variant's model name. Empty means auto-select: LocalAI
 	// picks the largest variant this host's backend support and memory can
@@ -62,8 +67,20 @@ type ManagementOp[T any, E any] struct {
 	// than quietly auto-selecting, so a typo cannot masquerade as a choice.
 	Variant string
 
-	// Upgrade is true if this is an upgrade operation (not a fresh install)
+	// Upgrade is true if this is an upgrade operation (not a fresh install).
+	// For a model, GalleryElementName is the installed model name and
+	// ModelUpgrade holds the options; the gallery service hands the op to
+	// its ModelUpgrader.
 	Upgrade bool
+
+	// InRun is true for an operation that an upgrade run started. The run
+	// writes its own rows in the inbox, so OnOpFinished reports the end of
+	// such an operation with OpResult.InRun set.
+	InRun bool
+
+	// ModelUpgrade are the options of a model upgrade. Nil means the
+	// defaults.
+	ModelUpgrade *ModelUpgradeOptions
 
 	// Force reinstalls a backend even when it is already installed and
 	// runnable. Without it a backend install op is idempotent — API clients
@@ -73,10 +90,46 @@ type ManagementOp[T any, E any] struct {
 	Force bool
 }
 
+// ModelUpgradeOptions are the options of a model upgrade operation.
+type ModelUpgradeOptions struct {
+	// ConfigOnly applies the model config and the prompt templates only.
+	ConfigOnly bool `json:"config_only,omitempty"`
+	// Choices are mine or gallery for each edited key the update changes.
+	Choices map[string]string `json:"choices,omitempty"`
+	// Retry runs a failed upgrade again.
+	Retry bool `json:"retry,omitempty"`
+	// InRun marks the upgrade as one of an upgrade run (ManagementOp.InRun).
+	InRun bool `json:"-"`
+}
+
+// MessageCompleted is the Message of the final status of an operation that
+// succeeded. The completion checks (the end-of-operation report, the eviction
+// of finished operations) compare with it, so every writer must use it.
+const MessageCompleted = "completed"
+
 type OpStatus struct {
-	Deletion           bool    `json:"deletion"` // Deletion is true if the operation is a deletion
-	FileName           string  `json:"file_name"`
-	Error              error   `json:"-"` // see MarshalJSON: serialized to "error" as a string
+	Deletion bool `json:"deletion"` // Deletion is true if the operation is a deletion
+	// Upgrade is true if the operation re-installs a backend to move it to a
+	// newer build. Without it an upgrade reads as an install: the UI needs the
+	// difference for its wording and for what Retry has to call.
+	Upgrade  bool   `json:"upgrade,omitempty"`
+	FileName string `json:"file_name"`
+	Error    error  `json:"-"` // see MarshalJSON: serialized to "error" as a string
+	// ErrorKey is the stable code of a failed backend upgrade (the string
+	// of a gallery.UpgradeFailureCode), next to the text of the failure. It
+	// is empty for every other outcome. Readers branch on it, never on the
+	// message.
+	ErrorKey string `json:"error_key,omitempty"`
+	// RolledBack is true for a failed backend upgrade (or forced install)
+	// whose new build did not start and whose previous build was put back:
+	// the backend still runs the version it ran before. On a cluster it is
+	// true when every node that failed rolled back.
+	RolledBack bool `json:"rolled_back,omitempty"`
+	// Unconfirmed is true for a backend upgrade whose outcome is not known:
+	// a worker did not reply (a timeout, or a link that broke after it took
+	// the request). It is neither a failure nor a success; a later check of
+	// the node decides.
+	Unconfirmed        bool    `json:"unconfirmed,omitempty"`
 	Processed          bool    `json:"processed"`
 	Message            string  `json:"message"`
 	Progress           float64 `json:"progress"`
@@ -106,8 +159,12 @@ type OpStatus struct {
 // reconstructs it on read.
 type opStatusWire struct {
 	Deletion           bool           `json:"deletion"`
+	Upgrade            bool           `json:"upgrade,omitempty"`
 	FileName           string         `json:"file_name"`
 	ErrorMessage       string         `json:"error,omitempty"`
+	ErrorKey           string         `json:"error_key,omitempty"`
+	RolledBack         bool           `json:"rolled_back,omitempty"`
+	Unconfirmed        bool           `json:"unconfirmed,omitempty"`
 	Processed          bool           `json:"processed"`
 	Message            string         `json:"message"`
 	Progress           float64        `json:"progress"`
@@ -125,6 +182,7 @@ type opStatusWire struct {
 func (o OpStatus) MarshalJSON() ([]byte, error) {
 	w := opStatusWire{
 		Deletion:           o.Deletion,
+		Upgrade:            o.Upgrade,
 		FileName:           o.FileName,
 		Processed:          o.Processed,
 		Message:            o.Message,
@@ -139,6 +197,9 @@ func (o OpStatus) MarshalJSON() ([]byte, error) {
 		Cancellable:        o.Cancellable,
 		Nodes:              o.Nodes,
 	}
+	w.ErrorKey = o.ErrorKey
+	w.RolledBack = o.RolledBack
+	w.Unconfirmed = o.Unconfirmed
 	if o.Error != nil {
 		w.ErrorMessage = o.Error.Error()
 	}
@@ -151,6 +212,7 @@ func (o *OpStatus) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	o.Deletion = w.Deletion
+	o.Upgrade = w.Upgrade
 	o.FileName = w.FileName
 	o.Processed = w.Processed
 	o.Message = w.Message
@@ -164,6 +226,9 @@ func (o *OpStatus) UnmarshalJSON(data []byte) error {
 	o.Cancelled = w.Cancelled
 	o.Cancellable = w.Cancellable
 	o.Nodes = w.Nodes
+	o.ErrorKey = w.ErrorKey
+	o.RolledBack = w.RolledBack
+	o.Unconfirmed = w.Unconfirmed
 	if w.ErrorMessage != "" {
 		o.Error = errors.New(w.ErrorMessage)
 	} else {
@@ -211,6 +276,9 @@ const (
 	NodeStatusRunningOnWorker = "running_on_worker" // NATS round-trip timed out but worker is still installing
 	NodeStatusSuccess         = "success"           // install completed on this node
 	NodeStatusError           = "error"             // install failed on this node
+	// The two below are used by backend upgrades only.
+	NodeStatusRolledBack  = "rolled_back" // the new build did not start; the previous build is back
+	NodeStatusUnconfirmed = "unconfirmed" // the reply never arrived; the outcome is not known
 )
 
 // NodeProgress is a single node's contribution to a backend install
@@ -230,6 +298,9 @@ type NodeProgress struct {
 	Percentage float64 `json:"percentage"`
 	Phase      string  `json:"phase,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	// ErrorKey is the gallery.UpgradeFailureCode of a failed backend upgrade
+	// on this node (status error or rolled_back).
+	ErrorKey string `json:"error_key,omitempty"`
 }
 
 type OpCache struct {
@@ -539,7 +610,10 @@ func (m *OpCache) recordTerminal(jobID string, src terminalSource) {
 	if status != nil {
 		if status.Deletion {
 			rec.TaskType = "deletion"
+		} else if status.Upgrade {
+			rec.TaskType = TaskUpgrade
 		}
+		rec.ErrorKey, rec.RolledBack, rec.Unconfirmed = status.ErrorKey, status.RolledBack, status.Unconfirmed
 		switch {
 		case status.Error != nil:
 			rec.Outcome = OutcomeFailed
@@ -685,7 +759,7 @@ func (m *OpCache) GetStatus() (map[string]string, map[string]string) {
 		//     and the reconciler confirms the real outcome later — evicting it
 		//     would hide an install that may still fail.
 		if status != nil && status.Processed &&
-			((status.Progress == 100 && status.Message == "completed") || status.Cancelled) {
+			((status.Progress == 100 && status.Message == MessageCompleted) || status.Cancelled) {
 			evict = append(evict, v)
 			continue
 		}
@@ -714,6 +788,9 @@ func (m *OpCache) GetStatus() (map[string]string, map[string]string) {
 // source answered.
 func operationDisplayName(key string) (name, nodeID string) {
 	name = key
+	if id, ok := ParseAddonOpKey(key); ok {
+		return id, ""
+	}
 	if id, backend, ok := ParseNodeScopedKey(key); ok {
 		nodeID = id
 		name = backend

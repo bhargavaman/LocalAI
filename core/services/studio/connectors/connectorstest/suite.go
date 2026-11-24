@@ -30,6 +30,7 @@ func binding(id, owner, name string) connectors.Binding {
 // at the top level of a Describe in the test package of an implementation.
 func Run(newStore NewStore) {
 	ctx := context.Background()
+	runOAuth(newStore)
 	It("round trips a binding and scopes it to its owner", func() {
 		s := newStore()
 		Expect(s.PutBinding(ctx, binding("b1", "u1", "Bot"))).To(Succeed())
@@ -70,6 +71,64 @@ func Run(newStore NewStore) {
 		got, _ = s.GetBinding(ctx, "modes")
 		Expect(got.ReplyMode()).To(Equal(connectors.ReplyProgress))
 		Expect(got.SendsFiles()).To(BeTrue())
+	})
+	It("keeps the media kinds a binding accepts, and none as none", func() {
+		s := newStore()
+		b := binding("media", "u1", "Media")
+		b.InboundMedia = []string{"audio", "photo"}
+		Expect(s.PutBinding(ctx, b)).To(Succeed())
+		got, err := s.GetBinding(ctx, "media")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.InboundMedia).To(Equal([]string{"audio", "photo"}))
+		got.InboundMedia = nil
+		Expect(s.PutBinding(ctx, got)).To(Succeed())
+		got, _ = s.GetBinding(ctx, "media")
+		Expect(got.InboundMedia).To(BeEmpty())
+	})
+	It("keeps the reply language, and reads a binding stored without one as auto", func() {
+		s := newStore()
+		b := binding("lang", "u1", "Language")
+		b.ReplyLanguage = "pt-BR"
+		Expect(s.PutBinding(ctx, b)).To(Succeed())
+		got, err := s.GetBinding(ctx, "lang")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.ReplyLanguage).To(Equal("pt-BR"))
+		Expect(got.ReplyLang()).To(Equal("pt-BR"))
+		list, err := s.ListBindings(ctx, "u1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(list).To(HaveLen(1))
+		Expect(list[0].ReplyLanguage).To(Equal("pt-BR"))
+		got.ReplyLanguage = ""
+		Expect(s.PutBinding(ctx, got)).To(Succeed())
+		again, _ := s.GetBinding(ctx, "lang")
+		Expect(again.ReplyLanguage).To(BeEmpty())
+		Expect(again.ReplyLang()).To(Equal("auto"))
+	})
+	It("keeps the interface language of the owner, and reads a binding stored without one as unknown", func() {
+		s := newStore()
+		b := binding("ui", "u1", "Interface")
+		b.UILanguage = "zh-CN"
+		Expect(s.PutBinding(ctx, b)).To(Succeed())
+		got, err := s.GetBinding(ctx, "ui")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.UILanguage).To(Equal("zh-CN"))
+		other := binding("none", "u1", "Plain")
+		Expect(s.PutBinding(ctx, other)).To(Succeed())
+		plain, _ := s.GetBinding(ctx, "none")
+		Expect(plain.UILanguage).To(BeEmpty())
+	})
+	It("accepts auto and the languages of the catalog, and refuses any other reply language", func() {
+		base := connectors.Binding{Name: "n", Kind: "k", AgentID: "a"}
+		for _, l := range []string{"", "auto", "en", "it", "de", "es", "fr", "pt-BR"} {
+			b := base
+			b.ReplyLanguage = l
+			Expect(connectors.Validate(b)).To(Succeed(), l)
+		}
+		for _, l := range []string{"pt", "IT", "ja", "it-IT", "xx"} {
+			b := base
+			b.ReplyLanguage = l
+			Expect(connectors.Validate(b)).NotTo(Succeed(), l)
+		}
 	})
 	It("keeps the options of the kind", func() {
 		s := newStore()
@@ -140,10 +199,31 @@ func Run(newStore NewStore) {
 		Expect(bare.Paired).To(BeEmpty())
 	})
 
-	It("keeps the approval mode and limits", func() {
+	It("keeps the trust level of the channel entries of the allowlist, and reads none for a binding stored without it", func() {
 		s := newStore()
 		b := binding("b1", "u1", "Bot")
-		b.Approval = connectors.Approval{Mode: connectors.ApprovalAuto, MaxPending: 3, MaxRunsPerDay: 7}
+		b.Allow = []string{"U1", "C1", "C2"}
+		b.AllowTrust = map[string]string{"C1": connectors.TrustAct, "C2": connectors.TrustAnswer}
+		Expect(s.PutBinding(ctx, b)).To(Succeed())
+		got, err := s.GetBinding(ctx, "b1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.Allow).To(Equal(b.Allow), "the list of strings is untouched")
+		Expect(got.AllowTrust).To(Equal(b.AllowTrust))
+		Expect(got.ChatTrust("C1")).To(Equal(connectors.TrustAct))
+		Expect(got.ChatTrust("C2")).To(Equal(connectors.TrustAnswer))
+		Expect(s.PutBinding(ctx, binding("b2", "u1", "Old"))).To(Succeed())
+		old, _ := s.GetBinding(ctx, "b2")
+		Expect(old.AllowTrust).To(BeEmpty())
+		// The caller's map is not shared with the store.
+		b.AllowTrust["C1"] = connectors.TrustAnswer
+		again, _ := s.GetBinding(ctx, "b1")
+		Expect(again.AllowTrust["C1"]).To(Equal(connectors.TrustAct))
+	})
+
+	It("keeps the approval mode, limits and the acts that runs may hold", func() {
+		s := newStore()
+		b := binding("b1", "u1", "Bot")
+		b.Approval = connectors.Approval{Mode: connectors.ApprovalAuto, MaxPending: 3, MaxRunsPerDay: 7, Acts: []string{"act.files", "act.send"}}
 		Expect(s.PutBinding(ctx, b)).To(Succeed())
 		got, err := s.GetBinding(ctx, "b1")
 		Expect(err).NotTo(HaveOccurred())
@@ -151,6 +231,7 @@ func Run(newStore NewStore) {
 		Expect(s.PutBinding(ctx, binding("b2", "u1", "Bare"))).To(Succeed())
 		bare, _ := s.GetBinding(ctx, "b2")
 		Expect(bare.Approval.ModeOrDefault()).To(Equal(connectors.ApprovalAsk))
+		Expect(bare.Approval.Acts).To(BeEmpty())
 	})
 
 	It("uses a pairing code once, before it expires, and only with the right hash", func() {
@@ -254,6 +335,23 @@ func Run(newStore NewStore) {
 		Expect(all).To(HaveLen(connectors.MaxSendersKept))
 		Expect(all[0].ID).To(Equal(fmt.Sprint(connectors.MaxSendersKept + 4)))
 	})
+	It("keeps the chat and the reason of the last message of a sender, when the store can", func() {
+		s := newStore()
+		noter, ok := s.(connectors.SenderNoter)
+		if !ok {
+			Skip("this store keeps no notes of a sender")
+		}
+		_ = s.RecordSender(ctx, "b1", "1", "One", false, t0)
+		Expect(noter.NoteSender(ctx, "b1", "1", connectors.SenderNote{Chat: "C1", ChatName: "ops", Reason: connectors.ReasonNotListed})).To(Succeed())
+		Expect(noter.NoteSender(ctx, "b1", "missing", connectors.SenderNote{Chat: "x"})).To(Succeed(), "a sender that is not logged is not an error")
+		l, _ := s.Senders(ctx, "b1", 0)
+		Expect(l).To(HaveLen(1))
+		Expect([]string{l[0].Chat, l[0].ChatName, l[0].Reason}).To(Equal([]string{"C1", "ops", "not_listed"}))
+		_ = s.RecordSender(ctx, "b1", "1", "One", true, t0.Add(time.Minute))
+		Expect(noter.NoteSender(ctx, "b1", "1", connectors.SenderNote{Chat: "C2"})).To(Succeed())
+		l, _ = s.Senders(ctx, "b1", 0)
+		Expect([]string{l[0].Chat, l[0].ChatName, l[0].Reason}).To(Equal([]string{"C2", "", ""}), "a new message replaces the note")
+	})
 	It("maps a sender to a chat", func() {
 		s := newStore()
 		_, ok, _ := s.ChatOf(ctx, "b1", "1")
@@ -266,6 +364,25 @@ func Run(newStore NewStore) {
 		Expect(id).To(Equal("c3"))
 		id, _, _ = s.ChatOf(ctx, "b1", "2")
 		Expect(id).To(Equal("c2"))
+	})
+	It("drops the mapping of a sender and leaves the others", func() {
+		s := newStore()
+		Expect(s.ClearChat(ctx, "b1", "1")).To(Succeed(), "no mapping is not an error")
+		_ = s.SetChat(ctx, "b1", "1", "c1")
+		_ = s.SetChat(ctx, "b1", "2", "c2")
+		_ = s.SetChat(ctx, "b2", "1", "c3")
+		Expect(s.ClearChat(ctx, "b1", "1")).To(Succeed())
+		_, ok, _ := s.ChatOf(ctx, "b1", "1")
+		Expect(ok).To(BeFalse())
+		id, ok, _ := s.ChatOf(ctx, "b1", "2")
+		Expect(ok).To(BeTrue())
+		Expect(id).To(Equal("c2"))
+		id, ok, _ = s.ChatOf(ctx, "b2", "1")
+		Expect(ok).To(BeTrue())
+		Expect(id).To(Equal("c3"))
+		_ = s.SetChat(ctx, "b1", "1", "c4")
+		id, _, _ = s.ChatOf(ctx, "b1", "1")
+		Expect(id).To(Equal("c4"), "a new chat can be mapped again")
 	})
 	It("sets the capabilities only while a binding has none", func() {
 		s := newStore()
@@ -287,6 +404,40 @@ func Run(newStore NewStore) {
 		Expect(got.Caps).To(Equal([]string{"files.upload", "memory.write"}))
 		got, _ = s.GetBinding(ctx, "has")
 		Expect(got.Caps).To(Equal([]string{"memory.write"}))
+	})
+	It("adds one capability only to a non-empty ceiling that lacks it", func() {
+		s := newStore()
+		Expect(s.PutBinding(ctx, binding("none", "u1", "None"))).To(Succeed())
+		has := binding("has", "u1", "Has")
+		has.Caps = []string{"memory.write"}
+		Expect(s.PutBinding(ctx, has)).To(Succeed())
+		ok, err := s.AddCapIfAbsent(ctx, "has", "loops.wait")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+		ok, _ = s.AddCapIfAbsent(ctx, "has", "loops.wait")
+		Expect(ok).To(BeFalse(), "a second add changes nothing")
+		ok, _ = s.AddCapIfAbsent(ctx, "none", "loops.wait")
+		Expect(ok).To(BeFalse(), "an empty ceiling is the owner's choice")
+		ok, err = s.AddCapIfAbsent(ctx, "missing", "loops.wait")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeFalse())
+		got, _ := s.GetBinding(ctx, "has")
+		Expect(got.Caps).To(Equal([]string{"memory.write", "loops.wait"}))
+		got, _ = s.GetBinding(ctx, "none")
+		Expect(got.Caps).To(BeEmpty())
+	})
+	It("records the upstream account of a binding without touching its other fields", func() {
+		s := newStore()
+		b := binding("acct", "u1", "Acct")
+		Expect(s.PutBinding(ctx, b)).To(Succeed())
+		Expect(s.SetAccountID(ctx, "acct", "T1/U1")).To(Succeed())
+		got, err := s.GetBinding(ctx, "acct")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.AccountID).To(Equal("T1/U1"))
+		Expect(got.Name).To(Equal("Acct"))
+		Expect(s.SetAccountID(ctx, "missing", "x")).To(Succeed(), "a missing binding is not an error")
+		all, _ := s.AllBindings(ctx)
+		Expect(all).To(HaveLen(1))
 	})
 	It("lets one caller claim a migration, once, until a stale claim is taken over", func() {
 		s := newStore()
@@ -377,6 +528,9 @@ func Seed(s connectors.Store) {
 	_ = s.SetOffset(ctx, "seed", 7)
 	_ = s.RecordSender(ctx, "seed", "1", "One", true, t0)
 	_ = s.SetChat(ctx, "seed", "1", "chat1")
+	_, _ = s.PutGrant(ctx, grant("seed"))
+	_ = s.PutOAuthClient(ctx, connectors.OAuthClient{AddonID: "providerA", ClientID: "client-1", DescriptorDigest: "d1"})
+	_ = s.PutLoginState(ctx, connectors.LoginState{Hash: "seed-state", Binding: "seed", Owner: "u1", Expires: t0.Add(time.Hour)}, t0)
 	_, err := s.EnsureKey(ctx, func() ([]byte, error) { return bytes.Repeat([]byte{9}, connectors.KeySize), nil })
 	Expect(err).NotTo(HaveOccurred())
 }
@@ -395,6 +549,17 @@ func CheckSeed(s connectors.Store) {
 	id, ok, _ := s.ChatOf(ctx, "seed", "1")
 	Expect(ok).To(BeTrue())
 	Expect(id).To(Equal("chat1"))
+	g, err := s.GetGrant(ctx, "seed")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(g.Sealed).To(Equal([]byte("sealed-grant-seed")))
+	Expect(g.Version).To(BeEquivalentTo(1))
+	c, err := s.GetOAuthClient(ctx, "providerA")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(c.ClientID).To(Equal("client-1"))
+	st, ok, err := s.ConsumeLoginState(ctx, "seed-state", t0)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(ok).To(BeTrue())
+	Expect(st.Binding).To(Equal("seed"))
 	k, err := s.EnsureKey(ctx, func() ([]byte, error) { return bytes.Repeat([]byte{1}, connectors.KeySize), nil })
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k).To(Equal(bytes.Repeat([]byte{9}, connectors.KeySize)))

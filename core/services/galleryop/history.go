@@ -18,17 +18,24 @@ const DefaultHistorySize = 50
 // OpRecord is a finished operation. Field names match the JSON the Activity
 // page consumes, so the handler can return the slice unwrapped.
 type OpRecord struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	JobID      string    `json:"jobID"`
-	IsBackend  bool      `json:"isBackend"`
-	NodeID     string    `json:"nodeID,omitempty"`
-	TaskType   string    `json:"taskType"`
-	Outcome    string    `json:"outcome"`
-	Error      string    `json:"error,omitempty"`
-	StartedAt  time.Time `json:"startedAt"`
-	FinishedAt time.Time `json:"finishedAt"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	JobID       string    `json:"jobID"`
+	IsBackend   bool      `json:"isBackend"`
+	NodeID      string    `json:"nodeID,omitempty"`
+	TaskType    string    `json:"taskType"`
+	Outcome     string    `json:"outcome"`
+	Error       string    `json:"error,omitempty"`
+	ErrorKey    string    `json:"errorKey,omitempty"`
+	RolledBack  bool      `json:"rolledBack,omitempty"`  // a failed backend upgrade put the previous build back
+	Unconfirmed bool      `json:"unconfirmed,omitempty"` // the outcome of a backend upgrade is not known
+	StartedAt   time.Time `json:"startedAt"`
+	FinishedAt  time.Time `json:"finishedAt"`
 }
+
+// TaskUpgrade is the task type of a backend upgrade, in a record and in the
+// /api/operations payload. The others are "installation" and "deletion".
+const TaskUpgrade = "upgrade"
 
 // Outcome values.
 const (
@@ -46,6 +53,7 @@ const (
 // once, not silently default to "install" in whichever one was missed.
 func IsDeleteOpType(opType string) bool  { return strings.HasSuffix(opType, "_delete") }
 func IsBackendOpType(opType string) bool { return strings.HasPrefix(opType, "backend_") }
+func IsUpgradeOpType(opType string) bool { return strings.HasSuffix(opType, "_upgrade") }
 
 // recordFromStore maps a persisted gallery operation onto the record shape the
 // Activity page consumes, so the store-backed and ring-backed reads of the same
@@ -68,16 +76,21 @@ func recordFromStore(op distributed.GalleryOperationRecord) OpRecord {
 		// that need the name fallback above would report a backend operation as
 		// a model one. op_type is written by a different path and answers the
 		// same question, so either signal is enough.
-		IsBackend:  op.IsBackendOp || IsBackendOpType(op.OpType),
-		JobID:      op.ID,
-		NodeID:     nodeID,
-		TaskType:   "installation",
-		Error:      op.Error,
-		StartedAt:  op.CreatedAt,
-		FinishedAt: op.UpdatedAt,
+		IsBackend:   op.IsBackendOp || IsBackendOpType(op.OpType),
+		JobID:       op.ID,
+		NodeID:      nodeID,
+		TaskType:    "installation",
+		Error:       op.Error,
+		ErrorKey:    op.ErrorKey,
+		RolledBack:  op.RolledBack,
+		Unconfirmed: op.Unconfirmed,
+		StartedAt:   op.CreatedAt,
+		FinishedAt:  op.UpdatedAt,
 	}
 	if IsDeleteOpType(op.OpType) {
 		rec.TaskType = "deletion"
+	} else if IsUpgradeOpType(op.OpType) {
+		rec.TaskType = TaskUpgrade
 	}
 
 	// ListTerminal only returns these three statuses, and they are the same

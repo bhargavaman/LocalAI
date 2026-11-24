@@ -26,12 +26,12 @@ const PAGES = [
   ['/app/operate', 'Operate overview'],
   ['/app/backends', 'Backends'],
   ['/app/activity', 'Activity'],
+  ['/app/updates', 'Updates'],
   ['/app/settings', 'Settings'],
   ['/app/nodes', 'Nodes'],
   ['/app/scheduling', 'Placement rules'],
   ['/app/failover', 'Failover'],
   ['/app/nodes/add', 'Add a node'],
-  ['/app/p2p', 'P2P'],
 ]
 
 test.describe('Page render smoke', () => {
@@ -41,7 +41,7 @@ test.describe('Page render smoke', () => {
       // .page-title for the normal header; .empty-state-title for pages that
       // render a gated/empty state; .ac-title for Account, which shows its
       // settings tabs with or without accounts.
-      await expect(page.locator('.page-title, .view-bar__title, .empty-state-title, .dk-empty-title, .op-status__title, .op-runtime h1, .sw-page h1, .tf-title, .st-title, .ac-title').first()).toBeVisible({ timeout: 15_000 })
+      await expect(page.locator('.page-title, .view-bar__title, .empty-state-title, .dk-empty-title, .ui-empty__title, .op-status__title, .op-runtime h1, .sw-page h1, .tf-title, .st-title, .ac-title').first()).toBeVisible({ timeout: 15_000 })
       await expect(page).toHaveURL(new RegExp(path.replace(/\//g, '\\/') + '$'))
     })
   }
@@ -72,14 +72,24 @@ test.describe('Add-on page render smoke', () => {
 // on the home and finishes loading.
 test.describe('Folder picker render smoke', () => {
   test('renders the folder picker of the agent editor', async ({ page }) => {
-    await page.goto('/app/agents/new')
-    await page.locator('[data-section="Files"] .ag-fold__button').click()
-    await page.getByTestId('agent-folder-scope-one').click()
-    await page.getByTestId('agent-folder-choose').click()
-    const picker = page.getByTestId('folder-picker')
-    await expect(picker).toBeVisible({ timeout: 15_000 })
-    await expect(picker.locator('.ws-move__list')).toHaveAttribute('aria-busy', 'false')
-    await page.getByTestId('agent-folder-dialog').getByRole('button', { name: 'Cancel' }).first().click()
-    await expect(picker).toHaveCount(0)
+    // The editor says "agent not found" for an id the server does not have, so
+    // the spec saves an agent first and removes it at the end.
+    const created = await page.request.post('/api/chats/agents', {
+      data: { name: `folder-smoke-${Date.now().toString(36)}`, instructions: 'Be brief.' },
+    })
+    expect(created.ok()).toBe(true)
+    const { id } = await created.json()
+    try {
+      await page.goto(`/app/agents/${id}/edit`)
+      await page.getByTestId('agent-folder-scope-one').click()
+      await page.getByTestId('agent-folder-choose').click()
+      const picker = page.getByTestId('folder-picker')
+      await expect(picker).toBeVisible({ timeout: 15_000 })
+      await expect(picker.locator('.ws-move__list')).toHaveAttribute('aria-busy', 'false')
+      await page.getByTestId('agent-folder-dialog').getByRole('button', { name: 'Cancel' }).first().click()
+      await expect(picker).toHaveCount(0)
+    } finally {
+      await page.request.delete(`/api/chats/agents/${id}`)
+    }
   })
 })

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"github.com/mudler/LocalAI/core/services/collections"
 	"github.com/mudler/LocalAI/core/services/messaging"
+	"github.com/mudler/LocalAI/core/services/remotes"
+	"github.com/mudler/LocalAI/pkg/modelsearch"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -19,7 +21,9 @@ import (
 
 	corebackend "github.com/mudler/LocalAI/core/backend"
 	"github.com/mudler/LocalAI/core/config"
+	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/http/auth"
+	addonendpoints "github.com/mudler/LocalAI/core/http/endpoints/addons"
 	mcpTools "github.com/mudler/LocalAI/core/http/endpoints/mcp"
 	"github.com/mudler/LocalAI/core/library"
 	"github.com/mudler/LocalAI/core/services/addons"
@@ -37,13 +41,18 @@ import (
 	"github.com/mudler/LocalAI/core/services/addons/uploads"
 	"github.com/mudler/LocalAI/core/services/addons/usersettings"
 	"github.com/mudler/LocalAI/core/services/advisorylock"
+	"github.com/mudler/LocalAI/core/services/backendupdates"
 	"github.com/mudler/LocalAI/core/services/cloudproxy/mitm"
 	"github.com/mudler/LocalAI/core/services/facerecognition"
 	"github.com/mudler/LocalAI/core/services/failover"
 	"github.com/mudler/LocalAI/core/services/failover/distsync"
 	"github.com/mudler/LocalAI/core/services/galleryop"
+	localaitools "github.com/mudler/LocalAI/core/services/localaitools"
+	localaiInproc "github.com/mudler/LocalAI/core/services/localaitools/inproc"
+	"github.com/mudler/LocalAI/core/services/modelupdates"
 	"github.com/mudler/LocalAI/core/services/monitoring"
 	"github.com/mudler/LocalAI/core/services/nodes"
+	"github.com/mudler/LocalAI/core/services/notify"
 	"github.com/mudler/LocalAI/core/services/routing/admission"
 	"github.com/mudler/LocalAI/core/services/routing/billing"
 	"github.com/mudler/LocalAI/core/services/routing/corpus"
@@ -60,20 +69,20 @@ import (
 	"github.com/mudler/LocalAI/core/services/studio/jobs"
 	"github.com/mudler/LocalAI/core/services/studio/loops"
 	"github.com/mudler/LocalAI/core/services/studio/mcpconns"
-	"github.com/mudler/LocalAI/core/services/studio/notify"
+	"github.com/mudler/LocalAI/core/services/studio/projects"
 	"github.com/mudler/LocalAI/core/services/studio/provider"
 	"github.com/mudler/LocalAI/core/services/studio/sharedfolders"
 	"github.com/mudler/LocalAI/core/services/studio/store"
 	"github.com/mudler/LocalAI/core/services/studio/textindex"
 	"github.com/mudler/LocalAI/core/services/studio/triggers"
+	"github.com/mudler/LocalAI/core/services/upgraderun"
 	"github.com/mudler/LocalAI/core/services/voiceprofile"
 	"github.com/mudler/LocalAI/core/services/voicerecognition"
 	"github.com/mudler/LocalAI/core/templates"
 	"github.com/mudler/LocalAI/core/trace"
+	"github.com/mudler/LocalAI/core/trace/tracepersist"
 	"github.com/mudler/LocalAI/pkg/addons/contract"
 	pkggrpc "github.com/mudler/LocalAI/pkg/grpc"
-	localaitools "github.com/mudler/LocalAI/pkg/mcp/localaitools"
-	localaiInproc "github.com/mudler/LocalAI/pkg/mcp/localaitools/inproc"
 	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/signals"
 	"github.com/mudler/xlog"
@@ -95,6 +104,15 @@ const faceEmbeddingDim = 0
 const voiceEmbeddingDim = 0
 
 type Application struct {
+	// shareKinds are the services whose resource kinds are shared through
+	// the policy; shareKindsPolicy is the policy they were registered with
+	// once the owner opened it. See RegisterShareKinds.
+	shareKindsMu     sync.Mutex
+	shareKinds       []policy.KindProvider
+	shareKindsPolicy *policy.Policy
+	// hostKindsOnce registers the host's own kinds (connection, collection).
+	hostKindsOnce sync.Once
+
 	addonPolicy         *policy.Policy
 	addonStore          *policy.Store
 	addonResourceExists func(context.Context, policy.ResourceKey) (bool, error)
@@ -129,6 +147,10 @@ type Application struct {
 	addonsProbe        addonsProbeState
 	modelsProbe        modelsProbeState
 
+	// addonHostDataDir gives the data directory of an add-on that is not
+	// under addonDataRoot (an add-on in WSL 2); nil or "" means the default.
+	addonHostDataDir func(id string) string
+
 	// libraryStore is the library sources file when no add-on owner runs here.
 	libraryStore   *catalog.Sources
 	libraryStoreMu sync.Mutex
@@ -136,6 +158,8 @@ type Application struct {
 	// The per-person add-on settings are built once: the routes and the chats
 	// read the same store.
 	addonUserSettingsOnce sync.Once
+	modelSearchOnce       sync.Once
+	modelSearchHost       *modelsearch.Host
 	addonUserSettings     usersettings.Store
 	addonUserSettingsErr  error
 
@@ -155,12 +179,12 @@ type Application struct {
 	faceRegistry         facerecognition.Registry
 	voiceRegistry        voicerecognition.Registry
 	voiceProfileStore    *voiceprofile.Store
-	studioStore          store.Store      // the studio loop's chats; see initStudioStore
-	studioStoreKind      string           // "gorm", "json" or "memory"
-	studioAgents         agents.Store     // saved agents; same kind as the chats store
-	studioNotify         notify.Store     // notifications; same kind as the chats store
-	studioPush           notify.PushStore // nil in memory-only mode: push needs somewhere to keep subscriptions
-	studioInbox          *notify.Service
+	studioStore          store.Store  // the studio loop's chats; see initStudioStore
+	studioStoreKind      string       // "gorm", "json" or "memory"
+	studioAgents         agents.Store // saved agents; same kind as the chats store
+	// notifier is the notification center. It starts with the application
+	// and does not depend on the chats; see initNotifications.
+	notifier *notify.Service
 	// studioWeb serves the built-in web tools of the chats.
 	studioWeb *studioWeb
 	// studioSelf lists the addresses of this server that a model's request
@@ -171,6 +195,8 @@ type Application struct {
 	// The list settings of the Sandbox network, each with its last valid
 	// value; see studioEgressSettings.
 	studioEgressListsOnce sync.Once
+	studioAuditOnce       sync.Once
+	studioAudit           hostexec.AuditStore // the audit of the commands, see studioHostExecAudit
 	studioEgressPorts     *lastGood[[]int]
 	studioEgressExtra     *lastGood[[]string]
 	studioEgressAllowed   *lastGood[[]egress.AllowedHost]
@@ -187,12 +213,15 @@ type Application struct {
 	studioLoopsStop       context.CancelFunc
 	studioConnStore       connectors.Store
 	studioMCPStore        mcpconns.Store
+	studioProjectStore    projects.Store
 	studioMCPConns        *mcpconns.Service
 	studioConnectors      *studio.Connectors
 	studioConnectorsHook  atomic.Pointer[studio.Connectors] // the same manager, for the inbox hook that runs on other goroutines
-	studioPusher          *notify.Pusher
-	studioLocks           []*advisorylock.HeldLock // leader locks of the chat hosts, closed by Shutdown
+	notifyPusher          *notify.Pusher                    // browser push of the notifier; nil when there is nowhere to keep subscriptions
+	studioLocks           []*advisorylock.HeldLock          // leader locks of the chat hosts, closed by Shutdown
 	studioConnectorsStop  context.CancelFunc
+	bindingCapsStop       context.CancelFunc // stops the one-time permissions migration of the connector bindings
+	bindingCapsDone       chan struct{}      // closed when that migration returned
 	studioProvider        *provider.Provider
 	studioService         *studio.Service
 	studioWorkerSub       messaging.Subscription // the chat start subscription of a chat worker; nil otherwise
@@ -203,6 +232,7 @@ type Application struct {
 	studioFilesIndex      io.Closer          // closes the workspace index: ends pending blob removals, frees the JSON folder
 	studioFilesTemp       string             // blob cache folder of a cluster with no data path; removed at shutdown
 	studioTextIndex       *textindex.Indexer // the text of the documents in the files; nil when files are off
+	studioTextIndexStop   func()             // stops the indexer's loop and waits for it; nil when it does not run
 	authDB                *gorm.DB
 	metricsService        *monitoring.LocalAIMetricsService
 	statsRecorder         *billing.Recorder
@@ -222,11 +252,17 @@ type Application struct {
 	routerCorpus      *corpus.Manager
 	admissionLimiter  *admission.Limiter
 	failoverManager   *failover.Manager
+	remotes           remotes.Service
+	federation        remotes.Federation
 	watchdogMutex     sync.Mutex
 	watchdogStop      chan bool
-	p2pMutex          sync.Mutex
-	p2pCtx            context.Context
-	p2pCancel         context.CancelFunc
+
+	// p2pNet is the P2P layer (p2pnet); see p2pnet.go.
+	p2pNetOnce sync.Once
+	p2pNet     *p2pNet
+
+	// remotesStop cancels the startup refresh of the remotes and waits for it.
+	remotesStop func()
 
 	// Distributed mode services (nil when not in distributed mode)
 	distributed *DistributedServices
@@ -240,16 +276,39 @@ type Application struct {
 
 	// Upgrade checker (background service for detecting backend upgrades)
 	upgradeChecker *UpgradeChecker
+	// modelUpdates is the update check of gallery models; nil without model
+	// galleries.
+	modelUpdates *modelupdates.Service
+	// modelUpgrader runs model upgrades; nil without model galleries.
+	modelUpgrader *modelupdates.Upgrader
 
-	// LocalAI Assistant in-process MCP server. nil when DisableLocalAIAssistant
-	// is set; otherwise initialised in start() after galleryService.
+	// upgradeRuns owns the server-owned upgrade runs; nil when they could not
+	// start. upgradeRunsStop stops its sweep and runners and closes a
+	// database opened for it. See upgrade_runs.go.
+	upgradeRuns      *upgraderun.Service
+	upgradeRunsStop  func()
+	addonRunUpgrader *addonendpoints.QueuedUpgrader
+	// upgradeRunTweak changes the options of the service before it starts;
+	// tests set it to hand in fake checks and job paths.
+	upgradeRunTweak func(*upgraderun.Options)
+
+	// autoRuns starts the upgrade runs of the automatic update passes; made
+	// on first use (autoRunner).
+	autoRuns       *autoRunner
+	autoRunnerOnce sync.Once
+	// opCache is the cache of /api/operations the HTTP layer built; see
+	// SetOperationCache.
+	opCache atomic.Pointer[galleryop.OpCache]
+
+	// LocalAI Assistant in-process MCP server. nil until initialised in start() after galleryService, and
+	// when that initialisation fails.
 	localAIAssistant *mcpTools.LocalAIAssistantHolder
 
 	// assistantClient is the concrete inproc client backing localAIAssistant.
 	// start() constructs it before failoverManager exists (see New() in
 	// startup.go), so New() sets assistantClient.Failover once the manager
 	// is built, using this field to reach back into the already-registered
-	// MCP tool set. nil when DisableLocalAIAssistant is set.
+	// MCP tool set. nil until start() builds it.
 	assistantClient *localaiInproc.Client
 
 	// startupComplete flips to true once New() has finished its whole startup
@@ -268,6 +327,9 @@ type Application struct {
 	// seconds /api/collections answers 503; /readyz waits for them.
 	collectionsPending atomic.Bool
 
+	// draining is set when shutdown starts; see BeginDrain.
+	draining atomic.Bool
+
 	shutdownOnce sync.Once
 }
 
@@ -281,8 +343,29 @@ func (a *Application) WebSocketTickets() *auth.WebSocketTickets {
 // traffic. It backs the /readyz probe and is safe to call from any goroutine,
 // including while startup is still running.
 func (a *Application) Ready() bool {
-	return a.startupComplete.Load() && !a.collectionsPending.Load()
+	return a.startupComplete.Load() && !a.collectionsPending.Load() && !a.draining.Load()
 }
+
+// Unavailable returns why this process must not take traffic although it has
+// started, or "" when it may. In distributed mode a frontend or a chat worker
+// that has a NATS server configured and does not reach it is unavailable: it
+// keeps listening and publishing on PostgreSQL, but it does not hear the
+// broadcasts that the others publish on NATS, so /readyz drains it until NATS
+// is back.
+func (a *Application) Unavailable() string {
+	if err := a.Distributed().Unready(); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// BeginDrain makes Ready report false for good. The process calls it when
+// shutdown starts, so /readyz tells a load balancer to stop sending new
+// requests while in-flight ones finish.
+func (a *Application) BeginDrain() { a.draining.Store(true) }
+
+// Draining reports whether shutdown has started.
+func (a *Application) Draining() bool { return a.draining.Load() }
 
 // AwaitCollections makes Ready wait until StartCollections has returned,
 // whether it started the service or failed. The process calls it before the
@@ -389,6 +472,12 @@ func (a *Application) GalleryService() *galleryop.GalleryService {
 	return a.galleryService
 }
 
+// ModelUpdates returns the update check of gallery models, or nil when no
+// model gallery is configured.
+func (a *Application) ModelUpdates() *modelupdates.Service {
+	return a.modelUpdates
+}
+
 func (a *Application) UpgradeChecker() *UpgradeChecker {
 	return a.upgradeChecker
 }
@@ -459,10 +548,18 @@ func (a *Application) StatsRecorder() *billing.Recorder {
 	return a.statsRecorder
 }
 
-// FallbackUser is the synthetic "local" user that UsageMiddleware uses
-// to attribute requests when no authenticated user is on the context
-// (i.e., --auth is off). nil when auth is on, since real users are
-// always available there.
+// AuthActive says whether the server authenticates its users: an auth
+// database or API keys. When it is false, every request is the one local user.
+func (a *Application) AuthActive() bool {
+	return a.authDB != nil || len(a.applicationConfig.ApiKeys) > 0
+}
+
+// FallbackUser is the synthetic "local" user (role admin) that
+// UsageMiddleware uses to attribute requests when no authenticated user is on
+// the context. It is set whenever stats are on, also when authentication is on
+// (internal callers such as cron flushers have no user), and nil with
+// --disable-stats. It is an attribution identity only: code that acts for a
+// person must not use it when authentication is on (see AuthActive).
 func (a *Application) FallbackUser() *auth.User {
 	return a.fallbackUser
 }
@@ -681,6 +778,10 @@ func (a *Application) IsDistributed() bool {
 func (a *Application) Shutdown() error {
 	var err error
 	a.shutdownOnce.Do(func() {
+		if a.remotesStop != nil {
+			a.remotesStop()
+		}
+		a.StopP2PNet()
 		// A chat worker stops taking starts first: a start that arrived now
 		// would meet a closing service. Its running turns end as interrupted.
 		a.stopChatWorker()
@@ -689,6 +790,13 @@ func (a *Application) Shutdown() error {
 		}
 		if a.studioConnectorsStop != nil {
 			a.studioConnectorsStop()
+		}
+		// The migration writes the connector store under DataPath: it ends
+		// before Shutdown returns, so whoever removes the directory next does
+		// not race its last write.
+		if a.bindingCapsStop != nil {
+			a.bindingCapsStop()
+			<-a.bindingCapsDone
 		}
 		if a.studioConnectors != nil {
 			a.studioConnectors.Close()
@@ -711,8 +819,8 @@ func (a *Application) Shutdown() error {
 		if a.studioLoops != nil {
 			a.studioLoops.Close()
 		}
-		if a.studioPusher != nil {
-			a.studioPusher.Close()
+		if a.notifyPusher != nil {
+			a.notifyPusher.Close()
 		}
 		a.closeStudioLocks() // after both hosts: a running host would take a released lock back
 		if a.studioHostExec != nil {
@@ -726,6 +834,13 @@ func (a *Application) Shutdown() error {
 		}
 		if a.studioTempDir != "" {
 			_ = os.RemoveAll(a.studioTempDir)
+		}
+		// Before the folders go: a pass in flight would write into them.
+		if a.studioTextIndexStop != nil {
+			a.studioTextIndexStop()
+		}
+		if c, ok := a.studioStore.(io.Closer); ok {
+			_ = c.Close() // ends the background indexing of earlier chats
 		}
 		if a.studioFilesIndex != nil {
 			_ = a.studioFilesIndex.Close()
@@ -749,6 +864,7 @@ func (a *Application) Shutdown() error {
 		// Before distributed shutdown: the sync's subscriptions live on the
 		// NATS connection that closes there.
 		a.stopFailoverDistributed()
+		a.stopUpgradeRuns()
 		a.distributed.Shutdown()
 		if a.modelLoader != nil {
 			err = errors.Join(err, a.modelLoader.StopAllGRPC())
@@ -757,6 +873,15 @@ func (a *Application) Shutdown() error {
 			if closeErr := a.voiceProfileStore.Close(); err == nil {
 				err = closeErr
 			}
+		}
+		// Last, so traces of work that ended during shutdown still persist.
+		// The trace consumers are process-wide and write after the request
+		// returns; without this a write lands in DataPath after Shutdown and
+		// races whoever removes the directory next. Release before closing,
+		// so no store is reopened under DataPath in between.
+		if a.applicationConfig != nil && a.applicationConfig.DataPath != "" {
+			trace.ReleaseBackendTracePersistence(a.applicationConfig.DataPath)
+			tracepersist.CloseUnder(a.applicationConfig.DataPath)
 		}
 	})
 	return err
@@ -818,71 +943,113 @@ func (a *Application) start() (startErr error) {
 
 	// LocalAI Assistant: in-process MCP server exposing admin tools. Initialised
 	// once at startup and reused across chat sessions that opt in via metadata.
-	if !a.applicationConfig.DisableLocalAIAssistant {
-		holder := mcpTools.NewLocalAIAssistantHolder()
-		var nodeRegistry *nodes.NodeRegistry
-		if a.distributed != nil {
-			nodeRegistry = a.distributed.Registry
+	holder := mcpTools.NewLocalAIAssistantHolder()
+	var nodeRegistry *nodes.NodeRegistry
+	if a.distributed != nil {
+		nodeRegistry = a.distributed.Registry
+	}
+	assistantClient := localaiInproc.New(
+		a.applicationConfig,
+		a.applicationConfig.SystemState,
+		a.backendLoader,
+		a.modelLoader,
+		a.galleryService,
+		nodeRegistry,
+	)
+	// Wire usage tracking so the assistant's get_usage_stats tool
+	// returns real data; nil values keep the tool returning a clear
+	// "unavailable" error if startup ran with --disable-stats.
+	assistantClient.StatsRecorder = a.statsRecorder
+	assistantClient.FallbackUser = a.fallbackUser
+	// Only a server without authentication has a single local user. With
+	// authentication on, a client tool call without a user fails.
+	assistantClient.SingleUser = !a.AuthActive()
+	// The chats start after the assistant, so the shared folder tools
+	// look the service up at each call.
+	assistantClient.ModelSearch = a.ModelSearch
+	assistantClient.SharedFolders = func() *sharedfolders.Service {
+		if svc := a.StudioService(); svc != nil {
+			return svc.SharedFolders()
 		}
-		assistantClient := localaiInproc.New(
-			a.applicationConfig,
-			a.applicationConfig.SystemState,
-			a.backendLoader,
-			a.modelLoader,
-			a.galleryService,
-			nodeRegistry,
-		)
-		// Wire usage tracking so the assistant's get_usage_stats tool
-		// returns real data; nil values keep the tool returning a clear
-		// "unavailable" error if startup ran with --disable-stats.
-		assistantClient.StatsRecorder = a.statsRecorder
-		assistantClient.FallbackUser = a.fallbackUser
-		assistantClient.VoiceProfiles = a.voiceProfileStore
-		// The chats start after the assistant, so the shared folder tools
-		// look the service up at each call.
-		assistantClient.SharedFolders = func() *sharedfolders.Service {
-			if svc := a.StudioService(); svc != nil {
-				return svc.SharedFolders()
-			}
+		return nil
+	}
+	assistantClient.Chats = a.StudioService
+	// The client tools reach the API in memory, as the acting user, with
+	// the transport the chats use. The provider is built before the
+	// assistant but is read at each call.
+	assistantClient.Transport = func() *provider.Transport {
+		if a.studioProvider == nil {
 			return nil
 		}
-		assistantClient.Chats = a.StudioService
-		if a.backendLibrary != nil {
-			assistantClient.BackendLibrary = libraryInstallNoProgress{a.backendLibrary}
+		return a.studioProvider.Transport()
+	}
+	assistantClient.VisionModel = func(context.Context) (string, bool) {
+		return a.studioVisionModel("")
+	}
+	if a.backendLibrary != nil {
+		assistantClient.BackendLibrary = libraryInstallNoProgress{a.backendLibrary}
+	}
+	assistantClient.UpdatesChecker = func() localaiInproc.BackendUpdatesSource {
+		if a.upgradeChecker == nil {
+			return nil
 		}
-		if a.distributed != nil && a.distributed.Unloader != nil {
-			assistantClient.LoadStopper = a.distributed.Unloader
+		return a.upgradeChecker
+	}
+	assistantClient.ModelUpdatesService = a.ModelUpdates
+	assistantClient.ModelUpgrader = a.ModelUpgrader
+	assistantClient.UpgradeRunService = a.UpgradeRuns
+	// The same early refusal as the backend upgrade routes.
+	assistantClient.BackendUpgradeGuard = func() *backendupdates.UpgradeGuard {
+		if a.galleryService == nil {
+			return nil
 		}
-		// PII filter — same nil-or-real wiring.
-		assistantClient.PIIRedactor = a.piiRedactor
-		assistantClient.PIIEvents = a.piiEvents
-		assistantClient.RouterDecisions = a.routerDecisions
-		// Router corpus tools — same factories the RouteModel middleware
-		// uses, so the assistant and the request path agree on store
-		// namespaces and model resolution.
-		assistantClient.RouterCorpus = a.RouterCorpus()
-		assistantClient.RouterEmbedder = a.Embedder
-		assistantClient.RouterEmbedderFingerprint = a.EmbedderFingerprint
-		assistantClient.RouterVectorStore = a.VectorStore
-		// Failover chains: failoverManager does not exist yet at this point
-		// in startup (New() in startup.go builds it after start() returns),
-		// so it can't be wired here like the fields above. New() sets
-		// assistantClient.Failover directly once the manager is built;
-		// stash the client so it can reach back into it.
-		a.assistantClient = assistantClient
-		if err := holder.Initialize(a.applicationConfig.Context, assistantClient, localaitools.Options{}); err != nil {
-			// Why log+continue instead of fail: the assistant is an optional
-			// feature; a failure here must not take down the whole server.
-			xlog.Warn("LocalAI Assistant initialisation failed; feature unavailable", "error", err)
-		} else {
-			a.localAIAssistant = holder
-			// Tear the in-memory transport pair down on SIGINT/SIGTERM so the
-			// goroutine ends cleanly. Mirrors how core/http/endpoints/mcp/tools.go
-			// closes its per-model MCP sessions on graceful termination.
-			signals.RegisterGracefulTerminationHandler(func() {
-				_ = holder.Close()
-			})
+		var src backendupdates.UpgradeInfoSource
+		if a.upgradeChecker != nil {
+			src = a.upgradeChecker
 		}
+		return backendupdates.NewUpgradeGuard(func() (gallery.SystemBackends, error) {
+			manager := a.galleryService.BackendManager()
+			if manager == nil {
+				return nil, backendupdates.ErrNoBackendManager
+			}
+			return manager.ListBackends()
+		}, src)
+	}
+	if a.distributed != nil && a.distributed.Unloader != nil {
+		assistantClient.LoadStopper = a.distributed.Unloader
+	}
+	if a.distributed != nil && a.distributed.Settings != nil {
+		assistantClient.CarrierWeights = a.distributed.Settings
+	}
+	// PII filter — same nil-or-real wiring.
+	assistantClient.PIIRedactor = a.piiRedactor
+	assistantClient.PIIEvents = a.piiEvents
+	assistantClient.RouterDecisions = a.routerDecisions
+	// Router corpus tools — same factories the RouteModel middleware
+	// uses, so the assistant and the request path agree on store
+	// namespaces and model resolution.
+	assistantClient.RouterCorpus = a.RouterCorpus()
+	assistantClient.RouterEmbedder = a.Embedder
+	assistantClient.RouterEmbedderFingerprint = a.EmbedderFingerprint
+	assistantClient.RouterVectorStore = a.VectorStore
+	// Failover chains: failoverManager does not exist yet at this point
+	// in startup (New() in startup.go builds it after start() returns),
+	// so it can't be wired here like the fields above. New() sets
+	// assistantClient.Failover directly once the manager is built;
+	// stash the client so it can reach back into it.
+	a.assistantClient = assistantClient
+	if err := holder.Initialize(a.applicationConfig.Context, assistantClient, localaitools.Options{}); err != nil {
+		// Why log+continue instead of fail: the assistant is an optional
+		// feature; a failure here must not take down the whole server.
+		xlog.Warn("LocalAI Assistant initialisation failed; feature unavailable", "error", err)
+	} else {
+		a.localAIAssistant = holder
+		// Tear the in-memory transport pair down on SIGINT/SIGTERM so the
+		// goroutine ends cleanly. Mirrors how core/http/endpoints/mcp/tools.go
+		// closes its per-model MCP sessions on graceful termination.
+		signals.RegisterGracefulTerminationHandler(func() {
+			_ = holder.Close()
+		})
 	}
 
 	return nil
@@ -905,8 +1072,8 @@ func (a *Application) StartCollections() {
 		if d.Registry != nil {
 			a.waitForHealthyWorker()
 		}
-		if d.Nats != nil {
-			bus = d.Nats
+		if d.Broadcaster != nil {
+			bus = d.Broadcaster
 		}
 	}
 	svc, err := collections.New(a.applicationConfig, bus, a.collectionsOptions()...)
@@ -998,7 +1165,7 @@ func (a *Application) startAddons() error {
 		}
 		host := c.Host
 		if host == (contract.HostCompatibility{}) {
-			host = contract.HostCompatibility{Host: 1, API: contract.HostAPIVersion, Protocol: 1, SDK: contract.HostSDKVersion, DataFormat: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+			host = contract.HostCompatibility{Host: contract.HostVersion, API: contract.HostAPIVersion, Protocol: contract.HostProtocolVersion, SDK: contract.HostSDKVersion, DataFormat: contract.HostDataFormatVersion, FeatureLevel: contract.HostFeatureLevel, OS: runtime.GOOS, Arch: runtime.GOARCH}
 		}
 		cat = catalog.Catalog{Sources: sources, TargetOS: host.OS, TargetArch: host.Arch}
 		installer = &packages.Installer{Root: filepath.Join(c.Root, "packages"), Catalog: cat, Host: host}
@@ -1052,6 +1219,7 @@ func (a *Application) startAddons() error {
 		// The update check reads the libraries and the journal the owner
 		// holds; it applies nothing, and its cache is bounded.
 		m.EnableUpdates(updates.Config{TTL: c.UpdateCacheTTL, MinRefresh: c.UpdateRefreshInterval})
+		startUpdateRefresh(a.applicationConfig.Context, m.RefreshUpdates, addonUpdateRefreshEvery)
 		// The staging area of zip files waits empty at start: a file that was
 		// uploaded before a restart has to be uploaded again.
 		files := &uploads.Store{Root: filepath.Join(c.Root, "uploads")}
@@ -1069,10 +1237,11 @@ func (a *Application) startAddons() error {
 		a.writeModelsProbe()
 		a.addonHostOps = a.newAddonHostOps(m, limits)
 		a.addonDataRoot = filepath.Join(c.Root, "data")
-		supervisor, err := addonruntime.NewSupervisor(addonruntime.Config{StateRoot: filepath.Join(c.Root, "runtime"), DataRoot: filepath.Join(c.Root, "data"), Limits: limits, ReadyTimeout: limits.ReadTimeout, StableHealth: limits.BackoffMax, HostOps: a.addonHostOps})
+		supervisor, err := addonruntime.NewSupervisor(addonruntime.Config{StateRoot: filepath.Join(c.Root, "runtime"), DataRoot: filepath.Join(c.Root, "data"), Limits: limits, ReadyTimeout: limits.ReadTimeout, StableHealth: limits.BackoffMax, HostOps: a.addonHostOps, WSL: addonWSL(c.WSLDistro)})
 		if err != nil {
 			return err
 		}
+		a.addonHostDataDir = supervisor.HostDataDir
 		if err = m.AttachRuntime(a.applicationConfig.Context, supervisor); err != nil {
 			_ = supervisor.Close(context.Background())
 			return err
@@ -1088,6 +1257,9 @@ func (a *Application) startAddons() error {
 	a.addonManager = m
 	if c.InstanceID == c.OwnerID {
 		go a.runAddonAutoUpgrade(a.applicationConfig.Context, upgradeInitialDelay, upgradeCheckInterval)
+	}
+	if err := a.registerHostShareKinds(); err != nil {
+		return err
 	}
 	if err := a.startAddonGateway(); err != nil {
 		return err
@@ -1110,6 +1282,35 @@ func (a *Application) startAddons() error {
 // and an unreachable library must not keep LocalAI or the installed add-ons
 // down. Until it ends the cache is empty, as it is after any failed refresh;
 // an explicit refresh does the same work again.
+// addonUpdateRefreshEvery is how often the owner asks the libraries about the
+// installed add-ons in the background. The check is an observation; an upgrade
+// decides again when it runs.
+const addonUpdateRefreshEvery = 30 * time.Minute
+
+// startUpdateRefresh checks the installed add-ons shortly after start and then
+// on every interval, until ctx ends. Without it the answer of the update check
+// is empty after each restart and the page shows "not known" until an
+// administrator asks.
+func startUpdateRefresh(ctx context.Context, refresh func(context.Context) int, every time.Duration) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		// Let the startup read of the libraries finish first.
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+			refresh(ctx)
+			timer.Reset(every)
+		}
+	}()
+}
+
 func startLibraryRefresh(ctx context.Context, refresh func(context.Context) error) {
 	go func() {
 		if err := refresh(ctx); err != nil && ctx.Err() == nil {

@@ -1,7 +1,7 @@
 import { test, expect } from './coverage-fixtures.js'
 import { mockChat } from './chat-fixtures.js'
 import { mockSettings } from './settings-fixtures.js'
-import { app, installedAddon, mockAddons } from './addons-fixtures.js'
+import { app, installedAddon, mockAddons, sessionFor } from './addons-fixtures.js'
 
 // The network of a chat's commands: the Network row of the Tools menu,
 // the card a blocked host asks with, and the network-policy host control on
@@ -89,7 +89,7 @@ test.describe('Network of the commands', () => {
     await expect(row).toContainText('Network')
     await expect(page.getByTestId('chat-network-all')).toBeDisabled()
     await expect(page.getByTestId('chat-network-all')).toHaveAttribute('title', 'Limited by your administrator')
-    await expect(row).toContainText('Your administrator allows at most: Package registries.')
+    await expect(row).toContainText('Your administrator allows at most: Custom.')
     await page.getByTestId('chat-network-registries').click()
     await expect.poll(() => state.puts).toEqual(['registries'])
     await expect(page.getByTestId('chat-network-registries')).toHaveAttribute('aria-checked', 'true')
@@ -114,30 +114,68 @@ test.describe('Network of the commands', () => {
     await shot(page, 'network-over-limit-off')
   })
 
-  test('with the limit on registries a chat that asks for all shows registries', async ({ page }) => {
+  test('with the limit on Custom a chat that asks for all shows Custom', async ({ page }) => {
     await stubChat(page, { egress: view({ preset: 'all', ceiling: 'registries', effective: 'registries' }) })
     await page.goto('/app/chats/c1')
     await page.getByTestId('chat-tools-button').click()
     await expect(page.getByTestId('chat-network-registries')).toHaveAttribute('aria-checked', 'true')
     await expect(page.getByTestId('chat-network-all')).toHaveAttribute('aria-checked', 'false')
-    await expect(page.getByTestId('chat-network-asks')).toContainText('the administrator limit is Package registries')
+    await expect(page.getByTestId('chat-network-asks')).toContainText('the administrator limit is Custom')
     await shot(page, 'network-over-limit-registries')
   })
 
-  test('the panel lists the hosts the administrator always allows, read only', async ({ page }) => {
-    await stubChat(page, { egress: view({ preset: 'registries', effective: 'registries', allowed_hosts: ['api.example.org', 'git.example.org:8443'] }) })
+  test('the middle choice is called Custom and keeps the registries id', async ({ page }) => {
+    await stubChat(page, { egress: view() })
     await page.goto('/app/chats/c1')
     await page.getByTestId('chat-tools-button').click()
-    await expect(page.getByTestId('chat-network-allowed-note')).toHaveText('2 hosts are always allowed by your administrator.')
-    await page.getByTestId('chat-network-panel-toggle').click()
-    const list = page.getByTestId('chat-network-allowed')
-    await expect(list).toContainText('Always allowed by your administrator:')
-    await expect(list.getByTestId('chat-network-allowed-host')).toHaveText(['api.example.org', 'git.example.org:8443'])
-    await expect(list.getByRole('button')).toHaveCount(0)
-    await shot(page, 'network-allowed-hosts')
+    const custom = page.getByTestId('chat-network-registries')
+    await expect(custom).toHaveText('Custom')
+    await expect(custom).toHaveAttribute('title', /package registries.*domains your administrator added/)
+    await expect(page.getByTestId('chat-network')).not.toContainText('Package registries')
   })
 
-  test('with the network off the panel says the hosts apply once it is on', async ({ page }) => {
+  test('the panel lists the Custom domains as written, and an administrator can open the network settings from it', async ({ page }) => {
+    await stubChat(page, { egress: view({
+      preset: 'registries', effective: 'registries', allowed_hosts: ['*.example.org', 'git.example.org:8443', '*'],
+      registries: [{ id: 'pypi', title: 'Python (PyPI)', hosts: ['pypi.org'] }, { id: 'extra', title: 'Added by an administrator', hosts: ['mirror.example.com'] }],
+    }) })
+    await page.goto('/app/chats/c1')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network-allowed-note')).toHaveText('Custom domains added by your administrator: 4.')
+    await page.getByTestId('chat-network-panel-toggle').click()
+    const list = page.getByTestId('chat-network-allowed')
+    await expect(list).toContainText('Custom reaches the package registries and these domains')
+    await expect(list.getByTestId('chat-network-allowed-host')).toHaveText(['mirror.example.com', '*.example.org', 'git.example.org:8443', '*'])
+    await expect(list.getByRole('button')).toHaveCount(0)
+    const edit = page.getByTestId('chat-network-edit-domains')
+    await expect(edit).toHaveText('Edit domains')
+    await expect(edit).toHaveAttribute('href', '/app/addons?detail=sandbox&view=settings&section=network')
+    await expect(page.getByTestId('chat-network-custom-admin')).toHaveCount(0)
+    await shot(page, 'network-custom-domains')
+  })
+
+  test('a person who is not an administrator sees the list and a note, and no link', async ({ page }) => {
+    await stubChat(page, { egress: view({ preset: 'registries', effective: 'registries', allowed_hosts: ['api.example.org'] }) })
+    await page.route('**/api/auth/status', route => route.fulfill({ json: sessionFor({ id: 'u1', name: 'Una', role: 'user' }, { chats: true, chat: true }) }))
+    await page.goto('/app/chats/c1')
+    await page.getByTestId('chat-tools-button').click()
+    await page.getByTestId('chat-network-panel-toggle').click()
+    await expect(page.getByTestId('chat-network-allowed-host')).toHaveText(['api.example.org'])
+    await expect(page.getByTestId('chat-network-custom-admin')).toHaveText('An administrator manages this list.')
+    await expect(page.getByTestId('chat-network-edit-domains')).toHaveCount(0)
+  })
+
+  test('with no domains added, the panel says Custom reaches the package registries only', async ({ page }) => {
+    await stubChat(page, { egress: view() })
+    await page.goto('/app/chats/c1')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network-allowed-note')).toHaveCount(0)
+    await page.getByTestId('chat-network-panel-toggle').click()
+    await expect(page.getByTestId('chat-network-allowed')).toContainText('Custom reaches the package registries only.')
+    await expect(page.getByTestId('chat-network-allowed-host')).toHaveCount(0)
+  })
+
+  test('with the network off the panel says the domains apply once it is on', async ({ page }) => {
     await stubChat(page, { egress: view({ allowed_hosts: ['api.example.org'] }) })
     await page.goto('/app/chats/c1')
     await page.getByTestId('chat-tools-button').click()
@@ -191,7 +229,7 @@ test.describe('Network of the commands', () => {
     await page.goto('/app/chats/c1')
     const consent = page.getByTestId('chat-network-consent')
     await expect(consent.getByTestId('chat-network-consent-host')).toHaveText('pypi.org:443', { timeout: 15_000 })
-    await expect(consent).toContainText('This chat: Off. Limit set by your administrator: Package registries.')
+    await expect(consent).toContainText('This chat: Off. Limit set by your administrator: Custom.')
     await shot(page, 'network-card')
     await page.reload()
     await expect(consent.getByTestId('chat-network-consent-host')).toHaveText('pypi.org:443', { timeout: 15_000 })
@@ -244,6 +282,133 @@ test.describe('Network of the commands', () => {
 // A second add-on, with another ID and title than the shipped Sandbox, that
 // declares capabilities.network. The host draws the same row and card from its
 // declaration: its title in the text and its titles for the presets.
+// A new chat has no id yet. The network preset is picked in the Tools menu,
+// kept on the page and saved with the chat once it is created. The server
+// cannot say that the policy is enforced before a sandbox is bound (applies is
+// false), so the row follows the sandbox profiles and the add-on's control.
+async function stubDraft(page, { draftView = view({ applies: false, applies_reason: 'none' }), profiles = true } = {}) {
+  await mockAddons(page, { apps: RUNNERS, installed: RUNNERS.map(a => installedAddon({ id: a.id, title: a.title })) })
+  const state = { calls: [], puts: [], drafts: 0 }
+  const list = profiles ? [{ id: 'base', title: 'Base', description: 'The usual tools.', tools: ['jq'], allowed: true, state: { phase: 'ready', percent: 0, error: '' } }] : []
+  await page.route('**/api/chats/sandbox-profiles', route => route.fulfill({ json: { addon: profiles ? 'sandbox' : '', default: 'base', profiles: list } }))
+  await page.route('**/api/chats/draft/addons*', route => route.fulfill({ json: sandbox }))
+  await page.route('**/api/chats/draft/egress*', route => { state.drafts += 1; return route.fulfill({ json: draftView }) })
+  await page.route('**/api/chats/c1/events', route => route.fulfill({ status: 200, headers: { 'Content-Type': 'text/event-stream' }, body: '' }).catch(() => {}))
+  await page.route(/\/api\/chats\/c1\/messages(\?.*)?$/, route => {
+    if (route.request().method() === 'POST') { state.calls.push('send'); return route.fulfill({ json: { started: true } }) }
+    return route.fulfill({ json: { messages: [] } })
+  })
+  await page.route('**/api/chats/c1/addons', route => route.fulfill({ json: sandbox }))
+  await page.route('**/api/chats/c1/sandbox-profile', route => route.fulfill({ json: { applies: true, profiles: list, profile: 'base', default: 'base' } }))
+  await page.route('**/api/chats/c1/egress', route => {
+    if (route.request().method() === 'PUT') {
+      const { preset } = route.request().postDataJSON()
+      state.calls.push(`network:${preset}`)
+      state.puts.push(preset)
+      return route.fulfill({ json: view({ preset, effective: preset }) })
+    }
+    return route.fulfill({ json: view() })
+  })
+  await page.route('**/api/chats/c1', route => route.fulfill({ json: DETAIL }))
+  await page.route(/\/api\/chats(\?.*)?$/, route => {
+    if (route.request().method() === 'POST') { state.calls.push('create'); return route.fulfill({ json: DETAIL }) }
+    return route.fulfill({ json: { conversations: [], persistent: true, files: true, files_reason: '' } })
+  })
+  return state
+}
+
+test.describe('Network of a new chat', () => {
+  test.beforeEach(async ({ page }) => { await mockChat(page) })
+
+  test('the presets can be picked before the first message, up to the limit', async ({ page }) => {
+    const state = await stubDraft(page)
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    const row = page.getByTestId('chat-network')
+    await expect(row).toContainText('Network')
+    await expect(page.getByTestId('chat-network-off')).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByTestId('chat-network-all')).toBeDisabled()
+    await expect(row).toContainText('Your administrator allows at most: Custom.')
+    await expect(page.getByTestId('chat-network-draft')).toHaveText('The chat starts with this setting. The administrator sets the most a chat can reach, and that limit applies.')
+    await expect(page.getByTestId('chat-network-limit-note')).toHaveCount(0)
+    await expect(page.getByTestId('chat-network-panel-toggle')).toHaveText('Custom domains')
+    await page.getByTestId('chat-network-registries').click()
+    await expect(page.getByTestId('chat-network-registries')).toHaveAttribute('aria-checked', 'true')
+    await expect(row).toContainText('Custom')
+    expect(state.calls).toEqual([])
+    await shot(page, 'network-draft')
+  })
+
+  test('the pick is saved right after the chat is created, before the message goes', async ({ page }) => {
+    const state = await stubDraft(page)
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await page.getByTestId('chat-network-registries').click()
+    await page.getByTestId('home-input').fill('install the package')
+    await page.getByTestId('home-input').press('Enter')
+    await expect.poll(() => state.calls).toEqual(['create', 'network:registries', 'send'])
+  })
+
+  test('the empty chat page saves the pick too', async ({ page }) => {
+    const state = await stubDraft(page)
+    await page.goto('/app')
+    await page.evaluate(() => {
+      window.history.pushState({ usr: { agentId: '' }, key: 'draft', idx: 1 }, '', '/app/chats')
+      window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }))
+    })
+    await expect(page.getByTestId('chat-input')).toBeVisible()
+    await page.getByTestId('chat-tools-button').click()
+    await page.getByTestId('chat-network-registries').click()
+    await page.getByTestId('chat-input').fill('install the package')
+    await page.getByTestId('chat-input').press('Enter')
+    await expect.poll(() => state.calls).toEqual(['create', 'network:registries', 'send'])
+  })
+
+  test('keeping the start preset saves nothing', async ({ page }) => {
+    const state = await stubDraft(page)
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await page.getByTestId('chat-network-registries').click()
+    await page.getByTestId('chat-network-off').click()
+    await page.getByTestId('home-input').fill('hello')
+    await page.getByTestId('home-input').press('Enter')
+    await expect.poll(() => state.calls).toEqual(['create', 'send'])
+  })
+
+  test('is not offered without a sandbox with profiles', async ({ page }) => {
+    await stubDraft(page, { profiles: false })
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network')).toHaveCount(0)
+    await expect(page.getByTestId('chat-network-unenforced')).toHaveCount(0)
+  })
+
+  test('is not offered when the add-on does not draw the network controls', async ({ page }) => {
+    await stubDraft(page, { draftView: view({ applies: false, applies_reason: 'none', addon: undefined, network: undefined }) })
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network')).toHaveCount(0)
+    await expect(page.getByTestId('chat-network-unenforced')).toHaveCount(0)
+  })
+
+  test('is not offered, and shows no host line, for commands on this machine', async ({ page }) => {
+    await stubDraft(page, { draftView: view({ applies: false, applies_reason: 'host', addon: undefined, network: undefined }) })
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network')).toHaveCount(0)
+    await expect(page.getByTestId('chat-network-unenforced')).toHaveCount(0)
+  })
+
+  test('a limit of off leaves only Off, and says so', async ({ page }) => {
+    await stubDraft(page, { draftView: view({ applies: false, applies_reason: 'none', ceiling: 'off' }) })
+    await page.goto('/app')
+    await page.getByTestId('chat-tools-button').click()
+    await expect(page.getByTestId('chat-network-registries')).toBeDisabled()
+    await expect(page.getByTestId('chat-network-all')).toBeDisabled()
+    await expect(page.getByTestId('chat-network')).toContainText('Off: the administrator has not allowed network access.')
+  })
+})
+
 test.describe('The network of a second add-on that declares it', () => {
   test.beforeEach(async ({ page }) => { await mockChat(page) })
   const declared = { title: 'Runbox', presets: [{ id: 'off', title: 'Closed' }, { id: 'all', title: 'Open web' }] }
@@ -256,7 +421,7 @@ test.describe('The network of a second add-on that declares it', () => {
     await page.getByTestId('chat-tools-button').click()
     await expect(page.getByTestId('chat-network-off')).toHaveText('Closed')
     await expect(page.getByTestId('chat-network-all')).toHaveText('Open web')
-    await expect(page.getByTestId('chat-network-registries')).toHaveText('Package registries')
+    await expect(page.getByTestId('chat-network-registries')).toHaveText('Custom')
     await expect(page.getByTestId('chat-network')).toContainText('Commands reach no network.')
     await expect(page.getByTestId('chat-network')).not.toContainText('Sandbox')
   })
@@ -348,6 +513,15 @@ test.describe('The network of the commands on the add-on page', () => {
     await page.goto('/app/settings?group=tools#settings-egress')
     await expect(page).toHaveURL(/\/app\/addons\?detail=sandbox&view=settings$/)
     await expect(page.getByTestId('host-control-network-policy')).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('the Edit domains address opens the Settings tab at the network control, with the domain list in it', async ({ page }) => {
+    await stubNetworkAdmin(page)
+    await page.goto('/app/addons?detail=sandbox&view=settings&section=network')
+    await expect(page.getByTestId('host-control-network-policy')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('host-control-network-policy')).toHaveAttribute('id', 'host-control-network-policy')
+    await expect(page.locator('[data-field="chats_egress_allowed_hosts"]')).toBeVisible()
+    await expect(page).toHaveURL(/section=network$/)
   })
 
   test('the Settings page keeps the built-in tools and a pointer, and none of the network settings', async ({ page }) => {

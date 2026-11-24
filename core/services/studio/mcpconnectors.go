@@ -110,11 +110,18 @@ type ToolsPanel struct {
 	// Fallbacks are the built-in tools an installed add-on replaces but no
 	// add-on serves in this chat now.
 	Fallbacks []ToolFallback
+	// Memory says whether memory works in this chat and, when it does not,
+	// which level turned it off and where to turn it on.
+	Memory MemoryReason
+	// ToolCap is set when the add-on tool cap left tools out, and nil when
+	// nothing is cut. Switching add-ons off for one chat does not bring them
+	// back: the cap applies before the chat's switches.
+	ToolCap *ToolCap
 }
 
 // Tools lists what a chat can use, with its switches.
 func (s *Service) Tools(ctx context.Context, user, conv string) (ToolsPanel, error) {
-	rec, err := s.d.Store.GetChat(ctx, principal(user), conv)
+	rec, err := s.getChatEffective(ctx, principal(user), conv)
 	if err != nil {
 		return ToolsPanel{}, err
 	}
@@ -135,14 +142,14 @@ func (s *Service) toolsFor(ctx context.Context, user string, rec session.ChatRec
 			return ToolsPanel{}, err
 		}
 	}
-	p := ToolsPanel{Off: append([]string{}, rec.McpOff...), Builtins: s.builtinGroups(ctx, rec, shadowing)}
+	p := ToolsPanel{Off: append([]string{}, rec.McpOff...), Builtins: s.builtinGroups(ctx, rec, shadowing), Memory: s.ChatMemory(ctx, rec)}
 	if s.d.AddonTools != nil && (sc == nil || !sc.deleted) {
 		p.Fallbacks, err = s.toolFallbacks(ctx, rec, shadowing, s.shadowersFor(ctx, principal(user)))
 		if err != nil {
 			return ToolsPanel{}, err
 		}
 	}
-	if p.Addons, err = s.addonsFor(ctx, user, rec); err != nil {
+	if p.Addons, p.ToolCap, err = s.addonsFor(ctx, user, rec, sc); err != nil {
 		return p, err
 	}
 	off := set(rec.McpOff)

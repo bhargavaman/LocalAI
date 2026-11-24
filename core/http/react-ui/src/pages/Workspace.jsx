@@ -1,24 +1,24 @@
 /* eslint-disable no-unused-vars -- components used only inside JSX look unused to this config, which has no eslint-plugin-react */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useOutletContext, useSearchParams } from 'react-router-dom'
+import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import Icon from '../components/Icon'
-import Button from '../components/ui/Button'
 import Callout from '../components/ui/Callout'
 import EmptyState from '../components/ui/EmptyState'
 import LoadError from '../components/ui/LoadError'
+import { Button, SearchField, TabPanel, Tabs } from '../components/ui'
 import { SkeletonRows } from '../components/Skeleton'
 import ActionMenu from '../components/ActionMenu'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useAuth } from '../context/AuthContext'
 import { useWorkspace, joinPath, parentOf } from '../hooks/useWorkspace'
 import { uploads, useUploads } from '../hooks/useUploads'
-import { chatAgentsApi, filesApi } from '../utils/api'
+import { chatAgentsApi, chatProjectsApi, filesApi, folderSharesApi } from '../utils/api'
 import { agentFolderMarks } from '../utils/chatAgents'
 import { fileSize } from '../utils/fileInfo'
-import { splitEntries, isSettingsFolder, guardOf } from '../utils/managedFiles'
+import { splitEntries, isSettingsFolder, guardOf, pageOf, projectMarks, PROJECTS_ROOT } from '../utils/managedFiles'
 import {
-  DRAG_TYPE, filterEntries, parseViewPrefs, pastedName, rangeOf, sortEntries, uniqueName,
+  DRAG_TYPE, filterEntries, parseViewPrefs, pastedName, rangeOf, sortEntries, uniqueName, isArchive,
 } from '../utils/fileBrowser'
 import { filesOfDrop, hasFiles } from '../utils/dropFiles'
 import FilePreview from '../components/files/FilePreview'
@@ -27,9 +27,15 @@ import UploadTray from '../components/files/UploadTray'
 import ConflictDialog from '../components/files/ConflictDialog'
 import MoveDialog from '../components/files/MoveDialog'
 import SharedFolders from '../components/files/SharedFolders'
+import ShareDialog from '../components/share/ShareDialog'
+import { folderShareClient } from '../components/share/shareClients'
 import './workspace.css'
 
 const noop = () => {}
+
+// The folders LocalAI manages in the home, and everything in them: they
+// cannot be shared.
+const MANAGED_PATH = /^\/(LocalAI|Chats)(\/|$)/
 
 // After a menu closes it gives the focus back to its trigger on the next
 // frame; a rename field opened from the menu must take the focus after that.
@@ -111,17 +117,14 @@ const whatText = (c, t) => {
 function TrashList({ ws, t, onPurge }) {
   const empty = ws.trash.length === 0 && ws.trashTotals.files + ws.trashTotals.folders === 0
   return (
-    <section className="ws-trash" aria-labelledby="ws-tab-trash">
+    <section className="ws-trash">
       <div className="ws-trash__bar">
         <p className="ws-trash__summary" data-testid="ws-trash-summary">
           {empty ? t('trash.empty') : t('trash.summary', { what: whatText(ws.trashTotals, t) })}
         </p>
-        <button
-          type="button" className="btn btn-danger btn-sm" data-testid="ws-empty-trash"
-          disabled={empty || ws.busy} onClick={() => onPurge({ all: true })}
-        >
-          <Icon name="trash" /> {t('trash.emptyAll')}
-        </button>
+        <Button variant="danger" size="sm" icon="trash" data-testid="ws-empty-trash" disabled={empty || ws.busy} onClick={() => onPurge({ all: true })}>
+          {t('trash.emptyAll')}
+        </Button>
       </div>
       {ws.purged && (
         <div className="ws-notice ws-trash__done" role="status" data-testid="ws-trash-done">
@@ -138,15 +141,12 @@ function TrashList({ ws, t, onPurge }) {
               <span className="ws-row__size" data-testid="ws-trash-size">{whatText(e, t)}</span>
               <span className="ws-row__size">{new Date(e.at).toLocaleString()}</span>
               <span className="ws-row__actions">
-                <button type="button" className="btn btn-secondary btn-sm" disabled={ws.busy} onClick={() => ws.restore(e.rev)}>
-                  <Icon name="undo" /> {t('trash.restore')}
-                </button>
-                <button
-                  type="button" className="btn btn-danger-ghost btn-sm" data-testid="ws-purge" disabled={ws.busy}
-                  aria-label={t('trash.purgeNamed', { name: e.paths.join(', ') })} onClick={() => onPurge({ entry: e })}
-                >
-                  <Icon name="trash" /> {t('trash.purge')}
-                </button>
+                <Button size="sm" icon="undo" disabled={ws.busy} onClick={() => ws.restore(e.rev)}>
+                  {t('trash.restore')}
+                </Button>
+                <Button variant="danger-ghost" size="sm" icon="trash" data-testid="ws-purge" disabled={ws.busy} aria-label={t('trash.purgeNamed', { name: e.paths.join(', ') })} onClick={() => onPurge({ entry: e })}>
+                  {t('trash.purge')}
+                </Button>
               </span>
             </li>
           ))}
@@ -171,9 +171,9 @@ function HistoryList({ ws, t }) {
           <span className="ws-row__size">{new Date(h.at).toLocaleString()}</span>
           <span className="ws-row__actions">
             {h.kind !== 'undo' && (
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => ws.restore(h.rev)}>
-                <Icon name="undo" /> {t('history.undo')}
-              </button>
+              <Button size="sm" icon="undo" onClick={() => ws.restore(h.rev)}>
+                {t('history.undo')}
+              </Button>
             )}
           </span>
         </li>
@@ -234,7 +234,8 @@ function SearchHits({ hits, indexing, limited, query, onOpenHit, onClear, t }) {
 export default function Workspace() {
   const { t, i18n } = useTranslation('workspace')
   const { addToast = noop } = useOutletContext() || {}
-  const { user } = useAuth()
+  const { user, authEnabled, hasFeature } = useAuth()
+  const navigate = useNavigate()
   // ?path= opens a folder, for example from "Show its files" of a page.
   const [params, setParams] = useSearchParams()
   const urlPath = params.get('path') || '/'
@@ -242,6 +243,23 @@ export default function Workspace() {
   const upState = useUploads()
   const [tab, setTab] = useState(params.get('tab') === 'shared' ? 'shared' : 'files')
   const [prefs, setPrefs] = useViewPrefs(user?.id || 'local')
+  // The folders of the home that are shared, by path, and whether folders
+  // can be shared here at all. Without accounts nothing is shown.
+  const [owned, setOwned] = useState({ sharing: false, byPath: new Map() })
+  const [sharing, setSharing] = useState(null)
+  const loadOwned = useCallback(async () => {
+    if (!authEnabled) return
+    try {
+      const d = await folderSharesApi.list()
+      setOwned({ sharing: d?.sharing === true, byPath: new Map((d?.folders || []).map(f => [f.path, f])) })
+    } catch { /* the Share action stays hidden; the Files page works without it */ }
+  }, [authEnabled])
+  useEffect(() => { loadOwned() }, [loadOwned])
+  const shareClient = useMemo(() => (sharing ? folderShareClient(folderSharesApi, sharing.id) : null), [sharing])
+  const shareRoles = useMemo(() => [
+    { id: 'read', label: t('shared.mode.read'), help: t('share.readHelp') },
+    { id: 'write', label: t('shared.mode.write'), help: t('share.writeHelp') },
+  ], [t])
   const [query, setQuery] = useState('')
   const [searched, setSearched] = useState('')
   const [selected, setSelected] = useState(() => new Set())
@@ -275,6 +293,19 @@ export default function Workspace() {
     const who = list.map(a => t(a.mode === 'write' ? 'agentMark.write' : 'agentMark.read', { name: a.name })).join(', ')
     return { label: list.length === 1 ? list[0].name : t('agentMark.many', { count: list.length }), title: t('agentMark.usedBy', { agents: who }) }
   }, [agentMarks, t])
+  // The projects, read when the open folder is Projects/, so each project
+  // folder shows its name and links to its page. Without the Projects feature
+  // (or on an error) the folders show only their slug.
+  const [projectList, setProjectList] = useState([])
+  const inProjects = ws.path === PROJECTS_ROOT && hasFeature('chats')
+  useEffect(() => {
+    if (!inProjects) return undefined
+    let live = true
+    chatProjectsApi.list().then(r => { if (live) setProjectList(r.projects || []) }).catch(() => {})
+    return () => { live = false }
+  }, [inProjects])
+  const projectMarkMap = useMemo(() => projectMarks(projectList), [projectList])
+  const projectMark = useCallback((path) => (inProjects ? projectMarkMap.get(path) || null : null), [inProjects, projectMarkMap])
   // A permanent delete that waits for the confirmation: { all: true } for the
   // whole Trash, { entry } for one item.
   const [purging, setPurging] = useState(null)
@@ -462,6 +493,15 @@ export default function Workspace() {
     if (guards.length) setGuarded({ entries: list, action: 'delete', guard: guards[0] })
     else doDelete(list)
   }
+  const doExtract = async (entry) => {
+    const res = await ws.extract(entry)
+    if (!res) return // the error shows on the page
+    const folder = res.dest.split('/').pop()
+    const notes = []
+    if (res.skipped_count) notes.push(t('toast.extractSkipped', { count: res.skipped_count }))
+    if (res.conflicts?.length) notes.push(t('toast.extractConflicts', { count: res.conflicts.length }))
+    undoToast([t('toast.extracted', { count: res.files, folder }), ...notes].join(' '), res.rev ? [res.rev] : [], t('toast.extractUndone'))
+  }
   const doRename = async (entry, name) => {
     const node = await ws.rename(entry, name)
     if (!node) return
@@ -530,16 +570,34 @@ export default function Workspace() {
     else await ws.purge(p.entry.rev)
   }
 
+  const openShare = async (entry) => {
+    try {
+      const f = await folderSharesApi.find(entry.path)
+      setSharing({ id: f.id, name: f.name })
+    } catch (e) {
+      addToast(t('share.failed', { message: e?.message || String(e) }), 'error')
+    }
+  }
+  const shareMark = (p) => owned.byPath.get(p) || null
+
   const menuItems = (entry) => {
     const isDir = entry.kind === 'dir'
     const many = selected.has(entry.path) && selected.size > 1
     const list = many ? picked : [entry]
+    const shareable = isDir && authEnabled && owned.sharing && !MANAGED_PATH.test(entry.path)
+    // A folder LocalAI manages may have its own page; offer it when the
+    // person has the features for it.
+    const own = pageOf(entry)
+    const ownPage = own && own.features.every(f => hasFeature(f)) ? own : null
     return [
       { key: 'select', icon: 'check', label: t('select.start'), onClick: () => ctx.onToggle(entry), hidden: !touch || selected.has(entry.path) },
       { key: 'open', icon: isDir ? 'folder' : 'eye', label: isDir ? t('menu.openFolder') : t('menu.preview'), onClick: () => openEntry(entry), hidden: many },
+      { key: 'own-page', icon: 'external-link', label: t(`managed.open.${entry.managed}`, { defaultValue: '' }), onClick: () => navigate(ownPage.to), hidden: many || !ownPage },
       { key: 'download', icon: 'download', label: many ? t('menu.downloadMany', { count: list.filter(e => e.kind === 'file').length }) : t('download'), onClick: () => download(list), hidden: !list.some(e => e.kind === 'file') },
       { key: 'rename', icon: 'pencil', label: t('rename'), shortcut: 'F2', onClick: () => { setCreating(null); afterMenu(() => setRenaming(entry.path)) }, hidden: many },
+      { key: 'extract', icon: 'boxes', label: t('menu.extract'), onClick: () => doExtract(entry), hidden: many || !isArchive(entry) },
       { key: 'move', icon: 'arrow-right', label: many ? t('menu.moveMany', { count: list.length }) : t('moveTo'), onClick: () => setMoving(list) },
+      { key: 'share', icon: 'users', label: t('menu.share'), onClick: () => openShare(entry), hidden: many || !shareable },
       { divider: true },
       { key: 'delete', icon: 'trash', label: many ? t('menu.deleteMany', { count: list.length }) : t('delete'), shortcut: t('keys.delete'), danger: true, onClick: () => remove(list) },
     ]
@@ -550,7 +608,7 @@ export default function Workspace() {
   const paths = order.map(e => e.path)
   const selectOnly = (p) => { setSelected(new Set([p])); setAnchor(p); setCursor(p) }
   const ctx = {
-    t, locale: i18n.language, now, taken, touch, menuItems, agentMark,
+    t, locale: i18n.language, now, taken, touch, menuItems, agentMark, shareMark, projectMark,
     onOpen: openEntry,
     onRowClick: (entry, e) => {
       if (e.target.closest('button, a, input')) return
@@ -700,17 +758,17 @@ export default function Workspace() {
           </div>
         </header>
 
-        <div className="ws-tabs" role="tablist" aria-label={t('tabs.label')}>
-          {['files', 'trash', 'history', 'shared'].map((k) => (
-            <button
-              key={k} type="button" role="tab" aria-selected={tab === k} id={`ws-tab-${k}`}
-              className={`ws-tab${tab === k ? ' ws-tab--on' : ''}`} onClick={() => setTab(k)}
-            >
-              {t(`tabs.${k}`)}
-              {k === 'trash' && ws.trash.length > 0 && <span className="ws-tab__count" aria-label={t('tabs.trashCount', { count: ws.trash.length })}>{ws.trash.length}</span>}
-            </button>
-          ))}
-        </div>
+        <Tabs
+          label={t('tabs.label')}
+          idPrefix="ws"
+          value={tab}
+          onChange={setTab}
+          items={['files', 'trash', 'history', 'shared'].map(k => ({
+            id: k,
+            label: t(`tabs.${k}`),
+            ...(k === 'trash' && ws.trash.length > 0 ? { count: ws.trash.length, countLabel: t('tabs.trashCount', { count: ws.trash.length }) } : {}),
+          }))}
+        />
 
         {ws.error && (
           <Callout
@@ -722,7 +780,7 @@ export default function Workspace() {
         )}
 
         {tab === 'files' && (
-          <section className="ws-files" aria-labelledby="ws-tab-files" data-drop={dropActive || undefined}>
+          <section className="ws-files" role="tabpanel" id="ws-panel-files" aria-labelledby="ws-tab-files" data-drop={dropActive || undefined}>
             <div className="ws-bar">
               {picked.length > 0 ? (
                 <div className="ws-selbar" role="toolbar" aria-label={t('select.bar')} data-testid="ws-selection-bar">
@@ -740,11 +798,10 @@ export default function Workspace() {
                 <>
                   <Breadcrumb path={ws.path} onOpen={openFolder} drop={dropTarget} t={t} />
                   <form className="ws-search" role="search" onSubmit={(e) => { e.preventDefault(); if (query.trim()) { setSearched(query.trim()); ws.search(query) } }}>
-                    <Icon name="search" className="ws-search__icon" />
-                    <input
-                      ref={searchRef} className="input ws-search__input" type="search" aria-label={t('search.label')} placeholder={t('search.placeholder')}
+                    <SearchField
+                      ref={searchRef} label={t('search.label')} placeholder={t('search.placeholder')}
                       value={query}
-                      onChange={(e) => { setQuery(e.target.value); if (!e.target.value) { ws.clearSearch(); setSearched('') } }}
+                      onChange={(text) => { setQuery(text); if (!text) { ws.clearSearch(); setSearched('') } }}
                       onKeyDown={(e) => { if (e.key === 'Escape' && query) { e.preventDefault(); setQuery(''); ws.clearSearch(); setSearched('') } }}
                     />
                   </form>
@@ -840,9 +897,13 @@ export default function Workspace() {
             )}
           </section>
         )}
-        {tab === 'trash' && <TrashList ws={ws} t={t} onPurge={(p) => { ws.clearPurged(); setPurging(p) }} />}
-        {tab === 'history' && <HistoryList ws={ws} t={t} />}
-        {tab === 'shared' && <SharedFolders />}
+        {tab !== 'files' && (
+          <TabPanel idPrefix="ws" value={tab} flush>
+            {tab === 'trash' && <TrashList ws={ws} t={t} onPurge={(p) => { ws.clearPurged(); setPurging(p) }} />}
+            {tab === 'history' && <HistoryList ws={ws} t={t} />}
+            {tab === 'shared' && <SharedFolders />}
+          </TabPanel>
+        )}
       </div>
 
       {preview && tab === 'files' && !searching && (
@@ -864,6 +925,15 @@ export default function Workspace() {
         <ActionMenu
           key={`${menu.at.x}:${menu.at.y}`} at={menu.at} onClose={() => setMenu(null)}
           items={menuItems(menu.entry)} ariaLabel={t('menu.label', { name: menu.entry.name })}
+        />
+      )}
+      {sharing && shareClient && (
+        <ShareDialog
+          client={shareClient} roles={shareRoles} allowEveryone resource={sharing} sharing={owned.sharing}
+          intro={t('share.intro')} testId="ws-share-dialog"
+          onChanged={loadOwned}
+          onLost={() => { setSharing(null); addToast(t('share.lost'), 'error'); loadOwned() }}
+          close={() => setSharing(null)}
         />
       )}
       {moving && <MoveDialog items={moving} start={ws.path} onMove={(dest) => moveTo(moving, dest)} onCancel={() => setMoving(null)} />}

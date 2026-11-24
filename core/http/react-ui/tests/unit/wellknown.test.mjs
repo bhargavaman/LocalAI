@@ -4,6 +4,7 @@ import {
   createWellKnownApi, WellKnownError, fieldsFromSchema, checkField, changedValues, parseSource,
   shortcutList, cleanShortcuts, move, widgetList, cleanWidgets, widgetId, widgetData, sparkPath, formatMetric,
   createWellKnownStore, wellKnownPath, editMeetsChange, wellKnownProblem,
+  backgroundImagePath, backgroundVideoPath, homeBackground, chatBackground, background, backgroundStyle, backgroundVeil, BACKGROUND_KEYS,
 } from '../../src/utils/wellKnown.js'
 
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
@@ -224,4 +225,124 @@ test('wellKnownProblem: a failed save is a plain sentence, with the server\'s wo
   assert.deepEqual(wellKnownProblem(new WellKnownError(500, null), t), { message: 'wellKnown.saveFailed', errors: ['HTTP 500'] }, 'the raw message is a detail, not the sentence')
   assert.deepEqual(wellKnownProblem(new Error('network down'), t), { message: 'wellKnown.saveFailed', errors: ['network down'] })
   assert.deepEqual(wellKnownProblem(undefined, t), { message: 'wellKnown.saveFailed', errors: [] })
+})
+
+test('home background: a picture path is a relative path of a picture inside the home', () => {
+  for (const ok of ['sky.png', 'Pictures/Sky.JPG', 'My pics/blue sky.webp', 'a/b/c.avif', 'x.gif', 'x.jpeg']) assert.equal(backgroundImagePath(ok), true, ok)
+  const bad = ['', '/etc/a.png', '../a.png', 'a/../../b.png', 'a/./b.png', 'a//b.png', './a.png', 'https://example.com/a.png', 'data:image/png;base64,AAAA',
+    'C:\\a.png', 'a\\b.png', 'a.png?x=1', 'a.png#x', 'notes.txt', 'drawing.svg', 'noext', 'a\n.png', 5, null, undefined, 'x'.repeat(401) + '.png']
+  for (const b of bad) assert.equal(backgroundImagePath(b), false, String(b))
+})
+
+test('home background: only the valid parts of the value are used, with defaults and limits', () => {
+  assert.equal(homeBackground(null), null)
+  assert.equal(homeBackground({}), null)
+  assert.equal(homeBackground({ homeBackground: 'red' }), null)
+  assert.equal(homeBackground({ homeBackground: { color: 'red' } }), null)
+  assert.equal(homeBackground({ homeBackground: { image: '../a.png' } }), null)
+  assert.deepEqual(homeBackground({ homeBackground: { color: '#112233' } }), { color: '#112233', fit: 'cover', opacity: 1, blur: 0, overlay: 0 })
+  const g = homeBackground({ homeBackground: { gradient: { from: '#000000', to: '#ffffff', angle: 999 } } })
+  assert.deepEqual(g.gradient, { from: '#000000', to: '#ffffff', angle: 360 })
+  assert.equal(g.overlay, 0.35)
+  // A bad picture path is dropped, the colour next to it stays.
+  const half = homeBackground({ homeBackground: { color: '#112233', image: '/etc/a.png', gradient: { from: 'url(x)', to: '#ffffff' } } })
+  assert.deepEqual(half, { color: '#112233', fit: 'cover', opacity: 1, blur: 0, overlay: 0 })
+  const img = homeBackground({ homeBackground: { image: 'a.png', fit: 'contain', opacity: 5, blur: 99.4, overlay: -1 } })
+  assert.deepEqual(img, { image: 'a.png', fit: 'contain', opacity: 1, blur: 40, overlay: 0 })
+  assert.equal(homeBackground({ homeBackground: { image: 'a.png' } }).overlay, 0.55)
+})
+
+test('home background: the layers stack picture, gradient, colour and the picture is served by the files API only', () => {
+  assert.equal(backgroundStyle(null, () => ''), null)
+  const urls = []
+  const s = backgroundStyle(homeBackground({ homeBackground: { color: '#102030', gradient: { from: '#000000', to: '#ffffff', angle: 90 }, image: 'Pictures/a b.png', blur: 10, opacity: 0.5 } }), (p) => { urls.push(p); return `/api/chats/files/content?path=%2F${encodeURIComponent(p)}` })
+  assert.deepEqual(urls, ['Pictures/a b.png'])
+  assert.match(s.art.backgroundImage, /^url\("\/api\/chats\/files\/content\?path=%2FPictures%2Fa%20b\.png"\), linear-gradient\(90deg, #000000, #ffffff\)$/)
+  assert.equal(s.art.backgroundSize, 'cover, cover')
+  assert.equal(s.art.backgroundColor, '#102030')
+  assert.equal(s.art.filter, 'blur(10px)')
+  assert.equal(s.art.inset, '-20px')
+  assert.equal(s.art.opacity, 0.5)
+  assert.equal(s.scrim.opacity, 0.55)
+})
+
+test('home background: the schema field is an editable object and a save sends it whole, or null when emptied', () => {
+  const schema = { properties: { theme: { enum: ['dark', 'light'] }, homeBackground: { type: 'object', 'x-ui': { widget: 'background' } }, extra: { type: 'object' } } }
+  const f = fieldsFromSchema(schema)
+  assert.deepEqual(f.map(x => [x.key, x.widget]), [['theme', 'select'], ['homeBackground', 'background']])
+  const bg = { image: 'a.png', fit: 'cover' }
+  assert.deepEqual(changedValues(f, { theme: 'dark' }, { theme: 'dark', homeBackground: bg }), { homeBackground: bg })
+  assert.deepEqual(changedValues(f, { homeBackground: { ...bg } }, { homeBackground: { ...bg } }), {}, 'an equal object is not a change')
+  assert.deepEqual(changedValues(f, { homeBackground: bg }, { homeBackground: {} }), { homeBackground: null })
+  assert.deepEqual(changedValues(f, {}, { homeBackground: {} }), {})
+  assert.equal(checkField(f[1], { image: 'a.png' }), '')
+})
+
+test('chat background: same shape as Home, read from its own key, with stronger veil defaults for a long read', () => {
+  assert.deepEqual(BACKGROUND_KEYS, ['homeBackground', 'chatBackground'])
+  assert.equal(chatBackground(null), null)
+  assert.equal(chatBackground({ homeBackground: { color: '#112233' } }), null, 'the Home key is not the chat key')
+  assert.equal(homeBackground({ chatBackground: { color: '#112233' } }), null, 'the chat key is not the Home key')
+  assert.equal(chatBackground({ chatBackground: { image: '../a.png' } }), null)
+  assert.deepEqual(chatBackground({ chatBackground: { color: '#112233' } }), { color: '#112233', fit: 'cover', opacity: 1, blur: 0, overlay: 0 })
+  assert.equal(chatBackground({ chatBackground: { gradient: { from: '#000000', to: '#ffffff' } } }).overlay, 0.6)
+  assert.equal(chatBackground({ chatBackground: { image: 'a.png' } }).overlay, 0.8)
+  assert.equal(chatBackground({ chatBackground: { image: 'a.png', overlay: 0.2 } }).overlay, 0.2, 'a veil the file names wins')
+  // The chat veil is never weaker than the one of Home, for any kind.
+  for (const kind of ['image', 'gradient', 'color']) assert.ok(backgroundVeil('chatBackground', kind) >= backgroundVeil('homeBackground', kind), kind)
+  // Both keys in one file are read apart.
+  const both = { homeBackground: { color: '#111111' }, chatBackground: { color: '#222222' } }
+  assert.equal(background(both, 'homeBackground').color, '#111111')
+  assert.equal(background(both, 'chatBackground').color, '#222222')
+  const st = backgroundStyle(chatBackground({ chatBackground: { image: 'a.png' } }), (p) => `/f/${p}`)
+  assert.equal(st.scrim.opacity, 0.8)
+})
+
+test('chat background: both backgrounds are editable fields of ui.json and save apart', () => {
+  const schema = { properties: { homeBackground: { type: 'object', 'x-ui': { widget: 'background' } }, chatBackground: { type: 'object', 'x-ui': { widget: 'background' } } } }
+  const f = fieldsFromSchema(schema)
+  assert.deepEqual(f.map(x => [x.key, x.widget]), [['homeBackground', 'background'], ['chatBackground', 'background']])
+  const home = { color: '#111111' }
+  assert.deepEqual(changedValues(f, { homeBackground: home }, { homeBackground: home, chatBackground: { image: 'a.png' } }), { chatBackground: { image: 'a.png' } })
+  assert.deepEqual(changedValues(f, { homeBackground: home, chatBackground: { image: 'a.png' } }, { homeBackground: home, chatBackground: {} }), { chatBackground: null })
+})
+
+test('video background: a video path follows the picture rule with a video extension', () => {
+  for (const ok of ['loop.mp4', 'Videos/Loop.WEBM', 'My videos/sea loop.mov', 'a/b/c.mp4']) assert.equal(backgroundVideoPath(ok), true, ok)
+  const bad = ['', '/Videos/a.mp4', '../a.mp4', 'a/../../b.mp4', 'a/./b.mp4', 'a//b.mp4', './a.mp4', 'https://example.com/a.mp4', 'data:video/mp4;base64,AAAA',
+    'C:\\a.mp4', 'a\\b.mp4', 'a.mp4?x=1', 'a.mp4#x', 'sky.png', 'clip.avi', 'noext', 'a\n.mp4', 5, null, undefined, 'x'.repeat(401) + '.mp4']
+  for (const b of bad) assert.equal(backgroundVideoPath(b), false, String(b))
+  assert.equal(backgroundImagePath('loop.mp4'), false, 'a video is not a picture')
+  assert.equal(backgroundVideoPath('sky.png'), false, 'a picture is not a video')
+})
+
+test('video background: background() keeps a valid video, drops a bad one and uses the video veil', () => {
+  assert.equal(homeBackground({ homeBackground: { video: '../a.mp4' } }), null)
+  assert.equal(homeBackground({ homeBackground: { video: 'a.png' } }), null)
+  const h = homeBackground({ homeBackground: { video: 'Videos/loop.mp4' } })
+  assert.deepEqual(h, { video: 'Videos/loop.mp4', fit: 'cover', opacity: 1, blur: 0, overlay: 0.55 })
+  assert.equal(chatBackground({ chatBackground: { video: 'Videos/loop.mp4' } }).overlay, 0.8)
+  assert.equal(chatBackground({ chatBackground: { video: 'a.mp4', overlay: 0.1 } }).overlay, 0.1)
+  // A bad video next to a good picture leaves the picture.
+  assert.deepEqual(homeBackground({ homeBackground: { video: '/a.mp4', image: 'a.png' } }), { image: 'a.png', fit: 'cover', opacity: 1, blur: 0, overlay: 0.55 })
+  // Both set: both are kept, the video wins the veil kind.
+  const both = homeBackground({ homeBackground: { video: 'a.mp4', image: 'p.png', color: '#112233' } })
+  assert.equal(both.video, 'a.mp4')
+  assert.equal(both.image, 'p.png')
+  for (const key of BACKGROUND_KEYS) assert.equal(backgroundVeil(key, 'video'), backgroundVeil(key, 'image'))
+  assert.ok(backgroundVeil('chatBackground', 'video') >= backgroundVeil('homeBackground', 'video'))
+})
+
+test('video background: the video is served by the files API and the picture becomes its poster', () => {
+  const url = (p) => `/f/${p}`
+  const s = backgroundStyle(homeBackground({ homeBackground: { video: 'Videos/a.mp4', image: 'Pictures/p.png', fit: 'contain', blur: 5, opacity: 0.5 } }), url)
+  assert.deepEqual(s.video, { src: '/f/Videos/a.mp4', poster: '/f/Pictures/p.png', fit: 'contain' })
+  assert.equal(s.art.backgroundImage, undefined, 'the picture is not also drawn as a CSS layer')
+  assert.equal(s.art.backgroundSize, undefined)
+  assert.equal(s.art.opacity, 0.5)
+  assert.equal(s.art.filter, 'blur(5px)')
+  assert.equal(s.scrim.opacity, 0.55)
+  const noPoster = backgroundStyle(homeBackground({ homeBackground: { video: 'a.mp4' } }), url)
+  assert.equal(noPoster.video.poster, undefined)
+  assert.equal(backgroundStyle(homeBackground({ homeBackground: { image: 'a.png' } }), url).video, undefined)
 })

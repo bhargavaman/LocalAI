@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { chatTriggersApi } from '../../utils/api'
 import { browserZone, formatNext } from '../../utils/chatTrigger'
-import { proposalEdit, proposalView, receiptWhen } from '../../utils/chatProposal'
+import { deliveryModeKey, proposalEdit, proposalView, receiptWhen } from '../../utils/chatProposal'
 import { useWellKnown } from '../../hooks/useWellKnown'
 import { widgetList } from '../../utils/wellKnown'
 import { plainSummary } from '../../utils/widgetTrigger'
 import { ActsSummary } from '../TriggerActs'
 import Icon from '../Icon'
 import { Button } from '../ui'
+// eslint-disable-next-line no-unused-vars -- used in JSX; this config has no eslint-plugin-react
+import EventHook, { EventSentence } from './EventHook'
 
 const fmt = (n) => {
   try { return new Intl.NumberFormat().format(n) } catch { return String(n) }
@@ -35,13 +37,30 @@ function Plan({ p, t }) {
   const tokens = cost.estimated_tokens || 0
 
   let when
-  if (p.kind === 'file') when = t('proposal.plan.whenFile', { folder: p.folder })
+  if (p.kind === 'event') when = <EventSentence trigger={p} />
+  else if (p.kind === 'file') when = t('proposal.plan.whenFile', { folder: p.folder })
   else if (first) when = t('proposal.plan.when', { schedule: plainSummary(p), zone, when: first })
   else when = t('proposal.plan.whenNoFirst', { schedule: plainSummary(p), zone })
   let costText = tokens > 0
     ? t(cost.remote ? 'proposal.plan.costRemote' : 'proposal.plan.costLocal', { tokens: fmt(tokens), model: p.model, count: runs })
     : t('proposal.plan.costUnknown', { count: runs })
   if (cost.remote && tokens === 0) costText = `${costText} ${t('proposal.plan.remoteNote', { model: p.model })}`
+  // The time limit the person set; when the administrator's limit is lower,
+  // the row says what applies.
+  const limitText = p.effective_run_limit && p.effective_run_limit !== p.run_limit
+    ? t('proposal.plan.limitClamped', { limit: p.run_limit, ceiling: p.effective_run_limit })
+    : p.run_limit
+  const d = p.delivery || { target: 'inbox' }
+  let delivery = t('proposal.plan.deliveryInbox')
+  if (d.target === 'origin') delivery = t(d.in_thread ? 'proposal.plan.deliveryThread' : 'proposal.plan.deliveryChat')
+  else if (d.target === 'channel') {
+    // A trigger proposed in Studio names the connection it reports to.
+    delivery = d.connection_name
+      ? t('proposal.plan.deliveryChannelIn', { channel: d.channel_label, connection: d.connection_name })
+      : t('proposal.plan.deliveryChannel', { channel: d.channel_label })
+  }
+  const mode = deliveryModeKey(d)
+  if (mode) delivery = `${delivery}. ${t(mode)}`
   const rows = [
     ['when', when],
     ['runsAs', p.model ? t('proposal.plan.runsAsModel', { model: p.model }) : t('proposal.plan.runsAs')],
@@ -49,7 +68,9 @@ function Plan({ p, t }) {
     p.plan?.writes && ['writes', widget
       ? <><code>{p.plan.writes}</code>{t('proposal.plan.writesWidget', { widget: widget.title })}</>
       : <code>{p.plan.writes}</code>],
+    ['delivery', delivery],
     ['cost', costText],
+    p.run_limit && ['limit', limitText],
     ['acts', <ActsSummary key="acts" trigger={p} compact />],
     ['stop', t(widget ? 'proposal.plan.stopWidget' : 'proposal.plan.stop')],
   ].filter(Boolean)
@@ -78,6 +99,9 @@ export default function ProposalCard({ id, t, tick = 0 }) {
   const [error, setError] = useState('')
   // What a screen reader hears after the person acts; empty on first load.
   const [said, setSaid] = useState('')
+  // The secret of a new event trigger. It is shown once, here, and lives only
+  // in this component: not in storage, not in an address, not in the chat.
+  const [secret, setSecret] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -124,20 +148,22 @@ export default function ProposalCard({ id, t, tick = 0 }) {
   const p = view.trigger
   if (view.kind === 'accepted') {
     const when = receiptWhen(p)
+    const isEvent = p.kind === 'event'
     const next = p.next_run ? formatNext(p.next_run, p.time_zone) : ''
     return wrap(
       <div className="cx-receipt" data-testid="trigger-proposal" data-state="accepted">
         <Icon name="check-circle" className="cx-receipt__icon" />
         <div className="cx-receipt__main">
           <p className="cx-receipt__line">
-            <b>{t(when.mode === 'file' ? 'proposal.receipt.watching' : 'proposal.receipt.scheduled')}</b>{' '}
-            <span data-testid="receipt-when">{when.text}</span>
+            <b>{t(isEvent ? 'event.listening' : when.mode === 'file' ? 'proposal.receipt.watching' : 'proposal.receipt.scheduled')}</b>{' '}
+            <span data-testid="receipt-when">{isEvent ? <EventSentence trigger={p} /> : when.text}</span>
           </p>
           <p className="cx-receipt__sub">
             <span data-testid="receipt-title">{p.name}</span>
             {next && <span data-testid="receipt-next">{t('proposal.receipt.next', { when: next })}</span>}
           </p>
           {!view.canUndo && view.blocked && <p className="cx-help" data-testid="receipt-blocked">{t(`proposal.receipt.blocked.${view.blocked}`)}</p>}
+          {isEvent && <EventHook trigger={p} secret={secret} onSecret={setSecret} />}
           {!(!view.canUndo && view.blocked) && alert}
         </div>
         <span className="cx-receipt__acts">
@@ -149,7 +175,7 @@ export default function ProposalCard({ id, t, tick = 0 }) {
               icon="undo"
               busy={busy === 'undo'}
               disabled={!!busy}
-              onClick={() => act('undo', () => chatTriggersApi.undoProposal(p.id), t('proposal.announce.undone', { name: p.name }))}
+              onClick={() => act('undo', async () => { await chatTriggersApi.undoProposal(p.id); setSecret('') }, t('proposal.announce.undone', { name: p.name }))}
             >{t('proposal.receipt.undo')}</Button>
           )}
         </span>
@@ -184,7 +210,7 @@ export default function ProposalCard({ id, t, tick = 0 }) {
     <div className="cx-proposal" data-testid="trigger-proposal" data-state="proposed">
       <div className="cx-proposal__head">
         <b>{p.name}</b>
-        <span className="cx-proposal__when">{p.summary || p.schedule || p.folder}</span>
+        {p.kind !== 'event' && <span className="cx-proposal__when">{p.summary || p.schedule || p.folder}</span>}
       </div>
       <p className="cx-help">{t('proposal.inactive')}</p>
       {!edit && <Plan p={p} t={t} />}
@@ -195,16 +221,23 @@ export default function ProposalCard({ id, t, tick = 0 }) {
         >
           <label className="cx-field__label" htmlFor={`prop-name-${p.id}`}>{t('proposal.name')}</label>
           <input id={`prop-name-${p.id}`} className="cx-in" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
-          <label className="cx-field__label" htmlFor={`prop-when-${p.id}`}>{p.kind === 'file' ? t('proposal.folder') : t('proposal.schedule')}</label>
-          <input id={`prop-when-${p.id}`} className="cx-in" value={edit.when} onChange={(e) => setEdit({ ...edit, when: e.target.value })} />
+          {p.kind !== 'event' && (
+            <>
+              <label className="cx-field__label" htmlFor={`prop-when-${p.id}`}>{p.kind === 'file' ? t('proposal.folder') : t('proposal.schedule')}</label>
+              <input id={`prop-when-${p.id}`} className="cx-in" value={edit.when} onChange={(e) => setEdit({ ...edit, when: e.target.value })} />
+            </>
+          )}
           <span className="cx-pending__acts">
-            <button type="submit" className="cx-btn cx-btn--primary" disabled={!!busy || !edit.name.trim() || !edit.when.trim()}>{t('proposal.saveEdit')}</button>
+            <button type="submit" className="cx-btn cx-btn--primary" disabled={!!busy || !edit.name.trim() || (p.kind !== 'event' && !edit.when.trim())}>{t('proposal.saveEdit')}</button>
             <button type="button" className="cx-btn" onClick={() => setEdit(null)}>{t('proposal.cancelEdit')}</button>
           </span>
         </form>
       ) : (
         <span className="cx-pending__acts">
-          <button type="button" className="cx-btn cx-btn--primary" disabled={!!busy} onClick={() => act('create', () => chatTriggersApi.confirm(p.id, browserZone()), t('proposal.announce.accepted', { name: p.name }))}>{t('proposal.create')}</button>
+          <button type="button" className="cx-btn cx-btn--primary" disabled={!!busy} onClick={() => act('create', async () => {
+            const made = await chatTriggersApi.confirm(p.id, browserZone())
+            setSecret(made?.secret || '')
+          }, t(p.kind === 'event' ? 'event.announceAccepted' : 'proposal.announce.accepted', { name: p.name }))}>{t('proposal.create')}</button>
           <button type="button" className="cx-btn" disabled={!!busy} onClick={() => setEdit({ name: p.name, when: p.kind === 'file' ? p.folder || '' : p.schedule || '' })}>{t('proposal.edit')}</button>
           <button type="button" className="cx-btn" disabled={!!busy} onClick={() => act('dismiss', () => chatTriggersApi.dismiss(p.id), t('proposal.announce.declined', { name: p.name }))}>{t('proposal.dismiss')}</button>
         </span>

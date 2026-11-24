@@ -16,7 +16,7 @@ test.describe('Usage', () => {
     await page.goto('/app/usage')
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Usage, last 24 hours')
     await expect(page.getByRole('radio', { name: 'Model' })).toHaveAttribute('aria-checked', 'true')
-    await expect(page.locator('.tf-source')).toContainText('does not record status, endpoint or node')
+    await expect(page.locator('.page-header__supporting')).toContainText('does not record status, endpoint or node')
     await expect(page.getByTestId('usage-chart')).toBeVisible()
     const rows = page.getByTestId('usage-table').locator('tbody tr[data-row]')
     await expect(rows).toHaveCount(6)
@@ -48,7 +48,9 @@ test.describe('Usage', () => {
     await page.getByLabel('Search').fill('zzz')
     await expect(page.getByTestId('usage-empty')).toContainText('Nothing matches')
     await page.getByLabel('Search').fill('')
-    await page.locator('select.dk-select').selectOption('bge-m3')
+    await page.getByTestId('admin-filters-button').click()
+    await page.getByTestId('admin-filters-panel').getByRole('combobox').selectOption('bge-m3')
+    await page.keyboard.press('Escape')
     await expect(page.getByTestId('usage-summary')).toBeVisible()
     await expect(rows).toHaveCount(3)
   })
@@ -103,10 +105,17 @@ test.describe('Usage', () => {
   })
 
   test('shows a loading state, then the rows', async ({ page }) => {
-    await mockTraffic(page, { delayMs: 700 })
+    // The answers wait for the test, so the loading state stays up for as long
+    // as the assertion needs, however slow the machine is.
+    let release
+    const hold = new Promise(resolve => { release = resolve })
+    await mockTraffic(page, { hold })
     await page.goto('/app/usage')
     await expect(page.getByTestId('usage-loading')).toBeVisible()
+    await expect(page.getByTestId('usage-table')).toHaveCount(0)
+    release()
     await expect(page.getByTestId('usage-table')).toBeVisible()
+    await expect(page.getByTestId('usage-loading')).toHaveCount(0)
   })
 })
 
@@ -134,7 +143,7 @@ test.describe('Usage with auth on', () => {
     await page.route('**/api/auth/usage/sources?*', route => route.fulfill({ json: sourcesPayload('day') }))
     await page.route('**/api/auth/admin/usage*', route => { hits.push('admin'); return route.fulfill({ status: 403, json: {} }) })
     await page.goto('/app/usage')
-    await expect(page.locator('.tf-source')).toContainText('Your own requests and tokens')
+    await expect(page.locator('.page-header__supporting')).toContainText('Your own requests and tokens')
     await expect(page.getByRole('radio', { name: 'User' })).toHaveCount(0)
     await expect(page.getByRole('radio', { name: 'API key' })).toBeVisible()
     await expect(page.getByTestId('usage-table')).toBeVisible()

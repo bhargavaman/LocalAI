@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { ADMIN, MEMBER, HEADLESS, app, installedAddon, release, sessionFor, mockAddons, ok, fail } from './addons-fixtures.js'
+import { ADMIN, MEMBER, HEADLESS, app, installedAddon, release, sessionFor, mockAddons, stubInstallQueue, ok, fail } from './addons-fixtures.js'
 
 // The add-ons page (src/pages/Addons.jsx): My add-ons for everyone, Find add-ons,
 // Installed and Sources for administrators. The server is the authority for
@@ -23,8 +23,10 @@ async function shoot(page, name) {
 }
 
 const tab = (page, name) => page.getByRole('tab', { name })
-// The start, stop and tool controls of an add-on live in the detail sheet of the drawer.
-const detail = (page, id) => page.getByTestId('addon-detail').locator(`[data-app="${id}"]`)
+// The start, stop and tool controls of an add-on live in its detail pane, the state
+// chip in the header of the pane. Both the title and the body of the pane carry
+// data-app, so the pane is found by the add-on it shows, not by that attribute.
+const detail = (page, id) => page.getByTestId('addon-detail').filter({ has: page.locator(`[data-app="${id}"]`) })
 
 test.describe('Add-ons: apps', () => {
   test('apps: lists enabled apps with state chips, the icon route and Open only for a main page', async ({ page }) => {
@@ -243,14 +245,14 @@ test.describe('Add-ons: apps', () => {
     await page.clock.runFor(200)
     await expect.poll(() => state.log.appsList).toBe(2)
     // The failure doubles the wait, and the old list stays visible and flagged.
-    await expect(page.getByText('may be out of date')).toBeVisible()
+    await expect(page.getByTestId('addons-stale')).toBeVisible()
     await page.clock.runFor(9_000)
     expect(state.log.appsList).toBe(2)
     await page.clock.runFor(1_500)
     await expect.poll(() => state.log.appsList).toBe(3)
     await page.clock.runFor(21_000)
     await expect.poll(() => state.log.appsList).toBe(4)
-    await expect(page.getByText('may be out of date')).toHaveCount(0)
+    await expect(page.getByTestId('addons-stale')).toHaveCount(0)
     // Leave for a route without a mounted add-on consumer (Home keeps commands current).
     await page.evaluate(() => { window.history.pushState({}, '', '/app/polling-left'); window.dispatchEvent(new PopStateEvent('popstate')) })
     // The route loads lazily and the page clock is paused: let the transition
@@ -414,65 +416,52 @@ test.describe('Add-ons: browse', () => {
     await shoot(page, 'browse')
   })
 
-  test('browse: Install and turn on asks once, installs and turns the add-on on', async ({ page }) => {
+  test('browse: a failing library is named in a notice and does not hide the others', async ({ page }) => {
+    await signIn(page, ADMIN)
+    const good = { id: 'main', name: 'Main', url: 'https://catalog.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt: new Date().toISOString(), lastSuccess: new Date().toISOString(), count: 2, failed: false } }
+    const broken = { id: 'team', name: 'Team', url: 'https://team.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt: new Date().toISOString(), lastSuccess: '0001-01-01T00:00:00Z', count: 0, failed: true, error: 'catalog refresh failed: the library answered HTTP 404' } }
+    const state = await mockAddons(page, { sources: [good, broken], releases: [release('notes'), release('tables'), release('mail', { sourceId: 'team' })] })
+    await page.goto('/app/addons?tab=browse')
+    // The entries of the library that loaded are listed.
+    await expect(page.locator('.cat-item')).toHaveCount(2)
+    await expect(page.locator('.cat-item', { hasText: 'Mail' })).toHaveCount(0)
+    const notice = page.getByTestId('failed-libraries')
+    await expect(notice).toContainText('A library could not be read.')
+    await expect(notice.locator('[data-source="team"]')).toContainText('Team: catalog refresh failed: the library answered HTTP 404')
+    await shoot(page, 'browse-failed-library')
+    // A request that names the failing library answers with its error.
+    await page.getByRole('group', { name: 'Libraries' }).getByRole('button', { name: 'Team' }).click()
+    await expect(page.getByRole('alert')).toBeVisible()
+    await expect(page.getByTestId('failed-libraries')).toHaveCount(0)
+    expect(state.log.dispatch.filter(d => d.action === 'catalog-search').at(-1).arguments.sourceId).toBe('team')
+  })
+
+  test('browse: Install asks once and queues the add-on, which is installed but not turned on', async ({ page }) => {
     await signIn(page, ADMIN)
     const state = await mockAddons(page, { installed: [], releases: [release('tables', { name: 'Tables', description: 'Spreadsheets.', ui: { mainPage: '/app/addons/tables/home' } })] })
+    const sent = await stubInstallQueue(page, state)
     await page.goto('/app/addons?tab=browse')
     const row = page.locator('.cat-item', { hasText: 'Tables' })
     await expect(row).toContainText('Spreadsheets.')
     await expect(row.getByTestId('entry-adds')).toHaveText('Adds a page')
-    // One button on the entry, and Details is folded into it.
+    // One button on the entry (and a checkbox for a batch), and Details is folded into it.
     await expect(row.getByRole('button')).toHaveCount(1)
     await row.getByRole('button', { name: /^Install / }).click()
     const dialog = page.getByRole('alertdialog')
-    await expect(dialog).toContainText('Install and turn on Tables?')
+    await expect(dialog).toContainText('Install Tables?')
     await expect(dialog).toContainText('sha256:aaaaaaaaaaaa')
-    expect(state.log.dispatch.filter(d => d.action === 'install')).toHaveLength(0)
-    await dialog.getByRole('button', { name: 'Install and turn on' }).click()
-    // The same dialog stays open and shows the two steps, then the result.
-    await expect(dialog.getByTestId('flow-steps').getByRole('listitem')).toHaveCount(2)
-    await expect(dialog).toContainText('Tables is installed and on.')
-    await expect(dialog.getByTestId('flow-steps').locator('[data-step="install"]')).toHaveAttribute('data-state', 'done')
-    await expect(dialog.getByTestId('flow-steps').locator('[data-step="turn-on"]')).toHaveAttribute('data-state', 'done')
-    await dialog.getByRole('button', { name: 'Close' }).click()
+    expect(sent).toHaveLength(0)
+    await dialog.getByRole('button', { name: 'Add to queue' }).click()
     await expect(page.getByRole('alertdialog')).toHaveCount(0)
-    await expect(row.getByText('Tables is installed and on.')).toBeVisible()
-    const install = state.log.dispatch.filter(d => d.action === 'install')
-    expect(install).toHaveLength(1)
-    expect(install[0].operationId).toMatch(UUID)
-    expect(install[0].arguments).toEqual({ sourceId: 'main', version: '1.0.0' })
-    const enable = state.log.dispatch.filter(d => d.action === 'enable')
-    expect(enable).toHaveLength(1)
-    expect(enable[0].operationId).toMatch(UUID)
-    expect(enable[0].operationId).not.toBe(install[0].operationId)
-    expect(state.installed.find(a => a.id === 'tables').enabled).toBe(true)
-  })
-
-  test('browse: a failed turn on keeps the install, says why in the dialog and can be tried again', async ({ page }) => {
-    await signIn(page, ADMIN)
-    let attempts = 0
-    const state = await mockAddons(page, {
-      installed: [],
-      releases: [release('tables', { name: 'Tables' })],
-      dispatch: (body) => {
-        if (body.action !== 'enable') return null
-        attempts += 1
-        return attempts === 1 ? fail(403, 'addon_error') : null
-      },
-    })
-    await page.goto('/app/addons?tab=browse')
-    const row = page.locator('.cat-item', { hasText: 'Tables' })
-    await row.getByRole('button', { name: /^Install / }).click()
-    const dialog = page.getByRole('alertdialog')
-    await dialog.getByRole('button', { name: 'Install and turn on' }).click()
-    await expect(dialog.getByTestId('install-dialog-failed')).toContainText('Tables is installed but did not turn on.')
-    await expect(dialog.getByTestId('flow-steps').locator('[data-step="install"]')).toHaveAttribute('data-state', 'done')
-    await expect(dialog.getByTestId('flow-steps').locator('[data-step="turn-on"]')).toHaveAttribute('data-state', 'failed')
-    // Trying again turns it on; it does not install a second time.
-    await dialog.getByRole('button', { name: 'Try again' }).click()
-    await expect(dialog).toContainText('Tables is installed and on.')
-    expect(state.log.dispatch.filter(d => d.action === 'install')).toHaveLength(1)
-    expect(state.log.dispatch.filter(d => d.action === 'enable')).toHaveLength(2)
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].confirm).toBe('queue')
+    expect(sent[0].body.items).toHaveLength(1)
+    expect(sent[0].body.items[0]).toMatchObject({ addonId: 'tables', sourceId: 'main', version: '1.0.0' })
+    expect(sent[0].body.items[0].operationId).toMatch(UUID)
+    // The queue installs it in the background and never turns it on; the
+    // lifecycle routes of the old flow are not used.
+    expect(state.log.dispatch.filter(d => d.action === 'install' || d.action === 'enable')).toHaveLength(0)
+    expect(state.installed.find(a => a.id === 'tables').enabled).toBe(false)
   })
 
   test('browse: an add-on that is installed but off offers Turn on and nothing else', async ({ page }) => {
@@ -533,14 +522,14 @@ test.describe('Add-ons: installed', () => {
     await expect(page.locator('[data-testid="addon-tile"][data-app="notes"]').getByTestId('update-chip')).toHaveText('Update 1.3.0')
     await expect(page.locator('[data-testid="addon-tile"][data-app="plain"]').getByTestId('update-chip')).toHaveCount(0)
     await page.goto('/app/addons?manage=notes')
-    await page.getByTestId('addon-manage').getByRole('button', { name: 'Upgrade' }).click()
+    await page.getByTestId('addon-manage').getByTestId('update-upgrade').click()
     // The confirmation names the version and digest the owner resolved and
     // nothing is sent until it is confirmed.
     const dialog = page.getByTestId('upgrade-confirm')
     await expect(dialog).toContainText('1.3.0')
     await expect(dialog).toContainText('sha256:bbbbbbbbbbbb')
     expect(state.log.upgrade).toHaveLength(0)
-    await page.getByRole('alertdialog').getByRole('button', { name: 'Upgrade' }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Update' }).click()
     await expect.poll(() => state.log.upgrade.length).toBe(1)
     const sent = state.log.upgrade[0]
     expect(sent.id).toBe('notes')
@@ -549,11 +538,11 @@ test.describe('Add-ons: installed', () => {
     expect(sent.operationId).toMatch(UUID)
     expect(sent.confirm).toBe(sent.operationId)
     expect(state.log.dispatch.filter(d => d.action === 'upgrade')).toHaveLength(0)
-    // An add-on without the field says the status is unknown and has no Upgrade.
+    // An add-on without the field says the status is unknown and has no Update button.
     await page.goto('/app/addons?manage=plain')
     const sheet = page.getByTestId('addon-manage')
     await expect(sheet.getByText('The update status is not known')).toBeVisible()
-    await expect(sheet.getByRole('button', { name: 'Upgrade' })).toHaveCount(0)
+    await expect(sheet.getByTestId('update-upgrade')).toHaveCount(0)
   })
 
   test('installed: removing warns that data is kept before anything is submitted', async ({ page }) => {
@@ -669,6 +658,24 @@ test.describe('Add-ons: libraries', () => {
     expect(state.installed).toHaveLength(1)
   })
 
+  test('libraries: a failed library shows its error and the last good refresh on its own row', async ({ page }) => {
+    await signIn(page, ADMIN)
+    const checkedAt = new Date().toISOString()
+    const stale = { id: 'team', name: 'Team', url: 'https://team.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt, lastSuccess: '2026-11-01T10:00:00Z', count: 0, failed: true, error: 'catalog refresh failed: the library answered HTTP 502' } }
+    const never = { id: 'broken', name: 'Broken', url: 'https://broken.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt, lastSuccess: '0001-01-01T00:00:00Z', count: 0, failed: true, error: 'catalog refresh failed: the library answered HTTP 404' } }
+    const fine = { id: 'main', name: 'Main', url: 'https://catalog.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt, lastSuccess: checkedAt, count: 2, failed: false } }
+    await mockAddons(page, { sources: [fine, stale, never] })
+    await page.goto('/app/addons?tab=libraries')
+    await expect(page.locator('[data-source="team"]').getByTestId('source-error')).toHaveText('catalog refresh failed: the library answered HTTP 502')
+    await expect(page.locator('[data-source="team"]').getByTestId('source-last-good')).toContainText('Last loaded')
+    await expect(page.locator('[data-source="broken"]').getByTestId('source-error')).toHaveText('catalog refresh failed: the library answered HTTP 404')
+    await expect(page.locator('[data-source="broken"]').getByTestId('source-last-good')).toHaveText('Never loaded')
+    // The library that loaded shows no error, and the others stay usable.
+    await expect(page.locator('[data-source="main"]').getByTestId('source-error')).toHaveCount(0)
+    await expect(page.locator('[data-source="main"]').getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    await shoot(page, 'libraries-failed')
+  })
+
   test('libraries: a refresh reports its result and a failed fetch is shown as failed', async ({ page }) => {
     await signIn(page, ADMIN)
     const failing = { id: 'broken', name: 'Broken', url: 'https://broken.example/releases.json', enabled: true, policy: { requireSignature: false }, refresh: { checkedAt: new Date().toISOString(), lastSuccess: '0001-01-01T00:00:00Z', count: 0, failed: true } }
@@ -737,7 +744,7 @@ test.describe('Add-ons: access, keyboard, layout and language', () => {
     await page.addInitScript(() => localStorage.setItem('localai-theme', 'light'))
     await page.goto('/app/addons')
     await page.goto('/app/addons?detail=notes')
-    const read = () => page.locator('.ad-pane').first().evaluate(el => {
+    const read = () => page.getByTestId('addon-detail').evaluate(el => {
       const css = getComputedStyle(el)
       const chip = getComputedStyle(el.querySelector('.ad-state .ui-chip'))
       return { card: css.backgroundColor, chip: chip.color, chipBg: chip.backgroundColor }
@@ -798,5 +805,80 @@ test.describe('Add-ons: shared catalog components keep the backends gallery', ()
     // The page draws the shared empty state of the kit, in its no-results form.
     await expect(page.locator('.ui-empty.ui-empty--no-results')).toBeVisible()
     await expect(page.locator('.ui-empty .ui-empty__title')).toHaveText('No backends found')
+  })
+})
+
+test.describe('Add-ons: translated titles and descriptions', () => {
+  const translated = {
+    ui: {
+      title: 'Tables', description: 'Databases of tables.', mainPage: 'databases',
+      titles: { it: 'Tabelle', 'pt-BR': 'Tabelas' }, descriptions: { it: 'Database di tabelle tue o condivise.' },
+    },
+  }
+  const library = () => [
+    release('tables', { name: 'Tables', description: 'Databases of tables.', ...translated }),
+    release('voice', { name: 'Voice', description: 'Speak with voices.', ui: { title: 'Voice', description: 'Speak with voices.', titles: { it: 'Voce' } } }),
+    release('notes', { name: 'Notes', description: 'Keep notes.' }),
+  ]
+  const language = (code) => (page) => page.addInitScript(c => localStorage.setItem('localai-language', c), code)
+
+  test('library: the cards show the title and description in the user language, and English per field where a language has none', async ({ page }) => {
+    await language('it')(page)
+    await signIn(page, ADMIN)
+    await mockAddons(page, { installed: [], releases: library() })
+    await page.goto('/app/addons?tab=browse')
+    const tables = page.locator('[data-addon="tables"]')
+    await expect(tables.locator('.ad-entry__title')).toHaveText('Tabelle')
+    await expect(tables).toContainText('Database di tabelle tue o condivise.')
+    const voice = page.locator('[data-addon="voice"]')
+    await expect(voice.locator('.ad-entry__title')).toHaveText('Voce')
+    await expect(voice).toContainText('Speak with voices.')
+    const notes = page.locator('[data-addon="notes"]')
+    await expect(notes.locator('.ad-entry__title')).toHaveText('Notes')
+    await expect(notes).toContainText('Keep notes.')
+    await shoot(page, 'translations-library-it')
+  })
+
+  test('library: English and an unlisted language keep the English text', async ({ page }) => {
+    await language('de')(page)
+    await signIn(page, ADMIN)
+    await mockAddons(page, { installed: [], releases: library() })
+    await page.goto('/app/addons?tab=browse')
+    await expect(page.locator('[data-addon="tables"] .ad-entry__title')).toHaveText('Tables')
+    await expect(page.locator('[data-addon="tables"]')).toContainText('Databases of tables.')
+  })
+
+  test('library: the install dialog names the add-on in the user language', async ({ page }) => {
+    await language('it')(page)
+    await signIn(page, ADMIN)
+    await mockAddons(page, { installed: [], releases: library() })
+    await page.goto('/app/addons?tab=browse')
+    await page.locator('[data-addon="tables"]').getByRole('button').first().click()
+    const dialog = page.getByRole('alertdialog')
+    await expect(dialog).toContainText('Tabelle')
+    await expect(dialog).not.toContainText('Tables?')
+  })
+
+  test('installed list: tiles show the translated name and a search finds it by the translated or the English name', async ({ page }) => {
+    await language('it')(page)
+    await signIn(page, MEMBER, { addons: true })
+    await mockAddons(page, { apps: [
+      app({ id: 'tables', name: 'tables', title: 'Tables', titles: { en: 'Tables', it: 'Tabelle' }, description: 'Databases.', descriptions: { it: 'Database.' } }),
+      app({ id: 'voice', name: 'voice', title: 'Voice', titles: { it: 'Voce' } }),
+    ] })
+    await page.goto('/app/addons')
+    await expect(page.locator('[data-app="tables"] .ad-tile__title')).toHaveText('Tabelle')
+    await expect(page.locator('[data-app="voice"] .ad-tile__title')).toHaveText('Voce')
+    const search = page.getByRole('searchbox').first()
+    for (const [text, shown, hidden] of [['tabelle', 'tables', 'voice'], ['TABLES', 'tables', 'voice'], ['voce', 'voice', 'tables'], ['voice', 'voice', 'tables']]) {
+      await search.fill(text)
+      await expect(page.locator(`[data-app="${shown}"]`)).toHaveCount(1)
+      await expect(page.locator(`[data-app="${hidden}"]`)).toHaveCount(0)
+    }
+    await search.fill('')
+    await page.goto('/app/addons?detail=tables')
+    await expect(page.getByTestId('addon-detail')).toContainText('Tabelle')
+    await expect(page.getByTestId('addon-detail')).toContainText('Database.')
+    await shoot(page, 'translations-detail-it')
   })
 })

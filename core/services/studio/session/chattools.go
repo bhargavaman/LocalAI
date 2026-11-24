@@ -31,7 +31,7 @@ type TurnTools struct {
 	// Prompt is a block added to the system prompt for this turn, for example
 	// an index of skills. It goes after the product's SystemPrompt. A changed
 	// Prompt restarts the harness from its saved state, as a changed set of
-	// tools does; an unchanged one does not. It is cut at 32 KiB on a line
+	// tools does; an unchanged one does not. It is cut at 48 KiB on a line
 	// boundary. When ChatTools fails, the turn has no Prompt.
 	Prompt string
 	// RefreshKey is opaque. The sandbox of a chat is refreshed before a turn
@@ -42,18 +42,84 @@ type TurnTools struct {
 	// returned an empty key keeps the previous key. The first turn of a chat
 	// that was opened again never refreshes.
 	RefreshKey string
-	// WorkFolder asks the chat to name its work folder in the prompt
-	// (workfiles.Prompt): the chat takes the name of its chat folder for it
-	// when it has none yet. The folders are made when something is saved
+	// WorkFolder asks the chat to steer the model to its work folder: the
+	// prompt gets workfiles.Prompt, the same for every chat, and the note of
+	// each turn names the folder (workfiles.Note); a scoped chat's prompt gets
+	// workfiles.ScopedPrompt. The chat takes the name of its chat folder for
+	// it when it has none yet. The folders are made when something is saved
 	// there, so a chat that saves nothing leaves no folder behind.
 	WorkFolder bool
+	// Context is text for this turn only. The model reads it in front of the
+	// user's message; it is not stored as a user message and it is not part of
+	// Prompt, so a text that changes with each message does not restart the
+	// harness. The product wraps it as data it does not trust. It is cut at
+	// MaxTurnContext bytes on a line boundary.
+	Context string
+	// Files lists the files of the conversation. The model reads it in front
+	// of the user's message of a turn when it differs from the list it read
+	// last, and not in the prompt: the list changes at most turns that write a
+	// file, and a changed prompt would make a backend with a prompt cache read
+	// the whole conversation again.
+	Files string
+}
+
+// noFilesNow tells the model that the files it read about are gone.
+const noFilesNow = "There are no files in this conversation now."
+
+// FilesOpen and FilesClose bound the list of files in front of a message.
+const (
+	FilesOpen  = "<conversation-files>\n"
+	FilesClose = "\n</conversation-files>"
+)
+
+// forgetFiles makes the next turn give the list of files again: the model's
+// context no longer holds the one it read.
+func (c *Chat) forgetFiles() {
+	c.hostMu.Lock()
+	c.filesSeen = ""
+	c.hostMu.Unlock()
+}
+
+// MaxTurnContext is how much of TurnTools.Context the model gets.
+const MaxTurnContext = 8 << 10
+
+type turnMessageKey struct{}
+
+// TurnMessage is the message the turn answers, for the ChatTools hook of that
+// turn. It is empty outside a turn. A hook that fetches text for the turn
+// (TurnTools.Context) reads it here.
+func TurnMessage(ctx context.Context) string {
+	s, _ := ctx.Value(turnMessageKey{}).(string)
+	return s
+}
+
+// WithTurnMessage returns a context that carries the message of a turn, as the
+// session gives it to the ChatTools hook. The session sets it itself; a spec
+// of a hook sets it to call the hook as a turn would.
+func WithTurnMessage(ctx context.Context, message string) context.Context {
+	return context.WithValue(ctx, turnMessageKey{}, message)
+}
+
+// capContext cuts a turn context at MaxTurnContext on a line boundary.
+func capContext(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= MaxTurnContext {
+		return s
+	}
+	cut := s[:MaxTurnContext]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(cut, ""))
 }
 
 const (
 	// maxNoteLen is how much of a Note the model gets.
 	maxNoteLen = 400
-	// maxPromptLen is how much of a Prompt the model gets.
-	maxPromptLen = 32 << 10
+	// maxPromptLen is how much of a Prompt the model gets. The full admin
+	// prompt of an assistant that has no compact one carries every recipe
+	// inline and is over 32 KiB, so the limit leaves room above it.
+	maxPromptLen = 48 << 10
 	// noteChatToolsFailed is the note when the product's hook failed.
 	noteChatToolsFailed = "connector tools are unavailable this turn."
 )
@@ -87,19 +153,20 @@ func capPrompt(s string, log *slog.Logger, chat string) string {
 }
 
 // turnPrompt is the prompt block of tt, capped, with the block that names the
-// work folder last when tt asks for it. reserve takes a folder name for a
-// chat that has none; without it such a chat gets no block (opening a chat
-// must not name its folder: only a turn does).
-func (c *Chat) turnPrompt(ctx context.Context, tt TurnTools, reserve bool) string {
+// work folder last when tt asks for it, and the line of the note that names
+// the folder. reserve takes a folder name for a chat that has none; without
+// it such a chat gets no block (opening a chat must not name its folder: only
+// a turn does).
+func (c *Chat) turnPrompt(ctx context.Context, tt TurnTools, reserve bool) (prompt, workNote string) {
 	if !tt.WorkFolder {
-		return capPrompt(tt.Prompt, c.m.log, c.id)
+		return capPrompt(tt.Prompt, c.m.log, c.id), ""
 	}
-	block := c.workFolderBlock(ctx, reserve)
+	block, workNote := c.workFolderBlock(ctx, reserve)
 	if block == "" {
-		return capPrompt(tt.Prompt, c.m.log, c.id)
+		return capPrompt(tt.Prompt, c.m.log, c.id), ""
 	}
 	// The block goes last and is never the part that is cut.
-	return strings.TrimSpace(capPromptAt(tt.Prompt, maxPromptLen-len(block)-2, c.m.log, c.id) + "\n\n" + block)
+	return strings.TrimSpace(capPromptAt(tt.Prompt, maxPromptLen-len(block)-2, c.m.log, c.id) + "\n\n" + block), workNote
 }
 
 // capPromptAt is capPrompt with a limit of n bytes.
@@ -195,7 +262,7 @@ func (c *Chat) hostWrappers() []Tool {
 			slot := &cardSlot{}
 			res, err := cur.Run(context.WithValue(ctx, cardSlotKey{}, slot), args)
 			if err == nil {
-				c.addPendingCard(name, res, slot.get())
+				c.addPendingCard(name, res, slot.get(), slot.name())
 			}
 			return res, err
 		}
@@ -222,7 +289,10 @@ func mandatoryChatToolsError(err error) bool {
 //
 // The turn is already reserved (the chat is running), so nothing else changes
 // the harness. A change that arrives while a turn runs is seen at the next turn.
-func (c *Chat) applyChatTools(ctx context.Context) (note string, refresh bool, policyErr error) {
+func (c *Chat) applyChatTools(ctx context.Context, message string) (note string, refresh bool, policyErr error) {
+	c.hostMu.Lock()
+	c.turnBlock = ""
+	c.hostMu.Unlock()
 	f := c.m.o.ChatTools
 	if f == nil {
 		return "", false, nil
@@ -230,13 +300,26 @@ func (c *Chat) applyChatTools(ctx context.Context) (note string, refresh bool, p
 	c.accMu.RLock()
 	x := c.acc
 	c.accMu.RUnlock()
-	tt, err := callChatTools(ctx, f, x, c.m.log)
+	tt, err := callChatTools(context.WithValue(ctx, turnMessageKey{}, message), f, x, c.m.log)
 	if ctx.Err() != nil {
 		// The turn was stopped while the hook ran. Its result is partial: keep
 		// the state of the last turn, so that the next turn does not see a change.
 		return "", false, nil
 	}
 	note = oneLine(tt.Note)
+	if err == nil {
+		c.hostMu.Lock()
+		c.turnBlock = capContext(tt.Context)
+		if tt.Files != c.filesSeen {
+			files := tt.Files
+			if files == "" {
+				files = noFilesNow
+			}
+			c.turnBlock = strings.TrimSpace(FilesOpen + files + FilesClose + "\n\n" + c.turnBlock)
+			c.filesSeen = tt.Files
+		}
+		c.hostMu.Unlock()
+	}
 	var tools []Tool
 	prompt := ""
 	if err != nil {
@@ -247,14 +330,21 @@ func (c *Chat) applyChatTools(ctx context.Context) (note string, refresh bool, p
 		note = noteChatToolsFailed
 	} else {
 		tools = acceptHostTools(tt.Tools, c.m.log, c.id, c.m.o.Sandbox != nil)
-		prompt = c.turnPrompt(ctx, tt, true)
+		var workNote string
+		prompt, workNote = c.turnPrompt(ctx, tt, true)
+		if workNote != "" {
+			// The work folder is named here, not in the prompt, so that the
+			// prompt of every chat is the same. It goes first and is not
+			// counted against the product's note, so no cut loses it.
+			note = strings.TrimSpace(workNote + " " + note)
+		}
 	}
 	fp := fingerprint(tools, prompt)
 	cur := make(map[string]Tool, len(tools))
 	defs := make([]Tool, len(tools))
 	for i, t := range tools {
 		cur[t.Name] = t
-		defs[i] = Tool{Name: t.Name, Description: t.Description, Schema: t.Schema}
+		defs[i] = Tool{Name: t.Name, Description: t.Description, Schema: t.Schema, ReadOnly: t.ReadOnly}
 	}
 	c.hostMu.Lock()
 	prev := c.host.fp
@@ -311,9 +401,14 @@ type cardSlot struct {
 	card  *ToolCard
 	files []ToolFile
 	more  int
+	as    string
 }
 
 func (s *cardSlot) set(c ToolCard) { s.mu.Lock(); s.card = &c; s.mu.Unlock() }
+
+func (s *cardSlot) setAs(name string) { s.mu.Lock(); s.as = name; s.mu.Unlock() }
+
+func (s *cardSlot) name() string { s.mu.Lock(); defer s.mu.Unlock(); return s.as }
 
 func (s *cardSlot) setFiles(f []ToolFile) {
 	s.mu.Lock()
@@ -346,12 +441,39 @@ func (s *cardSlot) get() *ToolCard {
 	return &c
 }
 
+// SetToolAs is called by a host tool inside Run that runs another tool on its
+// behalf, such as a tool search bridge. The tool entry of the call, and its
+// tool_end event, then carry the name of the tool that ran instead of the name
+// of the bridge, so the interface shows the call as the typed call it stands
+// for. The name is 1 to 128 characters of [A-Za-z0-9_-]; any other is ignored.
+// It is used only when Run returns no error.
+func SetToolAs(ctx context.Context, name string) {
+	if s, ok := ctx.Value(cardSlotKey{}).(*cardSlot); ok && validToolAs(name) {
+		s.setAs(name)
+	}
+}
+
+func validToolAs(name string) bool {
+	if n := len(name); n < 1 || n > 128 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // SetToolCard is called by a host tool inside Run. It records the card for the
 // call in progress: the chat puts it on the tool_end event and on the tool
 // entry of that call. It does nothing outside a host tool's Run, and the card
 // is used only when Run returns no error. A card whose Kind is not 1 to 32
 // characters of [a-z0-9_], or whose ID is not 1 to 128 printable ASCII
-// characters, is dropped and logged. The card is for the product's interface:
+// characters, is dropped and logged. A files_change card is the exception: its
+// ID ends in a file path, so it may hold any UTF-8 text without control
+// characters, up to 1048 bytes. The card is for the product's interface:
 // the model never sees it and the tool text does not change.
 func SetToolCard(ctx context.Context, c ToolCard) {
 	if s, ok := ctx.Value(cardSlotKey{}).(*cardSlot); ok {
@@ -380,6 +502,7 @@ const maxPendingCards = 64
 type pendingCard struct {
 	name, output string
 	card         *ToolCard
+	as           string
 }
 
 // validCard tells whether c is within the documented limits.
@@ -392,11 +515,35 @@ func validCard(c ToolCard) bool {
 			return false
 		}
 	}
+	if c.Kind == ChangeCardKind {
+		return validChangeID(c.ID)
+	}
 	if n := len(c.ID); n < 1 || n > 128 {
 		return false
 	}
 	for i := 0; i < len(c.ID); i++ {
 		if b := c.ID[i]; b < 0x20 || b > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// maxChangeID bounds the ID of a files_change card: a revision, a colon and a
+// path of at most maxToolFilePath bytes.
+const maxChangeID = 24 + maxToolFilePath
+
+// validChangeID checks the ID of a files_change card, "<rev>:<path>". It ends
+// in the path of a file, which may hold any letter (an accent, a Chinese
+// character) and be longer than the 128 ASCII characters other cards allow;
+// with that limit such a change lost its Undo note. The ID stays valid UTF-8
+// with no control character.
+func validChangeID(id string) bool {
+	if len(id) < 1 || len(id) > maxChangeID || !utf8.ValidString(id) {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
 			return false
 		}
 	}
@@ -501,7 +648,7 @@ func bounded(raw json.RawMessage, max int) json.RawMessage {
 // addPendingCard records a successful host tool call until the harness reports
 // its end, with the card it set (nil when none). It logs a bad card without its
 // contents and keeps the call with no card.
-func (c *Chat) addPendingCard(name, output string, card *ToolCard) {
+func (c *Chat) addPendingCard(name, output string, card *ToolCard, as string) {
 	var keep *ToolCard
 	if card != nil {
 		if cp, ok := cleanCard(*card); ok {
@@ -515,13 +662,13 @@ func (c *Chat) addPendingCard(name, output string, card *ToolCard) {
 	if len(c.cards) >= maxPendingCards {
 		c.cards = append(c.cards[:0], c.cards[1:]...)
 	}
-	c.cards = append(c.cards, pendingCard{name: name, output: CapText(output, maxOutput), card: keep})
+	c.cards = append(c.cards, pendingCard{name: name, output: CapText(output, maxOutput), card: keep, as: as})
 }
 
 // takeCard removes the pending call of a tool_end and returns its card (nil
 // when the call set none): the first call whose name and capped output match,
 // else the oldest call of that name.
-func (c *Chat) takeCard(name, output string) *ToolCard {
+func (c *Chat) takeCard(name, output string) (*ToolCard, string) {
 	c.cardMu.Lock()
 	defer c.cardMu.Unlock()
 	pick := -1
@@ -538,11 +685,11 @@ func (c *Chat) takeCard(name, output string) *ToolCard {
 		}
 	}
 	if pick < 0 {
-		return nil
+		return nil, ""
 	}
-	card := c.cards[pick].card
+	card, as := c.cards[pick].card, c.cards[pick].as
 	c.cards = append(c.cards[:pick], c.cards[pick+1:]...)
-	return card
+	return card, as
 }
 
 // clearCards forgets the pending cards, at the start and the end of a turn.
@@ -576,12 +723,12 @@ func (c *Chat) primeChatTools(ctx context.Context) error {
 		return nil
 	}
 	tools := acceptHostTools(tt.Tools, c.m.log, c.id, c.m.o.Sandbox != nil)
-	prompt := c.turnPrompt(ctx, tt, false)
+	prompt, _ := c.turnPrompt(ctx, tt, false)
 	cur := make(map[string]Tool, len(tools))
 	defs := make([]Tool, len(tools))
 	for i, t := range tools {
 		cur[t.Name] = t
-		defs[i] = Tool{Name: t.Name, Description: t.Description, Schema: t.Schema}
+		defs[i] = Tool{Name: t.Name, Description: t.Description, Schema: t.Schema, ReadOnly: t.ReadOnly}
 	}
 	c.hostMu.Lock()
 	c.host.cur, c.host.defs, c.host.prompt, c.host.fp = cur, defs, prompt, fingerprint(tools, prompt)

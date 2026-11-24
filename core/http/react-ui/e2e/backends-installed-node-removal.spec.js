@@ -16,7 +16,6 @@ async function setup(page, options = {}) {
   await page.route('**/api/backends?*', route => state.failRefresh
     ? route.fulfill({ status: 500, json: { error: 'catalog unavailable' } })
     : route.fulfill({ json: { backends: [BUILD, SIBLING].map(name => ({ id: name, name, installed: true, isAlias: true, isDevelopment: name === BUILD, nodes: ids.map(id => ({ node_id: id, node_name: id })) })) } }))
-  await page.route('**/api/backends/upgrades', route => route.fulfill({ json: {} }))
   await page.route('**/backends', async route => {
     state.installedCalls++
     if (state.refreshWait && state.deletes.length) await state.refreshWait
@@ -50,7 +49,7 @@ async function open(page, extra = '') {
   await expect(page.locator(`[data-entity="${BUILD}"]`)).toBeVisible()
   await page.locator(`[data-entity="${BUILD}"]`).click()
 }
-const confirm = page => page.getByRole('alertdialog').locator('button.btn-danger')
+const confirm = page => page.getByRole('alertdialog').locator('button.dk-btn--danger')
 
 test('Installed concrete build has independent lazy per-node actions and scoped deletion', async ({ page }) => {
   const s = await setup(page)
@@ -76,7 +75,7 @@ for (const cancel of ['Cancel', 'Escape', 'backdrop']) test(`cancellation ${canc
   const s = await setup(page); await open(page)
   await remove(page, ids[0]).click()
   if (cancel === 'Escape') await page.keyboard.press('Escape')
-  else if (cancel === 'backdrop') await page.locator('.confirm-dialog-backdrop').click({ position: { x: 2, y: 2 } })
+  else if (cancel === 'backdrop') await page.locator('.dk-veil:has([role="alertdialog"])').click({ position: { x: 2, y: 2 } })
   else await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('alertdialog')).toBeHidden()
   expect(s.deletes).toEqual([])

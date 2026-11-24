@@ -53,6 +53,21 @@ const ChatsMenu = forwardRef(function ChatsMenu({
     returnFocusRef.current = null
   }, [open])
 
+  // The dialog is modal, so Escape closes it wherever the focus is. Opened with
+  // a click or a shortcut, the focus stays on the opener until the list takes
+  // it, and a key pressed in that gap must not be lost. Keys the dialog already
+  // handled (it stops them or prevents the default) are not handled twice.
+  useEffect(() => {
+    if (!open) return undefined
+    const onDocKeyDown = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return
+      e.preventDefault()
+      close()
+    }
+    document.addEventListener('keydown', onDocKeyDown)
+    return () => document.removeEventListener('keydown', onDocKeyDown)
+  }, [open, close])
+
   // Tab stays inside the dialog.
   const onKeyDown = (e) => {
     if (e.key === 'Escape') {
@@ -62,7 +77,7 @@ const ChatsMenu = forwardRef(function ChatsMenu({
       return
     }
     if (e.key !== 'Tab') return
-    const focusable = Array.from(dialogRef.current?.querySelectorAll('button, input, [href]') || []).filter(el => !el.disabled && el.offsetParent !== null)
+    const focusable = Array.from(dialogRef.current?.querySelectorAll('button, input, select, [href]') || []).filter(el => !el.disabled && el.offsetParent !== null)
     if (focusable.length === 0) return
     const first = focusable[0]
     const last = focusable[focusable.length - 1]
@@ -102,7 +117,7 @@ const ChatsMenu = forwardRef(function ChatsMenu({
             <ChatsList
               chats={chats}
               activeChatId={activeChatId}
-              onSelect={(id) => { onSelect?.(id); close() }}
+              onSelect={(id, opts) => { onSelect?.(id, opts); close() }}
               onNew={() => { onNew?.(); close() }}
               onDelete={onDelete}
               onDeleteAll={onDeleteAll ? () => { onDeleteAll(); close() } : undefined}

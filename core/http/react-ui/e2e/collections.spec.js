@@ -1,6 +1,6 @@
 import { test, expect } from './coverage-fixtures.js'
 
-// Memory page (src/pages/Collections.jsx) on the real test server. The memory
+// Knowledge page (src/pages/Collections.jsx) on the real test server. The collections
 // service of the test server never finishes starting, so the list answers 503;
 // the empty-state cases stub an empty list, and one case checks that a 503 is
 // shown as "starting", not as an empty library.
@@ -12,19 +12,43 @@ test.describe('Collections page', () => {
     await page.goto('/app/collections')
   })
 
-  test('a memory service that is still starting is not shown as an empty library', async ({ page }) => {
+  test('a knowledge service that is still starting is not shown as an empty library', async ({ page }) => {
     await page.route(/\/api\/collections(\?.*)?$/, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'collections are starting, please retry shortly' }) }))
     await page.goto('/app/collections')
-    await expect(page.getByTestId('memory-starting')).toContainText('Memory is starting.')
+    await expect(page.getByTestId('memory-starting')).toContainText('Knowledge is starting.')
     await expect(page.getByTestId('memory-empty')).toHaveCount(0)
     await expect(page.getByTestId('memory-starting').getByRole('button', { name: 'Try again' })).toBeVisible()
   })
 
-  test('renders memory with an empty state and create control', async ({ page }) => {
+  test('renders knowledge with an empty state and create control', async ({ page }) => {
     await expect(page).toHaveURL(/\/app\/collections$/)
-    await expect(page.getByRole('heading', { name: 'Memory', exact: true })).toBeVisible()
-    await expect(page.getByText(/Memory holds documents an agent can search/i)).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Knowledge', exact: true })).toBeVisible()
+    await expect(page.getByText(/Knowledge holds documents an agent can search/i)).toBeVisible()
     await expect(page.getByRole('button', { name: 'New collection' }).first()).toBeVisible()
+  })
+
+  test('says how a search finds passages, in plain words', async ({ page }) => {
+    const list = mode => route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ collections: ['docs'], search_mode: mode, embedding_model_installed: true }) })
+    await page.route(/\/api\/collections(\?.*)?$/, list('semantic'))
+    await page.goto('/app/collections')
+    await expect(page.getByTestId('search-mode')).toContainText('Search: semantic.')
+    await expect(page.getByTestId('search-mode')).toContainText('by meaning, not by exact words or codes')
+
+    await page.unroute(/\/api\/collections(\?.*)?$/)
+    await page.route(/\/api\/collections(\?.*)?$/, list('hybrid'))
+    await page.goto('/app/collections')
+    await expect(page.getByTestId('search-mode')).toContainText('Search: hybrid.')
+    await expect(page.getByTestId('search-mode')).toContainText('by meaning and by exact words')
+
+    await page.setViewportSize({ width: 360, height: 740 })
+    await expect(page.getByTestId('search-mode')).toBeVisible()
+    // The page animates in; wait for the layout to settle before measuring.
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0)
+  })
+
+  test('says nothing about the search mode when the server does not report it', async ({ page }) => {
+    await expect(page.getByTestId('memory-empty')).toBeVisible()
+    await expect(page.getByTestId('search-mode')).toHaveCount(0)
   })
 
   test('new-collection name field accepts input', async ({ page }) => {

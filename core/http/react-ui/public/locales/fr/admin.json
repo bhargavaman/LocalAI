@@ -1,36 +1,4 @@
 {
-  "activity": {
-    "hide": "Masquer",
-    "moveToHistory": "Déplacer vers l'historique",
-    "moreCount": "{{count}} de plus",
-    "waitingForInstaller": "en attente de l'installateur",
-    "progressLabel": "Progression pour {{name}}",
-    "toNode": "vers {{node}}",
-    "nodesDone": "{{done}} nœuds sur {{total}} terminés",
-    "kind": {
-      "model": "modèle",
-      "backend": "backend"
-    },
-    "verb": {
-      "installing": "Installation du {{kind}}",
-      "installed": "{{kind}} installé",
-      "removed": "{{kind}} supprimé",
-      "staged": "Modèle préparé",
-      "failed": "Impossible d'installer le {{kind}}",
-      "queued": "En file",
-      "staging": "Préparation du modèle",
-      "removing": "Suppression du {{kind}}",
-      "failedRemoval": "Impossible de supprimer le {{kind}}",
-      "failedStaging": "Impossible de préparer le modèle"
-    },
-    "phase": {
-      "resolving": "Résolution des fichiers",
-      "downloading": "Téléchargement",
-      "verifying": "Vérification",
-      "committing": "Finalisation",
-      "persisting": "Enregistrement de la configuration"
-    }
-  },
   "manage": {
     "title": "Système",
     "subtitle": "Gérer les modèles et backends installés"
@@ -123,6 +91,16 @@
     "network": {
       "title": "Réseau des commandes",
       "where": "{{name}} garde sur sa propre page les paramètres réseau des commandes qu’il exécute."
+    },
+    "autoUpgradeAddons": "Mettre à jour les add-ons automatiquement",
+    "addonUpdates": {
+      "label": "Mises à jour des add-ons",
+      "note": "Le propriétaire des add-ons applique ce réglage. Les nouvelles générations peuvent exécuter du code.",
+      "unavailable": "Réglages du propriétaire indisponibles ou modifiés : {{message}}",
+      "reload": "Recharger et rebaser les modifications",
+      "retry": "Réessayer la même opération",
+      "policy": "Politique du propriétaire · révision {{revision}}",
+      "apply": "Appliquer le réglage de mise à jour"
     }
   },
   "traces": {
@@ -131,7 +109,152 @@
   },
   "users": {
     "title": "Utilisateurs",
-    "subtitle": "Gérer les utilisateurs enregistrés, les rôles et les invitations"
+    "subtitle": "Les personnes qui peuvent se connecter et ce que chacune peut utiliser.",
+    "invite": "Inviter quelqu'un",
+    "summary": {
+      "label": "Utilisateurs en un coup d'œil",
+      "total": "Utilisateurs",
+      "totalUnit": "au total",
+      "active": "Actifs",
+      "activeUnit": "peuvent se connecter",
+      "waiting": "En attente d'approbation",
+      "waitingUnit": "inscriptions",
+      "admins": "Administrateurs",
+      "adminsUnit": "sur {{count}}"
+    },
+    "filters": {
+      "label": "Filtrer les utilisateurs",
+      "all": "Tous",
+      "pending": "En attente",
+      "admins": "Administrateurs",
+      "disabled": "Désactivés",
+      "inactive": "Inactifs depuis 30 j+"
+    },
+    "popover": {
+      "signIn": "Méthode de connexion",
+      "access": "Accès",
+      "any": "Tous",
+      "custom": "Accès personnalisé"
+    },
+    "search": {
+      "label": "Rechercher par nom ou e-mail",
+      "placeholder": "Rechercher un nom ou un e-mail"
+    },
+    "sort": {
+      "label": "Trier",
+      "name": "Nom",
+      "role": "Rôle",
+      "status": "Statut",
+      "provider": "Connexion",
+      "lastActive": "Dernière activité",
+      "keys": "Clés API"
+    },
+    "refresh": "Actualiser les utilisateurs",
+    "loading": "Chargement des utilisateurs",
+    "region": "Utilisateurs",
+    "caption": "Utilisateurs avec rôle, accès, statut, dernière activité et clés API",
+    "columns": {
+      "user": "Utilisateur",
+      "role": "Rôle",
+      "access": "Accès",
+      "status": "Statut",
+      "lastActive": "Dernière activité",
+      "keys": "Clés",
+      "actions": "Actions"
+    },
+    "role": {
+      "admin": "admin",
+      "user": "utilisateur"
+    },
+    "state": {
+      "active": "Actif",
+      "pending": "En attente",
+      "disabled": "Désactivé"
+    },
+    "access": {
+      "all": "Accès complet",
+      "default": "Accès par défaut",
+      "models_one": "{{count}} modèle seulement",
+      "models_other": "{{count}} modèles seulement",
+      "more_one": "{{count}} fonctionnalité en plus",
+      "more_other": "{{count}} fonctionnalités en plus",
+      "fewer_one": "{{count}} fonctionnalité en moins",
+      "fewer_other": "{{count}} fonctionnalités en moins",
+      "limits_one": "{{count}} limite",
+      "limits_other": "{{count}} limites"
+    },
+    "noName": "(sans nom)",
+    "you": "vous",
+    "created": "Créé le {{date}}",
+    "never": "Jamais",
+    "approve": "Approuver l'utilisateur",
+    "approveShort": "Approuver",
+    "enable": "Activer",
+    "disable": "Désactiver l'utilisateur",
+    "disableFor": "Désactiver {{name}}",
+    "editAccessFor": "Modifier l'accès de {{name}}",
+    "actionsFor": "Actions pour {{name}}",
+    "showing": "{{shown}} sur {{total}} affichés.",
+    "cancel": "Annuler",
+    "undo": "Annuler l'action",
+    "dismiss": "Fermer",
+    "menu": {
+      "editAccess": "Modifier l'accès",
+      "makeAdmin": "Passer admin",
+      "makeUser": "Passer utilisateur",
+      "resetPassword": "Réinitialiser le mot de passe",
+      "delete": "Supprimer…"
+    },
+    "sheet": {
+      "account": "Compte",
+      "activity": "Activité",
+      "apiKeys": "Clés API"
+    },
+    "empty": {
+      "title": "Aucun utilisateur pour l'instant",
+      "body": "Les personnes apparaissent ici lorsqu'elles s'inscrivent ou acceptent une invitation."
+    },
+    "noMatch": {
+      "title": "Aucun utilisateur correspondant",
+      "body": "Essayez une autre recherche ou un autre filtre.",
+      "clear": "Effacer les filtres"
+    },
+    "error": {
+      "title": "Impossible de charger les utilisateurs.",
+      "stale": "Impossible de joindre le serveur.",
+      "staleNote": "La liste ci-dessous date de {{when}}."
+    },
+    "toast": {
+      "approved": "{{name}} approuvé",
+      "disabled": "{{name}} désactivé",
+      "approveFailed": "Échec de l'approbation : {{message}}",
+      "disableFailed": "Échec de la désactivation : {{message}}",
+      "disabledUndo": "{{name}} désactivé. Annuler le réactive.",
+      "restored": "{{name}} est de nouveau actif",
+      "restoreFailed": "Échec de la restauration : {{message}}",
+      "roleChanged": "{{name}} est maintenant {{role}}",
+      "roleFailed": "Échec de la mise à jour du rôle : {{message}}",
+      "deleted": "Utilisateur supprimé",
+      "deleteFailed": "Échec de la suppression : {{message}}",
+      "passwordReset": "Mot de passe réinitialisé pour {{name}}",
+      "resetFailed": "Échec de la réinitialisation du mot de passe : {{message}}"
+    },
+    "reset": {
+      "title": "Réinitialiser le mot de passe",
+      "description": "Définissez un nouveau mot de passe pour {{name}}. Toutes les sessions existantes seront invalidées.",
+      "label": "Nouveau mot de passe",
+      "placeholder": "Nouveau mot de passe (12 caractères min.)",
+      "confirm": "Réinitialiser le mot de passe",
+      "busy": "Réinitialisation…",
+      "anyway": "Utiliser quand même ce mot de passe"
+    },
+    "delete": {
+      "title": "Supprimer l'utilisateur",
+      "description": "Ses sessions et ses clés API seront aussi supprimées. Cette action est irréversible.",
+      "type": "Saisissez <n>{{name}}</n> pour confirmer",
+      "confirm": "Supprimer",
+      "busy": "Suppression…"
+    }
   },
   "usage": {
     "title": "Utilisation",
@@ -160,10 +283,6 @@
       "truncatedWarning": "Affichage des 200 principales clés. Appliquez un filtre pour affiner."
     }
   },
-  "explorer": {
-    "title": "Explorateur",
-    "subtitle": "Parcourir les fichiers et la configuration"
-  },
   "settingsTools": {
     "intro": "Les chats ont quelques outils intégrés qu'un module peut remplacer. Quand le module est installé, en marche et activé pour un chat, le chat utilise l'outil du module, sous le même nom.",
     "empty": "Aucun outil intégré n'est gérable sur ce serveur.",
@@ -182,13 +301,17 @@
       "bash": "Commandes (bash)",
       "web_search": "Recherche web",
       "web_fetch": "Lire des pages web",
-      "list_agents": "Agents enregistrés"
+      "list_agents": "Agents enregistrés",
+      "localai_client": "Outils client LocalAI",
+      "localai_admin": "Outils d'administration LocalAI"
     },
     "descriptions": {
       "bash": "Exécute des commandes et du code pour les chats directement sur cette machine quand aucun module ne fournit bash. Un module qui exécute des commandes isolées le remplace.",
       "web_search": "Recherche sur le web pour les chats sans clé (DuckDuckGo, puis Brave Search, puis Bing), ou avec votre instance SearXNG si elle est définie.",
       "web_fetch": "Lit pour les chats une page ou un fichier web public par son adresse. Les adresses de votre réseau sont refusées sauf si vous les autorisez.",
-      "list_agents": "Permet à un chat de lister les agents enregistrés de l'utilisateur et d'en lancer un comme sous-agent. Chaque chat l'active dans son menu Outils."
+      "list_agents": "Permet à un chat de lister les agents enregistrés de l'utilisateur et d'en lancer un comme sous-agent. Chaque chat l'active dans son menu Outils.",
+      "localai_client": "Permet aux chats d'exécuter les modèles installés ici pour les images, la voix, le son, la vidéo, les embeddings et la détection, dans les droits de chaque utilisateur.",
+      "localai_admin": "Permet aux chats des administrateurs de gérer ce serveur : modèles, backends, réglages et état. Chaque chat, ou agent enregistré, l'active."
     },
     "bash": {
       "switch": "Laisser les chats exécuter des commandes sur cette machine",
@@ -232,5 +355,56 @@
       }
     },
     "addonSettings": "Paramètres de {{name}}"
+  },
+  "invites": {
+    "title": "Inviter quelqu'un",
+    "description": "Créez un lien qui permet à une personne de s'inscrire. Le lien reste valable jusqu'à son expiration.",
+    "close": "Fermer",
+    "lifetime": "Nouveau lien d'invitation valable",
+    "life": {
+      "24": "1 jour",
+      "168": "7 jours",
+      "720": "30 jours"
+    },
+    "generate": "Générer le lien d'invitation",
+    "created": "Lien d'invitation créé",
+    "createFailed": "Échec de la création de l'invitation : {{message}}",
+    "copiedToast": "URL d'invitation copiée dans le presse-papiers",
+    "copyFailed": "Échec de la copie de l'URL",
+    "copyUrl": "Copier l'URL d'invitation",
+    "copy": "Copier",
+    "revoked": "Invitation révoquée",
+    "revokeFailed": "Échec de la révocation de l'invitation : {{message}}",
+    "loading": "Chargement des invitations",
+    "loadFailed": "Impossible de charger les invitations.",
+    "region": "Invitations",
+    "caption": "Liens d'invitation avec leur créateur et leur utilisateur",
+    "empty": {
+      "title": "Aucun lien d'invitation.",
+      "body": "Générez-en un pour permettre à quelqu'un de s'inscrire."
+    },
+    "columns": {
+      "link": "Lien d'invitation",
+      "createdBy": "Créé par",
+      "usedBy": "Utilisé par",
+      "expires": "Expire le",
+      "actions": "Actions"
+    },
+    "state": {
+      "open": "Disponible",
+      "used": "Utilisé",
+      "expired": "Expiré"
+    },
+    "revoke": "Révoquer",
+    "revokeTitle": "Révoquer l'invitation",
+    "revokeDialog": {
+      "title": "Révoquer l'invitation",
+      "description": "Le lien cesse de fonctionner immédiatement. Les personnes déjà inscrites avec ce lien conservent leur compte.",
+      "body": "Révoquer le lien d'invitation qui commence par {{prefix}} ?"
+    }
+  },
+  "apiKeys": {
+    "title": "Clés API",
+    "subtitle": "Vos propres clés pour les programmes qui appellent ce serveur."
   }
 }

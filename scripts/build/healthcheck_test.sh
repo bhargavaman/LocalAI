@@ -27,6 +27,7 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/curl" <<'EOF'
 #!/bin/bash
+echo "$*" > "$CURL_ARGS_FILE"
 for arg in "$@"; do
     case "$arg" in
         http*) echo "$arg" > "$CURL_URL_FILE" ;;
@@ -37,6 +38,7 @@ EOF
 chmod +x "$WORK/bin/curl"
 
 export CURL_URL_FILE="$WORK/url"
+export CURL_ARGS_FILE="$WORK/args"
 PATH="$WORK/bin:$PATH"
 export PATH
 
@@ -85,6 +87,42 @@ echo "== leading flags do not hide the mode"
 run_hc 0 "local-ai --debug worker"
 expect_url "http://localhost:50050/readyz"
 
+expect_curl_flag() {
+    local flag="$1" want="$2" got=no
+    case " $(cat "$CURL_ARGS_FILE" 2>/dev/null || true) " in *" $flag "*) got=yes ;; esac
+    if [ "$got" != "$want" ]; then
+        echo "FAIL: curl flag $flag expected $want, got $got"
+        FAILED=1
+    fi
+}
+
+echo "== plain HTTP and no -k when TLS is off"
+run_hc 0 "local-ai run"
+expect_curl_flag -k no
+
+echo "== a frontend with a self-signed certificate is probed over https"
+run_hc 0 "local-ai run" LOCALAI_TLS_SELF_SIGNED=true
+expect_url "https://localhost:8080/readyz"
+expect_curl_flag -k yes
+
+echo "== a frontend with a certificate file on a custom port"
+run_hc 0 "local-ai run" LOCALAI_TLS_CERT=/certs/tls.crt LOCALAI_ADDRESS=":9443"
+expect_url "https://localhost:9443/readyz"
+expect_curl_flag -k yes
+
+echo "== the flag on the command line counts too"
+run_hc 0 "local-ai run --tls-self-signed"
+expect_url "https://localhost:8080/readyz"
+
+echo "== a false value keeps plain HTTP"
+run_hc 0 "local-ai run" LOCALAI_TLS_SELF_SIGNED=false
+expect_url "http://localhost:8080/readyz"
+expect_curl_flag -k no
+
+echo "== a worker does not follow the TLS flags of the API"
+run_hc 0 "local-ai worker" LOCALAI_TLS_SELF_SIGNED=true
+expect_url "http://localhost:50050/readyz"
+
 echo "== frontend honours LOCALAI_ADDRESS"
 run_hc 0 "local-ai run" LOCALAI_ADDRESS=":9090"
 expect_url "http://localhost:9090/readyz"
@@ -124,6 +162,18 @@ echo "== modes with no HTTP surface report healthy rather than false-unhealthy"
 # was never going to bind a port is the same bug as #10987, one mode over.
 run_hc 0 "local-ai agent-worker"
 expect_url ""
+
+echo "== the standalone workers of the worker group have no HTTP surface"
+for child in llama-cpp-rpc mlx-distributed vllm ds4-distributed; do
+    run_hc 0 "local-ai worker $child"
+    expect_url ""
+    run_hc 0 "local-ai p2p-worker $child"
+    expect_url ""
+done
+
+echo "== the old p2p-worker name with no child is the distributed-mode worker"
+run_hc 0 "local-ai p2p-worker --register-to http://x"
+expect_url "http://localhost:50050/readyz"
 
 echo "== an argv with no local-ai in it falls back to the frontend endpoint"
 # e.g. `init: true` puts docker-init at PID 1. Guessing the frontend is the

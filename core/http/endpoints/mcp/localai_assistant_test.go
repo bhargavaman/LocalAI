@@ -10,21 +10,36 @@ import (
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/gallery"
 	"github.com/mudler/LocalAI/core/schema"
+	"github.com/mudler/LocalAI/core/services/backendupdates"
+	localaitools "github.com/mudler/LocalAI/core/services/localaitools"
 	"github.com/mudler/LocalAI/core/services/modeladmin"
-	localaitools "github.com/mudler/LocalAI/pkg/mcp/localaitools"
 	"github.com/mudler/LocalAI/pkg/vram"
 )
 
 // stubClient is the minimum LocalAIClient impl needed to exercise the holder.
 // It returns deterministic, non-zero values so we can assert tool dispatch.
-type stubClient struct{}
+// The embedded interface covers the methods these specs never call (a call
+// to one panics), so a new client method does not break the build here.
+type stubClient struct{ localaitools.LocalAIClient }
 
 func (stubClient) GallerySearch(_ context.Context, _ localaitools.GallerySearchQuery) ([]gallery.Metadata, error) {
 	return []gallery.Metadata{{Name: "stub", Gallery: config.Gallery{Name: "stub-gallery"}}}, nil
 }
 
+func (stubClient) ListModels(_ context.Context, _ localaitools.ListModelsRequest) (*localaitools.ModelList, error) {
+	return &localaitools.ModelList{}, nil
+}
+
 func (stubClient) ListInstalledModels(_ context.Context, _ localaitools.Capability) ([]localaitools.InstalledModel, error) {
 	return []localaitools.InstalledModel{{Name: "stub"}}, nil
+}
+
+func (stubClient) SearchModels(_ context.Context, _ localaitools.ModelSearchRequest) (*localaitools.ModelSearchResponse, error) {
+	return &localaitools.ModelSearchResponse{}, nil
+}
+
+func (stubClient) InspectRemoteModel(_ context.Context, _ localaitools.RemoteModelRequest) (*localaitools.RemoteModelInfo, error) {
+	return &localaitools.RemoteModelInfo{}, nil
 }
 
 func (stubClient) ListGalleries(_ context.Context) ([]config.Gallery, error) {
@@ -71,6 +86,14 @@ func (stubClient) ListBackendLibraryUpdates(_ context.Context) ([]localaitools.B
 	return nil, nil
 }
 
+func (stubClient) BackendUpdates(_ context.Context) (*backendupdates.Snapshot, error) {
+	return &backendupdates.Snapshot{}, nil
+}
+
+func (stubClient) CheckBackendUpdates(_ context.Context) (*backendupdates.Snapshot, error) {
+	return &backendupdates.Snapshot{}, nil
+}
+
 func (stubClient) ListKnownBackends(_ context.Context) ([]schema.KnownBackend, error) {
 	return []schema.KnownBackend{}, nil
 }
@@ -85,6 +108,18 @@ func (stubClient) InstallBackend(_ context.Context, _ localaitools.InstallBacken
 
 func (stubClient) UpgradeBackend(_ context.Context, _ string) (string, error) {
 	return "stub-upgrade-job", nil
+}
+
+func (stubClient) StartUpgradeRun(_ context.Context, _ localaitools.UpgradeRunStartRequest) (*localaitools.UpgradeRun, error) {
+	return &localaitools.UpgradeRun{ID: "stub-run"}, nil
+}
+
+func (stubClient) UpgradeRuns(_ context.Context, _ string) ([]localaitools.UpgradeRun, error) {
+	return nil, nil
+}
+
+func (stubClient) CancelUpgradeRun(_ context.Context, id, _ string) (*localaitools.UpgradeRun, error) {
+	return &localaitools.UpgradeRun{ID: id}, nil
 }
 
 func (stubClient) SystemInfo(_ context.Context) (*localaitools.SystemInfo, error) {
@@ -130,6 +165,10 @@ func (stubClient) GetBranding(_ context.Context) (*localaitools.Branding, error)
 
 func (stubClient) SetBranding(_ context.Context, _ localaitools.SetBrandingRequest) (*localaitools.Branding, error) {
 	return &localaitools.Branding{InstanceName: "LocalAI"}, nil
+}
+
+func (stubClient) Projects(_ context.Context, _ localaitools.ProjectsRequest) (*localaitools.ProjectsResult, error) {
+	return &localaitools.ProjectsResult{}, nil
 }
 
 func (stubClient) ListVoiceProfiles(_ context.Context) ([]localaitools.VoiceProfile, error) {
@@ -203,6 +242,46 @@ var _ = Describe("LocalAIAssistantHolder", func() {
 		Expect(h.HasTools()).To(BeTrue())
 	})
 
+	It("serves the two groups apart: the admin tools never carry an inference tool and the other way round", func() {
+		h := NewLocalAIAssistantHolder()
+		Expect(h.Initialize(ctx, stubClient{}, localaitools.Options{})).To(Succeed())
+		names := func(e ToolExecutor) []string {
+			fns, err := e.DiscoverTools(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			var out []string
+			for _, f := range fns {
+				out = append(out, f.Name)
+			}
+			return out
+		}
+		manage, client := names(h.Executor()), names(h.ClientExecutor())
+		Expect(manage).To(ContainElement("list_installed_models"))
+		Expect(manage).ToNot(ContainElement("generate_image"), "the OpenAI-compatible path gets the admin tools only")
+		Expect(client).To(ContainElements("generate_image", "speak"))
+		Expect(client).ToNot(ContainElement("list_installed_models"))
+		Expect(client).To(ContainElement("list_models"), "any user can discover the models the client tools take")
+		Expect(manage).ToNot(ContainElement("list_models"))
+		Expect(h.Executor().IsTool("generate_image")).To(BeFalse())
+		Expect(h.ClientExecutor().IsTool("generate_image")).To(BeTrue())
+		for _, n := range client {
+			Expect(manage).ToNot(ContainElement(n), "a tool name in both groups")
+		}
+	})
+
+	It("Only offers and runs the named tools", func() {
+		h := NewLocalAIAssistantHolder()
+		Expect(h.Initialize(ctx, stubClient{}, localaitools.Options{})).To(Succeed())
+		only := Only(h.ClientExecutor(), func(n string) bool { return n == "speak" })
+		fns, err := only.DiscoverTools(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(fns).To(HaveLen(1))
+		Expect(fns[0].Name).To(Equal("speak"))
+		Expect(only.IsTool("generate_image")).To(BeFalse())
+		_, err = only.ExecuteTool(ctx, "generate_image", `{}`)
+		Expect(err).To(HaveOccurred())
+		Expect(Only(h.ClientExecutor(), func(string) bool { return false }).HasTools()).To(BeFalse())
+	})
+
 	It("methods are nil-safe on a nil holder", func() {
 		var h *LocalAIAssistantHolder
 		Expect(h.HasTools()).To(BeFalse())
@@ -211,6 +290,7 @@ var _ = Describe("LocalAIAssistantHolder", func() {
 		// Nil-receiver Executor returns an empty LocalToolExecutor.
 		Expect(exec).ToNot(BeNil())
 		Expect(exec.HasTools()).To(BeFalse())
+		Expect(h.ClientExecutor().HasTools()).To(BeFalse())
 	})
 })
 
@@ -233,6 +313,46 @@ func (stubClient) ListFailoverChains(_ context.Context) ([]localaitools.Failover
 func (stubClient) PinFailoverTarget(_ context.Context, _, _ string) error { return nil }
 
 func (stubClient) UnpinFailoverTarget(_ context.Context, _ string) error { return nil }
+
+func (stubClient) GetFederation(_ context.Context) (*localaitools.FederationInfo, error) {
+	return &localaitools.FederationInfo{}, nil
+}
+func (stubClient) ManageFederationGroup(_ context.Context, _ localaitools.FederationGroupAction) (*localaitools.FederationGroupInfo, error) {
+	return nil, nil
+}
+
+func (stubClient) GetP2PStatus(_ context.Context) (*localaitools.P2PStatusInfo, error) {
+	return &localaitools.P2PStatusInfo{}, nil
+}
+func (stubClient) ListP2PDevices(_ context.Context) ([]localaitools.P2PDeviceInfo, error) {
+	return nil, nil
+}
+func (stubClient) ListP2PInvites(_ context.Context) ([]localaitools.P2PInviteInfo, error) {
+	return nil, nil
+}
+func (stubClient) ListP2PRelays(_ context.Context) ([]localaitools.P2PRelayInfo, error) {
+	return nil, nil
+}
+func (stubClient) GetP2PRelayLimits(_ context.Context, _ string) (*localaitools.P2PRelayLimitsInfo, error) {
+	return nil, nil
+}
+func (stubClient) SetP2PRelayLimits(_ context.Context, _ string, _ localaitools.SetP2PRelayLimitsRequest) (*localaitools.P2PRelayLimitsInfo, error) {
+	return nil, nil
+}
+func (stubClient) RevokeP2PDevice(_ context.Context, _ string) error { return nil }
+func (stubClient) CancelP2PInvite(_ context.Context, _ string) error { return nil }
+func (stubClient) ListP2PSplitWorkers(_ context.Context) ([]localaitools.P2PSplitWorkerInfo, error) {
+	return nil, nil
+}
+func (stubClient) SetP2PSplitSlowPath(_ context.Context, _ string, _ bool) (*localaitools.P2PSplitWorkerInfo, error) {
+	return &localaitools.P2PSplitWorkerInfo{}, nil
+}
+func (stubClient) SetNodeSplitServer(_ context.Context, _ string, _ bool) (*localaitools.NodeSplitServer, error) {
+	return nil, nil
+}
+func (stubClient) SetP2PSplitNode(_ context.Context, _, _ string) (*localaitools.P2PSplitWorkerInfo, error) {
+	return &localaitools.P2PSplitWorkerInfo{}, nil
+}
 
 func (stubClient) ListSharedFolders(_ context.Context) ([]localaitools.SharedFolder, error) {
 	return nil, nil

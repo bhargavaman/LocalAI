@@ -12,6 +12,10 @@ export const UPDATE_TYPES = new Set([
   'upgrade_failed', 'operation_conflict', 'check_failed',
 ])
 
+// What an approved upgrade can be refused or fail with that a plain upgrade
+// cannot: the approval no longer matches, or the host access is blocked.
+export const HOST_FAILURES = new Set(['approval_stale', 'approval_required', 'blocked_by_policy', 'revision_conflict', 'locked_by_deployment', 'not_human_surface'])
+
 // A typed refusal is a final answer: the operation identity is dropped and the
 // next click is a new operation. Everything else is classified as on the other
 // add-on routes.
@@ -33,7 +37,7 @@ const TONES = {
   unknown: 'idle',
 }
 
-const REASONS = new Set(['platform', 'host-version', 'api-version', 'protocol-version', 'sdk-version', 'data-format', 'digest-changed'])
+const REASONS = new Set(['platform', 'host-version', 'api-version', 'protocol-version', 'sdk-version', 'data-format', 'feature-level', 'digest-changed'])
 const CLASSES = new Set(['source-unavailable', 'refresh-failed', 'credential-unavailable', 'not-listed', 'ambiguous-release', 'canceled', 'internal'])
 
 // The view of the `update` object of an installed add-on. Anything the page
@@ -62,6 +66,31 @@ export function updateView(update) {
   }
 }
 
+// The note a library entry shows under an installed add-on whose check found no
+// update to offer. An add-on that was never checked, a failed check and an
+// integrity error each say so; none of them reads as current, and a card that
+// only shows the installed version never leaves the reader to guess.
+export function entryUpdateNote(update) {
+  const v = updateView(update)
+  if (v.state === 'update-available') return null
+  return { state: v.state, tone: v.tone, version: v.version }
+}
+
+// The severity of the notice that says an add-on's update state: a state with an
+// update to apply or a check that did not answer is a warning, a status that was
+// never checked is information, and contents that do not match are an error.
+// Up to date has no notice.
+export function updateNoticeSeverity(state) {
+  switch (state) {
+    case 'integrity-error': return 'error'
+    case 'update-available':
+    case 'incompatible':
+    case 'check-failed': return 'warn'
+    case 'up-to-date': return ''
+    default: return 'info'
+  }
+}
+
 // The body of an upgrade request: the installed package the page showed and
 // the candidate the check resolved. The owner checks both again.
 export function upgradeBody(addon, operationId) {
@@ -73,8 +102,9 @@ export function upgradeBody(addon, operationId) {
 // The key of the words for a refusal or a failed outcome of an update action.
 export function updateErrorKey(error) {
   if (!error) return 'unavailable'
-  if (error.type && UPDATE_TYPES.has(error.type)) return error.type
+  if (error.type && (UPDATE_TYPES.has(error.type) || HOST_FAILURES.has(error.type))) return error.type
   if (error.kind === 'unknown_outcome') return 'unknownOutcome'
+  if (error.kind === 'operation_not_found') return 'operationNotFound'
   if (error.kind === 'denied') return 'denied'
   if (error.kind === 'auth') return 'auth'
   if (error.kind === 'network') return 'network'

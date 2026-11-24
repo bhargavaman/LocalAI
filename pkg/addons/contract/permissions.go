@@ -9,7 +9,7 @@ import (
 // Limits of the permissions of a connector kind.
 const (
 	MaxConnectorRoles       = 8
-	MaxConnectorPermissions = 12
+	MaxConnectorPermissions = 16
 	// MaxMessageRoles is how many role IDs one ConnectorMessage carries.
 	MaxMessageRoles = 8
 )
@@ -23,16 +23,34 @@ const (
 	CapFilesUpload      = "files.upload"
 	CapTriggersPropose  = "triggers.propose"
 	CapTriggersRun      = "triggers.run"
+	// CapTriggersChange lets the model of a connector chat change, pause,
+	// resume or delete a trigger of its agent, and withdraw a proposal. The
+	// approval of the connection decides whether the owner confirms each one
+	// or it applies at once. It is sensitive, so only a sender that the owner
+	// paired can use it, and it is off until the owner turns it on.
+	CapTriggersChange   = "triggers.change"
 	CapTalkbackChannels = "talkback.channels"
 	CapTalkbackNewChan  = "talkback.new_channel"
 	CapProfileWrite     = "profile.write"
 	CapSkillsWrite      = "skills.write"
 	CapPagesWrite       = "pages.write"
 	CapDashboardWrite   = "dashboard.write"
-	// CapToolsWrite lets a sender make an add-on tool change something outside
-	// LocalAI, such as a comment on an issue. It is for the tools of a kind
-	// whose binding holds a credential.
+	// CapKnowledgeWrite lets a sender have the agent propose a text for the
+	// person's Knowledge. The owner still confirms each one.
+	CapKnowledgeWrite = "knowledge.write"
+	// CapToolsWrite lets a sender make an add-on tool change something, such
+	// as a comment on an issue outside LocalAI, or a table of the owner. It is
+	// for the tools of a kind whose binding holds a credential and for the
+	// tools of an add-on whose resources are scoped per agent.
 	CapToolsWrite = "tools.write"
+	// CapLoopsWait lets the model of a connector chat wait for a change with
+	// wait_for and wait_agents. A wait polls a source with code and costs no
+	// model call until it ends, so it is not sensitive.
+	CapLoopsWait = "loops.wait"
+	// CapLoopsStart lets the model of a connector chat start a loop with
+	// start_loop and end it with schedule_next and loop_done. Each run is a
+	// model call that nobody asked for at that moment, so it is sensitive.
+	CapLoopsStart = "loops.start"
 )
 
 // capabilities maps each name to whether it is sensitive. A sensitive
@@ -43,14 +61,27 @@ var capabilities = map[string]bool{
 	CapFilesUpload:      false,
 	CapTriggersPropose:  false,
 	CapTriggersRun:      false,
+	CapTriggersChange:   true,
 	CapTalkbackChannels: false,
 	CapTalkbackNewChan:  true,
 	CapProfileWrite:     true,
 	CapSkillsWrite:      true,
 	CapPagesWrite:       true,
 	CapDashboardWrite:   true,
+	CapKnowledgeWrite:   true,
 	CapToolsWrite:       false,
+	CapLoopsWait:        false,
+	CapLoopsStart:       true,
 }
+
+// bindingOnly are the capabilities that only the owner's switch on the binding
+// gives: a role never holds them, even when the kind lists them. The loop
+// capabilities are here because a loop or a wait outlives the turn that armed
+// it, so who may arm one is a choice about the bot, not about a role.
+var bindingOnly = map[string]bool{CapLoopsWait: true, CapLoopsStart: true}
+
+// BindingOnlyCapability reports whether name is never granted to a role.
+func BindingOnlyCapability(name string) bool { return bindingOnly[name] }
 
 // KnownCapability reports whether name is in the closed list of capabilities.
 func KnownCapability(name string) bool { _, ok := capabilities[name]; return ok }
@@ -78,30 +109,37 @@ type CapabilityInfo struct {
 	// Usual marks the capabilities that a settings page turns on with its
 	// one-click preset. A sensitive capability is never usual.
 	Usual bool `json:"usual"`
+	// BindingOnly marks the capabilities that a role never holds: the owner
+	// turns them on for the whole bot with a switch.
+	BindingOnly bool `json:"binding_only,omitempty"`
 }
 
 // capabilityText is the title and description of each capability. Titles are
 // short verbs; descriptions say what changes and who can cause it.
 var capabilityText = map[string][2]string{
-	CapProposalsConfirm: {"Confirm changes from the chat", "A sender can confirm a change that the agent proposed, such as a memory or a trigger, by answering in the same chat."},
+	CapProposalsConfirm: {"Confirm changes from the chat", "A sender can confirm a trigger or a change that the agent proposed (a memory note, the agent rules, a skill, a page, the dashboard or a text for Knowledge) by answering yes or no in the same chat. Every change except a memory note needs a verified person."},
 	CapMemoryWrite:      {"Save to memory", "The agent may remember what a sender asks it to remember."},
 	CapFilesUpload:      {"Receive files", "The agent may read files that senders attach to a message."},
 	CapTriggersPropose:  {"Propose triggers", "The agent may propose a timer or an event trigger when a sender asks for one."},
+	CapTriggersChange:   {"Change or delete triggers", "The agent may change, pause, resume or delete a trigger it made, and withdraw a proposal, when a sender asks. The approval mode of the connection decides whether you confirm each change or it applies at once. Only a verified person can use it, and it is off until you turn it on."},
 	CapTriggersRun:      {"Fire event triggers", "A message from a sender may start a run of an event trigger."},
-	CapTalkbackChannels: {"Post to approved channels", "The agent may write to the approved channels below when a sender asks, besides the chat it answers in."},
-	CapTalkbackNewChan:  {"Post to a new channel", "The agent may write to a channel that is not approved yet."},
+	CapTalkbackChannels: {"Post to other channels", "The agent may write to the channels listed under Place the bot may post when a sender asks, besides the chat it answers in. This does not decide whose messages the bot trusts."},
+	CapTalkbackNewChan:  {"Post to a new channel", "The agent may write to a place that is not on that list yet."},
 	CapProfileWrite:     {"Change the agent profile", "The agent may change its own profile."},
 	CapSkillsWrite:      {"Write skills", "The agent may write or change skills."},
 	CapPagesWrite:       {"Write pages", "The agent may write or change pages."},
 	CapDashboardWrite:   {"Write the dashboard", "The agent may change the dashboard."},
-	CapToolsWrite:       {"Change things outside LocalAI", "An add-on tool may change something with the credential of the binding, such as a comment on an issue."},
+	CapKnowledgeWrite:   {"Add to knowledge", "The agent may propose a text for a collection of the Knowledge. The owner confirms each one."},
+	CapToolsWrite:       {"Let people who are not verified change things with add-on tools", "An add-on tool may change something outside LocalAI or in your own data. Verified people already use the write tools of the add-ons the agent is connected to; the write mode of the connection still applies. Turn this on to let listed people who are not verified use them too, and to let verified people use the write tools of add-ons that have no connection. People let in only through a channel, or by a bot that accepts anyone, do not get them, unless a role grants it. The one exception is an add-on that keeps your own data, such as Calendar or Contacts: with this on, everyone the bot lets in can change that data."},
+	CapLoopsWait:        {"Let the agent wait for a change", "The agent may wait for a page, a tool, a job or its sub-agents, and then answer in the same chat. A wait is checked by code and costs no model call until it ends. A wait that runs a command needs a verified person. Waits count against the loops and waits a chat may have."},
+	CapLoopsStart:       {"Let the agent run on a timer", "The agent may start a loop in the chat: it comes back by itself, as often as the server limits allow, and each run is a model call. Only a verified person can use it. A loop started this way ends after a fifth of the runs that the server allows a loop. It is off until you turn it on."},
 }
 
 // usualCapabilities are what an owner normally allows on a new binding: the
-// everyday ones that stay inside LocalAI and the approved channels.
+// everyday ones that stay inside LocalAI and the channels it may post to.
 var usualCapabilities = map[string]bool{
 	CapProposalsConfirm: true, CapMemoryWrite: true, CapFilesUpload: true,
-	CapTriggersPropose: true, CapTriggersRun: true, CapTalkbackChannels: true,
+	CapTriggersPropose: true, CapTriggersRun: true, CapTalkbackChannels: true, CapLoopsWait: true,
 }
 
 // UsualConnectorCapabilities returns what the "Allow the usual" preset of a
@@ -125,7 +163,7 @@ func ConnectorCapabilities() []CapabilityInfo {
 	out := make([]CapabilityInfo, 0, len(names))
 	for _, n := range names {
 		text := capabilityText[n]
-		out = append(out, CapabilityInfo{Name: n, Title: text[0], Description: text[1], Sensitive: capabilities[n], Usual: usualCapabilities[n] && !capabilities[n]})
+		out = append(out, CapabilityInfo{Name: n, Title: text[0], Description: text[1], Sensitive: capabilities[n], Usual: usualCapabilities[n] && !capabilities[n], BindingOnly: bindingOnly[n]})
 	}
 	return out
 }
@@ -135,7 +173,12 @@ func ConnectorCapabilities() []CapabilityInfo {
 // binding. The rule is by shape, so the host names no add-on: a tool that
 // writes, in an add-on that holds a credential for the person's binding,
 // changes something outside LocalAI with that person's token, and needs
-// CapToolsWrite. credentialed says that the manifest declares credentials.
+// CapToolsWrite. So does a tool that writes in an add-on whose resources are
+// scoped per agent, or in an add-on that declares ownerData: it changes the
+// owner's data on a sender's word, so a sender needs the capability, which
+// the owner and paired senders hold.
+// credentialed says that the manifest declares credentials or per-agent
+// resources.
 func ToolPermission(credentialed bool, d ToolDefinition) string {
 	if credentialed && d.Kind != ToolKindRead {
 		return CapToolsWrite
@@ -165,9 +208,10 @@ func (k ConnectorKind) Role(id string) (ConnectorRole, bool) {
 }
 
 // Grantable reports whether the kind lists the capability and the capability
-// may go to a role: it is known and not sensitive.
+// may go to a role: it is known, not sensitive and not binding-only. A kind
+// may still list a binding-only capability; the listing grants nothing.
 func (k ConnectorKind) Grantable(capability string) bool {
-	return KnownCapability(capability) && !SensitiveCapability(capability) && slices.Contains(k.Permissions, capability)
+	return KnownCapability(capability) && !SensitiveCapability(capability) && !BindingOnlyCapability(capability) && slices.Contains(k.Permissions, capability)
 }
 
 // FilterRoles keeps the role IDs of a message that the kind declares, without

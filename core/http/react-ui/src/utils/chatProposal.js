@@ -43,9 +43,15 @@ export function proposalEdit(p, { name, when }) {
     enabled: false,
     daily_cap: p.daily_cap || 0,
   }
+  if (p.run_limit) body.run_limit = p.run_limit
   if (p.kind === 'file') {
     body.folder = when.trim()
     if (p.quiet_seconds) body.quiet_seconds = p.quiet_seconds
+  } else if (p.kind === 'event') {
+    // The card edits the name only; what the trigger listens for is sent back as it is.
+    body.source = p.source || ''
+    body.event_type = p.event_type || ''
+    body.matches = p.matches || []
   } else {
     body.schedule = when.trim()
     if (p.time_zone) body.time_zone = p.time_zone
@@ -86,6 +92,16 @@ export function changeView(res, err) {
   }
 }
 
+// The locale key that says, in plain words, when a run reports, for a delivery
+// whose mode is not the default; '' for the default (always), which needs no text.
+export function deliveryModeKey(delivery) {
+  switch (delivery?.mode) {
+    case 'on_change': return 'proposal.plan.deliveryModeOnChange'
+    case 'on_problem': return 'proposal.plan.deliveryModeOnProblem'
+    default: return ''
+  }
+}
+
 // The text of one field of a trigger, as the before/after rows show it. A
 // field the trigger leaves empty is ''; the card says "none" for it.
 export function changeValue(field, t) {
@@ -97,8 +113,11 @@ export function changeValue(field, t) {
     case 'writes': return t.plan?.writes || ''
     case 'widget': return t.plan?.widget || ''
     case 'estimated_tokens': return t.cost?.estimated_tokens ? String(t.cost.estimated_tokens) : ''
+    case 'acts': return (t.acts || []).join(', ')
+    case 'delivery': return t.delivery ? [t.delivery.target, t.delivery.connection_name, t.delivery.channel_label].filter(Boolean).join(' ') : ''
     case 'agent': return t.agent_id || ''
     case 'daily_cap': return t.daily_cap ? String(t.daily_cap) : ''
+    case 'run_limit': return t.run_limit || ''
     default: return t[field] == null ? '' : String(t[field])
   }
 }

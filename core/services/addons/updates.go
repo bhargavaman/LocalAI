@@ -4,6 +4,7 @@ package addons
 import (
 	"context"
 	"errors"
+	"sort"
 	"github.com/mudler/LocalAI/pkg/addons/zipformat"
 	"time"
 
@@ -103,20 +104,49 @@ func (m *Manager) checkPins(ctx context.Context, cmd LifecycleCommand, st Status
 	return catalog.Release{}, ErrCheckFailed
 }
 
+// RefreshUpdates asks the libraries about every installed add-on that has one,
+// so the answer the pages read is a recent check and not an empty cache. It is
+// the owner's own background work: it reads libraries and applies nothing. It
+// returns the number of add-ons checked. An add-on whose check fails keeps a
+// check-failed status with its time, never a missing one.
+func (m *Manager) RefreshUpdates(ctx context.Context) int {
+	if m.updates == nil {
+		return 0
+	}
+	m.mu.Lock()
+	var ids []string
+	for id, st := range m.journal.Addons {
+		if !st.Installed {
+			continue
+		}
+		if receipt, ok := currentReceipt(st); ok && receipt.SourceID != zipformat.SourceID {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.Unlock()
+	sort.Strings(ids)
+	n := 0
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, e := m.updates.Check(ctx, id, true); e == nil {
+			n++
+		}
+	}
+	return n
+}
+
 // visibleTo reports whether the actor may read update status of an add-on: an
 // administrator for any installed add-on, anyone else only for an enabled one.
 // Hiding is the same denial for an add-on that does not exist.
 func (m *Manager) visibleTo(ctx context.Context, actor contract.Actor, id string) (admin bool, e error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if e = m.check(ctx); e != nil {
+	v, e := m.readStateLive(ctx)
+	if e != nil {
 		return false, e
 	}
-	if m.uncertain || m.runtimeRecoveryRequired {
-		return false, ErrRecoveryRequired
-	}
 	admin = m.admin != nil && m.admin(ctx, actor) == nil
-	st, ok := m.journal.Addons[id]
+	st, ok := v.addons[id]
 	if !addonID.MatchString(id) || !ok || !st.Installed || (!st.DesiredEnabled && !admin) {
 		return false, ErrForbidden
 	}

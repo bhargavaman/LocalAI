@@ -104,6 +104,52 @@ for (const [name, size] of [['desktop', { width: 1440, height: 900 }], ['phone',
       await page.screenshot({ path: `test-results/proposal-${name}-pending.png` })
     })
 
+    test('the card says where the results go: the Inbox by default, a thread, or a channel by its label', async ({ page }) => {
+      await open(page)
+      const row = card(page).locator('[data-row="delivery"]')
+      await expect(row).toContainText('Results go to')
+      await expect(row).toContainText('Your Inbox')
+    })
+
+    for (const [label, delivery, text] of [
+      ['a thread', { target: 'origin', in_thread: true }, 'This thread'],
+      ['a channel', { target: 'channel', channel_label: 'KairosInternal' }, 'KairosInternal, at the top of the channel'],
+      ['a channel of a named connection', { target: 'channel', channel_label: 'General', connection_name: 'Team chat' }, 'General in Team chat, at the top of the channel'],
+    ]) {
+      test(`the card names ${label} as the place of the results`, async ({ page }) => {
+        await open(page, { extra: { delivery } })
+        await expect(card(page).locator('[data-row="delivery"]')).toContainText(text)
+        await page.screenshot({ path: `test-results/proposal-${name}-delivery-${delivery.target}.png` })
+      })
+    }
+
+    test('the card says nothing extra for the default mode and says it in words for the other two', async ({ page }) => {
+      await open(page, { extra: { delivery: { target: 'channel', channel_label: 'General', connection_name: 'Team chat', mode: 'always' } } })
+      const row = card(page).locator('[data-row="delivery"]')
+      await expect(row).toContainText('General in Team chat')
+      await expect(row).not.toContainText('Only when')
+      await open(page, { extra: { delivery: { target: 'channel', channel_label: 'General', connection_name: 'Team chat', mode: 'on_change' } } })
+      await expect(row).toContainText('Only when the answer differs from the run before.')
+      await open(page, { extra: { delivery: { target: 'channel', channel_label: 'General', connection_name: 'Team chat', mode: 'on_problem' } } })
+      await expect(row).toContainText('Only when a run fails. A run that works reports nothing.')
+      await page.screenshot({ path: `test-results/proposal-${name}-delivery-mode.png` })
+    })
+
+    test('the card shows the time limit, and what applies when the administrator limit is lower', async ({ page }) => {
+      await open(page, { extra: { run_limit: '10m', effective_run_limit: '10m0s' } })
+      await expect(card(page).locator('[data-row="limit"]')).toContainText('Time limit')
+      await expect(card(page).locator('[data-row="limit"]')).toContainText('10m')
+      await page.screenshot({ path: `test-results/proposal-${name}-limit.png` })
+      await open(page, { extra: { run_limit: '2h', effective_run_limit: '15m' } })
+      await expect(card(page).locator('[data-row="limit"]')).toContainText('2h, cut to 15m by the administrator')
+      await page.screenshot({ path: `test-results/proposal-${name}-limit-cut.png` })
+    })
+
+    test('the card has no time limit row when the proposal sets none', async ({ page }) => {
+      await open(page)
+      await expect(card(page).locator('[data-row="limit"]')).toHaveCount(0)
+    })
+
     test('the card says a run only reads when the trigger holds no act, and why', async ({ page }) => {
       await open(page, { extra: { acts: [], acts_held: [], read_only: true, read_only_why: 'no_acts' } })
       const sum = card(page).getByTestId('trigger-acts-summary')
@@ -203,4 +249,33 @@ test('a trigger removed on the Triggers page reads as removed', async ({ page })
   await page.goto('/app/chats/c1')
   await expect(card(page)).toHaveAttribute('data-state', 'removed')
   await expect(card(page)).toContainText('This trigger was removed.')
+})
+
+// A change that only moves the report mode: the before and after delivery name
+// the same place, so the card must say the mode or the two sides read alike.
+test('the card of a change shows a mode-only change of the delivery', async ({ page }) => {
+  const where = { target: 'channel', channel_label: 'General', connection_name: 'Team chat' }
+  const change = {
+    id: 'ch1', op: 'update', state: 'pending', fields: ['delivery'],
+    before: trigger({ enabled: true, delivery: { ...where, mode: 'always' } }),
+    after: trigger({ enabled: true, delivery: { ...where, mode: 'on_problem' } }),
+  }
+  await mockChat(page)
+  const messages = [
+    { seq: 1, turn: 1, role: 'user', text: 'Only tell me when it fails.', at: AT },
+    { seq: 2, turn: 1, role: 'tool', text: 'update_trigger: Monday digest\nAsked for the change.', card: { kind: 'trigger_change', id: 'ch1' }, at: AT },
+    { seq: 3, turn: 1, role: 'assistant', text: 'Apply the change below if that looks right.', at: AT },
+  ]
+  const detail = { id: 'c1', title: 'Digest', model: 'qwen3-8b', kind: 'chat', created: AT, updated: AT, running: false, last_turn: 'done', pending: [] }
+  await page.route(/\/api\/chats\/c1\/messages(\?.*)?$/, route => route.fulfill({ json: { messages } }))
+  await page.route('**/api/chats/c1', route => route.fulfill({ json: detail }))
+  await page.route(/\/api\/chats(\?.*)?$/, route => route.fulfill({ json: { conversations: [{ ...detail, pending: undefined }], persistent: true, files: true } }))
+  await page.route('**/api/chats/agents*', route => route.fulfill({ json: { agents: [] } }))
+  await page.route(/\/api\/chats\/triggers\/changes\/ch1$/, route => route.fulfill({ json: change }))
+  await page.goto('/app/chats/c1')
+  const row = page.getByTestId('trigger-change').locator('[data-row="delivery"]')
+  await expect(row).toBeVisible()
+  await expect(page.getByTestId('change-before')).not.toContainText('Only when')
+  await expect(page.getByTestId('change-after')).toContainText('Only when a run fails.')
+  await page.screenshot({ path: 'test-results/change-delivery-mode.png' })
 })

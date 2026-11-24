@@ -14,6 +14,7 @@ import (
 
 	"github.com/mudler/LocalAI/core/services/studio/connsets"
 	"github.com/mudler/LocalAI/core/services/studio/internal/dberr"
+	"github.com/mudler/LocalAI/core/services/studio/resourcesets"
 )
 
 // agentRow is the table of saved agents. The lists are JSON text so one schema
@@ -32,6 +33,20 @@ type agentRow struct {
 	Collections  string
 	Skills       string
 	Network      string `gorm:"size:16"`
+	// SandboxProfile came later: empty for the agents made before, which use
+	// the default profile, so AutoMigrate is its migration.
+	SandboxProfile string `gorm:"size:32"`
+	// Memory came later: empty for the agents made before, which read as
+	// "as before".
+	Memory string `gorm:"size:16"`
+	// MemorySave came later: empty uses the person's setting.
+	MemorySave string `gorm:"size:16"`
+	// ProjectID came later: the default fills the rows of agents made before,
+	// which belong to no project, so AutoMigrate is its migration.
+	ProjectID string `gorm:"index;size:128;not null;default:''"`
+	// MovedAtNano came later: the time of the last move to another project, in
+	// Unix nanoseconds, 0 for an agent that never moved.
+	MovedAtNano int64 `gorm:"not null;default:0"`
 	// FolderID and FolderMode came after the table existed: the defaults
 	// fill the rows of agents made before, which have no folder, so
 	// AutoMigrate is their migration.
@@ -46,8 +61,13 @@ type agentRow struct {
 	// Connections is the JSON object of the connection the agent names for
 	// each credentialed add-on; empty for the agents made before.
 	Connections string
-	Created     time.Time
-	Updated     time.Time
+	// Resources is the JSON object of the resources the agent may use for each
+	// add-on with per-agent resources; empty for the agents made before.
+	Resources string
+	// ShareRef is the sharing record of the agent, empty until it is shared.
+	ShareRef string `gorm:"size:64;index"`
+	Created  time.Time
+	Updated  time.Time
 }
 
 func (agentRow) TableName() string { return "studio_agents" }
@@ -118,6 +138,14 @@ func connectionsJSON(m connsets.Sets) string {
 	return string(raw)
 }
 
+func resourcesJSON(m resourcesets.Sets) string {
+	if len(m) == 0 {
+		return ""
+	}
+	raw, _ := json.Marshal(m)
+	return string(raw)
+}
+
 func listFromJSON(s string) ([]string, error) {
 	if s == "" {
 		return nil, nil
@@ -129,13 +157,21 @@ func listFromJSON(s string) ([]string, error) {
 
 func (r agentRow) agent(folders []folderRow) (Agent, error) {
 	a := Agent{ID: r.ID, Principal: r.Principal, Name: r.Name, Description: r.Description,
-		Instructions: r.Instructions, Model: r.Model, Network: r.Network, FolderID: r.FolderID, FolderMode: r.FolderMode, Created: r.Created, Updated: r.Updated}
+		Instructions: r.Instructions, Model: r.Model, Network: r.Network, SandboxProfile: r.SandboxProfile, Memory: r.Memory, MemorySave: r.MemorySave, ProjectID: r.ProjectID, FolderID: r.FolderID, FolderMode: r.FolderMode, ShareRef: r.ShareRef, Created: r.Created, Updated: r.Updated}
+	if r.MovedAtNano != 0 {
+		a.MovedAt = time.Unix(0, r.MovedAtNano).UTC()
+	}
 	for _, f := range folders {
 		a.Folders = append(a.Folders, AgentFolder{Node: f.Node, Mode: f.Mode})
 	}
 	var err error
 	if r.Connections != "" {
 		if err = json.Unmarshal([]byte(r.Connections), &a.Connections); err != nil {
+			return a, err
+		}
+	}
+	if r.Resources != "" {
+		if err = json.Unmarshal([]byte(r.Resources), &a.Resources); err != nil {
 			return a, err
 		}
 	}
@@ -213,12 +249,15 @@ func (s *gormStore) Put(ctx context.Context, a Agent) error {
 		row := agentRow{ID: a.ID, Principal: a.Principal, NameKey: NameKey(a.Name), Name: a.Name,
 			Description: a.Description, Instructions: a.Instructions, Model: a.Model,
 			MCPServers: listJSON(a.MCPServers), Addons: listJSON(a.Addons),
-			Collections: listJSON(a.Collections), Skills: listJSON(a.Skills), Network: a.Network,
+			Collections: listJSON(a.Collections), Skills: listJSON(a.Skills), Network: a.Network, SandboxProfile: a.SandboxProfile, Memory: a.Memory, MemorySave: a.MemorySave, ProjectID: a.ProjectID,
 			FolderID: a.FolderID, FolderMode: a.FolderMode, BuiltinsOff: listJSON(a.BuiltinsOff), BuiltinsOn: listJSON(a.BuiltinsOn), Builtins: listJSON(a.Builtins),
-			Connections: connectionsJSON(a.Connections),
-			Created:     a.Created, Updated: a.Updated}
+			Connections: connectionsJSON(a.Connections), Resources: resourcesJSON(a.Resources),
+			Created: a.Created, Updated: a.Updated}
+		if !a.MovedAt.IsZero() {
+			row.MovedAtNano = a.MovedAt.UnixNano()
+		}
 		if exists {
-			row.Created = old.Created
+			row.Created, row.ShareRef = old.Created, old.ShareRef
 			err = tx.Save(&row).Error
 		} else {
 			err = tx.Create(&row).Error
@@ -289,4 +328,63 @@ func (s *gormStore) Delete(ctx context.Context, principal, id string) error {
 		}
 		return tx.Where("agent_id = ?", id).Delete(&folderRow{}).Error
 	})
+}
+
+func (s *gormStore) SetShareRef(ctx context.Context, principal, id, ref string) (string, error) {
+	if ref == "" {
+		return "", fmt.Errorf("%w: an empty share reference", ErrInvalid)
+	}
+	var out string
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The conditional update is the race guard: of two first shares only
+		// one row update matches share_ref = ''.
+		res := tx.Model(&agentRow{}).Where("id = ? AND principal = ? AND share_ref = ''", id, principal).Update("share_ref", ref)
+		if res.Error != nil {
+			return res.Error
+		}
+		var r agentRow
+		if err := tx.Where("id = ? AND principal = ?", id, principal).Take(&r).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		out = r.ShareRef
+		return nil
+	})
+	return out, err
+}
+
+func (s *gormStore) GetShared(ctx context.Context, id string) (Agent, error) {
+	var r agentRow
+	err := s.db.WithContext(ctx).Where("id = ? AND share_ref <> ''", id).Take(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Agent{}, ErrNotFound
+	}
+	if err != nil {
+		return Agent{}, err
+	}
+	fs, err := foldersOf(s.db.WithContext(ctx), []string{r.ID})
+	if err != nil {
+		return Agent{}, err
+	}
+	return r.agent(fs[r.ID])
+}
+
+func (s *gormStore) ListShared(ctx context.Context, refs []string) ([]Agent, error) {
+	var out []Agent
+	for len(refs) > 0 {
+		n := min(len(refs), 500)
+		var rows []agentRow
+		if err := s.db.WithContext(ctx).Where("share_ref IN ? AND share_ref <> ''", refs[:n]).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		list, err := s.agentsOf(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, list...)
+		refs = refs[n:]
+	}
+	return out, nil
 }

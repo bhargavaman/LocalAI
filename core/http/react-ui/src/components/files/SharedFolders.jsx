@@ -6,6 +6,7 @@ import Icon from '../Icon'
 import ActionMenu from '../ActionMenu'
 import { Button, EmptyState, LoadError, PaneLayout, SidePane, SkeletonRows, StatusChip, useLoad } from '../ui'
 import { useAuth } from '../../context/AuthContext'
+import { SharedByBadge } from '../share/ShareBadges'
 import { adminUsersApi, sharedFoldersApi } from '../../utils/api'
 import { refreshSharedPages } from '../../hooks/useSharedPages'
 import './sharedFolders.css'
@@ -91,9 +92,15 @@ function FolderRow({ folder, admin, onMembers, onRename, onRemove, t }) {
           <span className="sf-row__title sf-row__title--static">{folder.name}</span>
         )}
         <span className="sf-row__meta">
-          <code className="sf-row__path">{folderLabel(folder.path)}</code>
-          <span aria-hidden="true">·</span>
-          <PagesLink folder={folder} t={t} />
+          {folder.owner ? (
+            <SharedByBadge entry={{ role: folder.mode, owner: folder.owner, everyone: folder.everyone === true }} hideRole testId="sf-shared-by" />
+          ) : (
+            <>
+              <code className="sf-row__path">{folderLabel(folder.path)}</code>
+              <span aria-hidden="true">·</span>
+              <PagesLink folder={folder} t={t} />
+            </>
+          )}
           {admin && (
             <>
               <span aria-hidden="true">·</span>
@@ -161,18 +168,22 @@ function MembersPane({ folder, users, usersFailed, onSet, onRemove, onClose, t }
               <div className="sf-add__fields">
                 <label className="sf-field">
                   <span className="sf-field__label">{t('shared.person')}</span>
-                  <select className="input" value={who} onChange={(e) => setWho(e.target.value)} data-testid="sf-add-who">
-                    {choices.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                  </select>
+                  <span className="dk-select-wrap">
+                    <select className="dk-select" value={who} onChange={(e) => setWho(e.target.value)} data-testid="sf-add-who">
+                      {choices.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                    </select>
+                  </span>
                 </label>
                 <label className="sf-field sf-field--mode">
                   <span className="sf-field__label">{t('shared.access')}</span>
-                  <select className="input" value={mode} onChange={(e) => setMode(e.target.value)} data-testid="sf-add-mode">
-                    <option value="read">{t('shared.mode.read')}</option>
-                    <option value="write">{t('shared.mode.write')}</option>
-                  </select>
+                  <span className="dk-select-wrap">
+                    <select className="dk-select" value={mode} onChange={(e) => setMode(e.target.value)} data-testid="sf-add-mode">
+                      <option value="read">{t('shared.mode.read')}</option>
+                      <option value="write">{t('shared.mode.write')}</option>
+                    </select>
+                  </span>
                 </label>
-                <Button type="submit" variant="primary" size="sm" icon="plus" busy={busy} data-testid="sf-add-submit">{t('shared.add')}</Button>
+                <Button type="submit" variant="primary" icon="plus" busy={busy} data-testid="sf-add-submit">{t('shared.add')}</Button>
               </div>
             ) : (
               <p className="sf-hint">{t('shared.allAdded')}</p>
@@ -193,13 +204,15 @@ function MembersPane({ folder, users, usersFailed, onSet, onRemove, onClose, t }
                     {m.everyone && <span className="sf-member__note">{t('shared.everyoneHint')}</span>}
                   </span>
                   <label className="sf-sr" htmlFor={`sf-mode-${m.principal}`}>{t('shared.accessFor', { name: memberName(m, t) })}</label>
-                  <select
-                    id={`sf-mode-${m.principal}`} className="input sf-member__mode" value={m.mode} data-testid="sf-member-mode"
-                    onChange={(e) => onSet(folder, m.principal, e.target.value, false)}
-                  >
-                    <option value="read">{t('shared.mode.read')}</option>
-                    <option value="write">{t('shared.mode.write')}</option>
-                  </select>
+                  <span className="dk-select-wrap dk-select-wrap--sm">
+                    <select
+                      id={`sf-mode-${m.principal}`} className="dk-select" value={m.mode} data-testid="sf-member-mode"
+                      onChange={(e) => onSet(folder, m.principal, e.target.value, false)}
+                    >
+                      <option value="read">{t('shared.mode.read')}</option>
+                      <option value="write">{t('shared.mode.write')}</option>
+                    </select>
+                  </span>
                   <Button
                     variant="danger-ghost" size="sm" icon="close" aria-label={t('shared.removeMember', { name: memberName(m, t) })}
                     title={t('shared.removeMember', { name: memberName(m, t) })} onClick={() => onRemove(folder, m)} data-testid="sf-member-remove"
@@ -346,9 +359,14 @@ function AdminFolders({ t }) {
   )
 }
 
-function MyFolders({ t }) {
+// The folders shared with the caller. `people` keeps only the folders other
+// people shared from their homes and draws nothing without one: the
+// administrator's screen lists its own shared folders above.
+function MyFolders({ t, people = false }) {
   const folders = useLoad(() => sharedFoldersApi.mine(), [])
-  const list = folders.data?.folders || []
+  const all = folders.data?.folders || []
+  const list = people ? all.filter(f => f.owner) : all
+  if (people && (folders.status !== 'ready' || list.length === 0)) return null
   let body
   if (folders.status === 'loading') body = <SkeletonRows count={2} />
   else if (folders.status === 'error') body = <LoadError title={t('shared.loadFailed')} error={folders.error} onRetry={folders.retry} />
@@ -360,11 +378,12 @@ function MyFolders({ t }) {
       </ul>
     )
   }
+  const titleId = people ? 'sf-people-title' : 'sf-title'
   return (
-    <section className="sf" aria-labelledby="sf-title" data-testid="sf-mine">
+    <section className="sf" aria-labelledby={titleId} data-testid={people ? 'sf-people' : 'sf-mine'}>
       <header className="sf-head">
         <div className="sf-head__text">
-          <h2 className="sf-title" id="sf-title">{t('shared.userTitle')}{list.length > 0 && <span className="sf-count">{list.length}</span>}</h2>
+          <h2 className="sf-title" id={titleId}>{t('shared.userTitle')}{list.length > 0 && <span className="sf-count">{list.length}</span>}</h2>
           <p className="sf-lede">{t('shared.userLede')}</p>
         </div>
       </header>
@@ -376,5 +395,5 @@ function MyFolders({ t }) {
 export default function SharedFolders() {
   const { t } = useTranslation('workspace')
   const { isAdmin } = useAuth()
-  return isAdmin ? <AdminFolders t={t} /> : <MyFolders t={t} />
+  return isAdmin ? <><AdminFolders t={t} /><MyFolders t={t} people /></> : <MyFolders t={t} />
 }

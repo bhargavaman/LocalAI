@@ -108,7 +108,8 @@ test('the files entry shows with the chats feature, like All chats', () => {
 test('Chats is not a primary item: Home starts a chat, and All chats shows only with the chats feature', () => {
   const paths = (a) => visiblePrimary(primaryDestinations, a).map(i => i.path)
   for (const a of [{ ...user, hasFeature: (f) => f === 'chats' }, user, { ...user, isAdmin: true, hasFeature: () => true }]) {
-    assert.ok(!paths(a).some(p => p === '/app/chats' || p.startsWith('/app/chats/')))
+    // Connections is the one chat route in the sidebar; its address is the first tab of the connectors page.
+    assert.ok(!paths(a).some(p => p === '/app/chats' || (p.startsWith('/app/chats/') && p !== '/app/chats/connectors')))
   }
   const all = (a) => visiblePrimary([allChatsDestination], a).map(i => i.path)
   assert.equal(allChatsDestination.path, '/app/chats/all')
@@ -198,32 +199,69 @@ test('sidebar entries own one route each: Apps on /app/addons, never a hub', asy
   assert.equal(hubOwnsPath(addons, '/app/addons', { ...auth, features: { addon_navigation: false } }), true)
 })
 
-test('the primary items: files, pages, agents, MCP connectors, memory, skills, models and add-ons', () => {
+test('P2P sits under Swarm whenever P2P is on, and under This machine only with P2P off on a single server', async () => {
+  const { operateHub, resolveTabs } = await import('../../src/components/hub/hubConfig.js')
+  const auth = features => ({ isAdmin: true, authEnabled: true, hasFeature: () => true, features })
+  const at = (features, path) => {
+    const { tabs, current } = resolveTabs(operateHub, auth(features), path)
+    return { ids: tabs.map(t => t.id), current: current?.id }
+  }
+  // A single server with P2P on: both tabs, P2P under Swarm, Nodes under This machine.
+  let r = at({ distributed: false, p2p: true }, '/app/p2p')
+  assert.ok(r.ids.includes('machine') && r.ids.includes('cluster'))
+  assert.equal(r.current, 'cluster')
+  assert.equal(at({ distributed: false, p2p: true }, '/app/p2p/settings').current, 'cluster')
+  assert.equal(at({ distributed: false, p2p: true }, '/app/nodes').current, 'machine')
+  // A single server with P2P off: no Cluster group, P2P under This machine.
+  r = at({ distributed: false, p2p: false }, '/app/p2p')
+  assert.ok(!r.ids.includes('cluster'))
+  assert.equal(r.current, 'machine')
+  // A cluster: Swarm owns everything, P2P on or off.
+  for (const p2p of [true, false]) {
+    r = at({ distributed: true, p2p }, '/app/p2p')
+    assert.ok(!r.ids.includes('machine'))
+    assert.equal(r.current, 'cluster')
+  }
+  // Before /api/features answers, neither tab shows P2P: the bar does not jump.
+  r = at({}, '/app/operate')
+  assert.ok(!r.ids.includes('cluster'))
+})
+
+test('the primary items: files, projects, pages, agents, connections, knowledge, skills, models and add-ons', () => {
   assert.deepEqual(primaryDestinations.map(i => i.path), [
-    '/app/files', '/app/pages', '/app/agents', '/app/mcp-connectors', '/app/collections', '/app/skills', '/app/models', '/app/addons',
+    '/app/files', '/app/projects', '/app/pages', '/app/agents', '/app/chats/connectors', '/app/collections', '/app/skills', '/app/models', '/app/addons',
   ])
+  // MCP connectors is a tab of Connections, not an item of its own.
+  assert.ok(!primaryDestinations.some(i => i.path === '/app/mcp-connectors'))
+  assert.equal(primaryDestinations.find(i => i.path === '/app/chats/connectors').labelKey, 'items.connections')
   const all = { isAdmin: true, hasFeature: () => true, hasBuiltin: false, features: {}, hasPages: true }
-  assert.equal(visiblePrimary(primaryDestinations, all).length, 8)
-  // A server without collections hides Memory; a user without chats sees no chat pages.
+  assert.equal(visiblePrimary(primaryDestinations, all).length, 9)
+  // A server without collections hides Knowledge; a user without chats sees no chat pages.
   // Agents have their own feature: an administrator grants it apart from the chats.
   assert.ok(!visiblePrimary(primaryDestinations, { ...all, features: { collections: false } }).some(i => i.path === '/app/collections'))
   const noChats = visiblePrimary(primaryDestinations, { ...all, hasFeature: f => f !== 'chats' }).map(i => i.path)
   assert.deepEqual(noChats, ['/app/agents', '/app/collections', '/app/models', '/app/addons'])
-  // Skills sit right after Memory.
+  // Skills sit right after Knowledge.
   const order = visiblePrimary(primaryDestinations, all).map(i => i.path)
   assert.equal(order[order.indexOf('/app/collections') + 1], '/app/skills')
   const noAgents = visiblePrimary(primaryDestinations, { ...all, hasFeature: f => f !== 'agents' }).map(i => i.path)
-  assert.deepEqual(noAgents, ['/app/files', '/app/pages', '/app/mcp-connectors', '/app/collections', '/app/skills', '/app/models', '/app/addons'])
+  assert.deepEqual(noAgents, ['/app/files', '/app/projects', '/app/pages', '/app/chats/connectors', '/app/collections', '/app/skills', '/app/models', '/app/addons'])
 })
 
-test('an item lights up on its own pages: agents own triggers and messaging connectors; skills have their own item', () => {
+test('an item lights up on its own pages: agents own triggers; Connections own both tab routes; skills have their own item', () => {
   const item = (p) => primaryDestinations.find(i => i.path === p)
-  for (const p of ['/app/agents', '/app/agents/a1/edit', '/app/triggers/t1', '/app/chats/connectors']) {
+  for (const p of ['/app/agents', '/app/agents/a1/edit', '/app/triggers/t1']) {
     assert.equal(primaryActive(item('/app/agents'), p), true, p)
   }
+  // Agents no longer light up on the connectors page; Connections do, on the accounts and messaging tabs and on the MCP servers route.
+  for (const p of ['/app/chats/connectors', '/app/chats/connectors/', '/app/mcp-connectors']) {
+    assert.equal(primaryActive(item('/app/agents'), p), false, p)
+    assert.equal(primaryActive(item('/app/chats/connectors'), p), true, p)
+  }
+  assert.equal(primaryActive(item('/app/chats/connectors'), '/app/agents'), false)
+  assert.equal(primaryActive(item('/app/chats/connectors'), '/app/chats/all'), false)
   assert.equal(primaryActive(item('/app/agents'), '/app/skills'), false)
   for (const p of ['/app/skills', '/app/skills/new', '/app/skills/edit/user/review']) assert.equal(primaryActive(item('/app/skills'), p), true, p)
-  assert.equal(primaryActive(item('/app/mcp-connectors'), '/app/mcp-connectors'), true)
   assert.equal(primaryActive(item('/app/collections'), '/app/collections/docs'), true)
   assert.equal(primaryActive(item('/app/agents'), '/app/chats/c1'), false)
 })

@@ -42,9 +42,10 @@
     "audioTransform": "Transformação de Áudio",
     "faceRecognition": "Reconhecimento Facial",
     "voiceRecognition": "Reconhecimento de Voz",
+    "projects": "Projetos",
     "agents": "Agentes",
     "skills": "Habilidades",
-    "memory": "Memória",
+    "memory": "Conhecimento",
     "mcpJobs": "Trabalhos de CI MCP",
     "usage": "Uso",
     "users": "Usuários",
@@ -52,8 +53,8 @@
     "backends": "Backends",
     "voiceLibrary": "Biblioteca de Vozes",
     "traces": "Rastreamentos",
-    "nodes": "Nós",
-    "scheduling": "Agendamento",
+    "nodes": "Workers",
+    "scheduling": "Posicionamento",
     "swarm": "Swarm",
     "system": "Sistema",
     "settings": "Configurações",
@@ -62,7 +63,7 @@
     "overview": "Visão geral",
     "thisMachine": "Esta máquina",
     "failover": "Failover",
-    "p2p": "P2P",
+    "p2p": "Compartilhamento",
     "addons": "Complementos",
     "logs": "Logs",
     "trafficModels": "Models",
@@ -71,10 +72,12 @@
     "chats": "Chats",
     "files": "Arquivos",
     "triggers": "Gatilhos",
-    "mcpConnectors": "Conectores MCP",
+    "connections": "Conexões",
     "chatsAdmin": "Chats de todos os usuários",
     "pages": "Páginas",
-    "allChats": "Todos os chats"
+    "allChats": "Todos os chats",
+    "inbox": "Notificações",
+    "apiKeys": "Chaves de API"
   },
   "footer": {
     "github": "GitHub",
@@ -110,7 +113,8 @@
       "addons": "Instale complementos e abra os apps que eles oferecem.",
       "triggers": "Inicie um chat sozinho, em um horário agendado ou quando um arquivo chegar."
     },
-    "operateSupporting": "O que roda neste servidor, como ele é usado e como está configurado."
+    "operateSupporting": "O que roda neste servidor, como ele é usado e como está configurado.",
+    "updates": "Atualizações"
   },
   "pinnedPages": "Páginas fixadas",
   "new": "Novo",
@@ -119,5 +123,57 @@
   "untitledChat": "Chat sem título",
   "chatRunning": "Em andamento",
   "automatedWaiting": "Chats automáticos aguardando você: {{count}}",
-  "automatedRunning": "Chats automáticos em execução: {{count}}"
+  "automatedRunning": "Chats automáticos em execução: {{count}}",
+  "inboxUnread_one": "Notificações, {{count}} não lida",
+  "inboxUnread_other": "Notificações, {{count}} não lidas",
+  "inboxArrived": "Nova notificação: {{title}}",
+  "inboxArrivedMany_one": "{{count}} nova notificação",
+  "inboxArrivedMany_other": "{{count}} novas notificações",
+  "updatesBadge_one": "{{count}} atualização precisa de você",
+  "updatesBadge_other": "{{count}} atualizações precisam de você",
+  "inboxOps_one": "{{count}} operação em andamento",
+  "inboxOps_other": "{{count}} operações em andamento",
+  "inboxOpsFailed_one": "{{count}} operação falhou",
+  "inboxOpsFailed_other": "{{count}} operações falharam",
+  "inboxOpsFailedAnnounce": "Uma operação falhou. Veja a aba Atividade em Notificações.",
+  "activityEntry": "Atividade",
+  "navLinkExternal": "Abre {{site}} em uma nova guia após você confirmar",
+  "navLinkAsk": "Abrir este link?",
+  "startPage": "Página inicial",
+  "admin": {
+    "nav": {
+      "overview": "Visão geral",
+      "apiReference": "Referência da API",
+      "back": "Voltar para {{name}}",
+      "search": "Pesquisar",
+      "label": "Administração",
+      "crumbs": "Trilha de navegação"
+    },
+    "groups": {
+      "machine": "Esta máquina",
+      "cluster": "Cluster",
+      "runtime": "Modelos e execução",
+      "access": "Acesso"
+    },
+    "palette": {
+      "label": "Pesquisar na administração",
+      "input": "Pesquisar páginas, pessoas, workers e configurações",
+      "placeholder": "Páginas, pessoas, workers, configurações",
+      "results": "Resultados",
+      "none": "Nada corresponde a \"{{query}}\".",
+      "move": "mover",
+      "open": "abrir",
+      "kinds": {
+        "page": "Páginas",
+        "setting": "Configurações",
+        "worker": "Workers",
+        "person": "Pessoas"
+      }
+    },
+    "filters": {
+      "label": "Filtros",
+      "active": "{{count}} definido(s)",
+      "sort": "Ordenar"
+    }
+  }
 }

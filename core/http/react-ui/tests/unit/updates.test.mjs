@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { backendRows } from '../../src/utils/updates.js'
 import {
-  classifyUpdate, updateView, upgradeBody, updateErrorKey, formatWhen, UPDATE_TYPES, UPDATE_STATES,
+  classifyUpdate, entryUpdateNote, updateView, upgradeBody, updateErrorKey, formatWhen, UPDATE_TYPES, UPDATE_STATES,
 } from '../../src/components/addons/updateState.js'
 import { updateStatus, stateChip } from '../../src/components/addons/addonState.js'
 import { createAddonsApi, AddonsError } from '../../src/utils/addonsApi.js'
@@ -25,6 +26,16 @@ test('updates: a failed, unknown or unreadable check is never current', () => {
   assert.deepEqual(updateView({ state: 'incompatible', reasons: ['host-version', 'made-up'] }).reasons, ['host-version'])
   assert.equal(updateStatus({ update: { state: 'check-failed' } }).kind, 'failed')
   assert.equal(updateStatus({ update: { state: 'integrity-error' } }).kind, 'integrity')
+})
+
+test('updates: a library card says when the update status of an installed add-on is not known, and never reads it as current', () => {
+  // The development card of an installed add-on that no check answered for.
+  assert.equal(entryUpdateNote(undefined).state, 'unknown')
+  assert.equal(entryUpdateNote({ state: 'check-failed', error: 'refresh-failed' }).state, 'check-failed')
+  assert.equal(entryUpdateNote({ state: 'check-failed' }).tone, 'error')
+  assert.equal(entryUpdateNote({ state: 'up-to-date' }).state, 'up-to-date')
+  // An update has its own badge and action: no note beside them.
+  assert.equal(entryUpdateNote({ state: 'update-available', available: true, version: '0.0.0-dev.39b3e9bb7d38', digest: 'sha256:' + 'b'.repeat(64) }), null)
 })
 
 test('updates: an upgrade is offered only for a candidate the owner confirmed, with a digest to pin', () => {
@@ -86,7 +97,7 @@ test('updates: the client sends check and upgrade as the administrator\'s own ac
   assert.equal(calls[1].init.headers['X-LocalAI-Confirm'], 'chk-1')
   assert.equal(calls[1].init.credentials, 'same-origin')
   const done = await api.updates.upgrade('notes', { operationId: 'up-9', expectedDigest: 'sha256:a', candidateDigest: 'sha256:b', generation: 1 })
-  assert.deepEqual(done, { operationId: 'op-9', addonId: 'notes', phase: 'completed', generation: 2, runtimeState: '', stage: '', failureCode: '' })
+  assert.deepEqual(done, { operationId: 'op-9', addonId: 'notes', phase: 'completed', generation: 2, runtimeState: '', stage: '', failureCode: '', jobId: '' })
   assert.equal(calls[2].init.headers['X-LocalAI-Confirm'], 'up-9')
   assert.deepEqual(JSON.parse(calls[2].init.body), { operationId: 'up-9', expectedDigest: 'sha256:a', candidateDigest: 'sha256:b', generation: 1 })
   await assert.rejects(api.updates.upgrade('notes', { operationId: 'stale-1', expectedDigest: 'stale', candidateDigest: 'x' }), (e) => e instanceof AddonsError && e.kind === 'invalid' && e.type === 'stale_installed' && e.status === 409)
@@ -101,8 +112,34 @@ test('updates: every locale carries the same update keys as English, and words f
     const d = load(lang)
     assert.deepEqual(walk(d.updates || {}).sort(), en, `${lang} update keys differ from English`)
     for (const s of UPDATE_STATES) assert.ok(d.updates.state[s], `${lang} lacks the words for state ${s}`)
-    for (const r of ['platform', 'host-version', 'api-version', 'protocol-version', 'sdk-version', 'data-format', 'digest-changed']) assert.ok(d.updates.reason[r], `${lang} lacks reason ${r}`)
+    for (const r of ['platform', 'host-version', 'api-version', 'protocol-version', 'sdk-version', 'data-format', 'feature-level', 'digest-changed']) assert.ok(d.updates.reason[r], `${lang} lacks reason ${r}`)
     for (const c of ['source-unavailable', 'refresh-failed', 'credential-unavailable', 'not-listed', 'ambiguous-release', 'canceled', 'internal']) assert.ok(d.updates.class[c], `${lang} lacks class ${c}`)
     for (const type of [...UPDATE_TYPES, 'unknownOutcome', 'auth', 'denied', 'network', 'unavailable']) assert.ok(d.updates.errors[type], `${lang} lacks the words for ${type}`)
   }
+})
+
+test('updates: a release that needs a newer LocalAI is incompatible with the reason feature-level, and an install that fails for it says so', async () => {
+  assert.deepEqual(updateView({ state: 'incompatible', reasons: ['feature-level', 'made-up'] }).reasons, ['feature-level'])
+  const { describeOutcome } = await import('../../src/components/addons/errors.js')
+  for (const lang of readdirSync(join(here, '../../public/locales'))) {
+    const d = JSON.parse(readFileSync(join(here, '../../public/locales', lang, 'addons.json'), 'utf8'))
+    const t = (key) => key.split('.').reduce((o, k) => o?.[k], d)
+    // The cause is final whatever the outcome word is.
+    for (const outcome of ['failed', 'not_applied', 'invalid']) {
+      const text = describeOutcome(outcome, t, { type: 'needs_newer_host', kind: 'invalid' })
+      assert.ok(text && text === d.errors.needsNewerHost, `${lang} says ${outcome} for needs_newer_host with its own words`)
+    }
+  }
+})
+
+test('updates: a queued backend update is updating with no progress, a running one keeps its progress', () => {
+  const snapshot = { sources: { gallery: { state: 'ok' } }, items: [{ id: 'gallery:whisper', kind: 'gallery', name: 'whisper', installedVersion: '1', availableVersion: '2' }] }
+  const op = (extra) => ({ id: 'whisper', name: 'whisper', fullName: 'whisper', jobID: 'j', isBackend: true, isDeletion: false, taskType: 'upgrade', cancellable: true, ...extra })
+  const queued = backendRows(snapshot, { operations: [op({ isQueued: true, progress: 40 })] })[0]
+  assert.equal(queued.state, 'updating')
+  assert.equal(queued.queued, true)
+  assert.equal(queued.progress, 0)
+  const running = backendRows(snapshot, { operations: [op({ isQueued: false, progress: 40 })] })[0]
+  assert.equal(running.queued, false)
+  assert.equal(running.progress, 40)
 })

@@ -8,7 +8,7 @@ JOBS?=$(shell nproc --ignore=1)
 
 # stablediffusion.cpp (ggml)
 STABLEDIFFUSION_GGML_REPO?=https://github.com/leejet/stable-diffusion.cpp
-STABLEDIFFUSION_GGML_VERSION?=290148d2e31ca6ef9757d567905776b5f3646db5
+STABLEDIFFUSION_GGML_VERSION?=3b12781fac1a22eda27ad0f08d0884ef816f24d7
 
 CMAKE_ARGS+=-DGGML_MAX_NAME=128
 
@@ -38,7 +38,7 @@ else ifeq ($(BUILD_TYPE),hipblas)
 	ROCM_PATH ?= /opt/rocm
 	export CXX=$(ROCM_HOME)/llvm/bin/clang++
 	export CC=$(ROCM_HOME)/llvm/bin/clang
-	AMDGPU_TARGETS?=gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1151,gfx1200,gfx1201
+	AMDGPU_TARGETS?=gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201
 	# SD_HIPBLAS turns on ggml's HIP backend itself; GGML_HIPBLAS is the name ggml
 	# used before it was renamed to GGML_HIP, so passing it here only produced an
 	# unused-variable warning.

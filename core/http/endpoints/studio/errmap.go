@@ -21,14 +21,23 @@ const (
 	typeAuthz        = "authorization_error"
 	typeFilesOff     = "files_off"
 	typeAgentsOff    = "agents_off"
-	typeNotifyOff    = "notifications_off"
 	typeTriggersOff  = "triggers_off"
 	typeConnectorOff = "connectors_off"
+	// typeNotConnected and typeReconnectNeeded: an OAuth connection has no
+	// login yet, or its login ended.
+	typeNotConnected    = "not_connected"
+	typeReconnectNeeded = "reconnect_needed"
+	// typeDuplicateConnection: the connection to save is the same bot as
+	// another enabled one; send confirm_duplicate to save it anyway.
+	typeDuplicateConnection = "duplicate_connection"
 	// typePageNotAllowed: a shared page called its bridge without your consent
 	// to the version it runs (or after you revoked it).
 	typePageNotAllowed = "page_not_allowed"
 	// typeSharedPagesOff: an administrator switched the shared pages off.
 	typeSharedPagesOff = "shared_pages_off"
+	// typeUserSharesOff: an administrator switched off the pages that people
+	// share from their own homes.
+	typeUserSharesOff = "user_page_shares_off"
 )
 
 // errRule is one row of an error table: the errors that match (errors.Is), the

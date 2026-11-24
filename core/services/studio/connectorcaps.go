@@ -12,6 +12,7 @@ import (
 const (
 	CapTriggersPropose  = contract.CapTriggersPropose
 	CapTriggersRun      = contract.CapTriggersRun
+	CapTriggersChange   = contract.CapTriggersChange
 	CapProposalsConfirm = contract.CapProposalsConfirm
 )
 
@@ -28,9 +29,17 @@ type CapabilityRequest struct {
 	Owner      string
 	Agent      string
 	Sender     string
+	// Username is the handle of the sender on the platform, when the message
+	// had one. It lets the gate match an @handle entry of the allowlist.
+	Username string
 	// Roles are the role IDs, declared by the kind, that the add-on reported
 	// for the sender of this message. Empty when Sender is.
-	Roles     []string
+	Roles []string
+	// Chat and Direct say where the sender wrote. A chat that the owner set to
+	// let everyone in it act (connectors.TrustAct) lets the gate trust a sender
+	// who is not listed, but never in a direct message.
+	Chat      string
+	Direct    bool
 	Kind      string
 	Sensitive bool
 }

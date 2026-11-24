@@ -10,6 +10,7 @@
 # All four files invoke this script via
 #   RUN --mount=type=bind,source=.docker/install-base-deps.sh,target=/usr/local/sbin/install-base-deps \
 #       --mount=type=bind,source=.docker/apt-mirror.sh,target=/usr/local/sbin/apt-mirror \
+#       --mount=type=bind,source=.docker/rocm-compat-links.sh,target=/usr/local/sbin/rocm-compat-links \
 #       bash /usr/local/sbin/install-base-deps
 #
 # so the prebuilt CI base image and the from-source local-dev path are
@@ -28,6 +29,7 @@
 #   GRPC_MAKEFLAGS            ("-j4 -Otarget")
 #   APT_MIRROR / APT_PORTS_MIRROR  (optional; consumed by /usr/local/sbin/apt-mirror)
 #   AMDGPU_TARGETS            (optional; only relevant for hipblas downstream)
+#   ROCM_PACKAGES             (optional; hipblas only, default "amdrocm-blas-dev10.1", ROCm 7.x: "hipblas-dev hipblaslt-dev rocblas-dev")
 #
 # IMPORTANT: install logic is copied verbatim from the prior in-Dockerfile
 # RUN blocks. Do not paraphrase apt invocations / version pins / sed line
@@ -41,12 +43,23 @@ if [ -x /usr/local/sbin/apt-mirror ]; then
         sh /usr/local/sbin/apt-mirror
 fi
 
+# apt-get that falls back to the upstream sources when the mirror is bad
+# (see the header of .docker/apt-mirror.sh). Same as plain apt-get when no
+# mirror was set or the script is not mounted.
+apt_retry() {
+    if [ -x /usr/local/sbin/apt-mirror ]; then
+        sh /usr/local/sbin/apt-mirror apt-get "$@"
+    else
+        apt-get "$@"
+    fi
+}
+
 export DEBIAN_FRONTEND=noninteractive
 export MAKEFLAGS="${GRPC_MAKEFLAGS:-}"
 
 # --- 1. Base apt build deps ---
-apt-get update
-apt-get install -y --no-install-recommends \
+apt_retry update
+apt_retry install -y --no-install-recommends \
     build-essential \
     ccache git \
     ca-certificates \
@@ -61,10 +74,10 @@ rm -rf /var/lib/apt/lists/*
 # NB: this block intentionally installs `cmake` via apt as part of the
 # Vulkan tooling — must run before the dedicated CMake step below.
 if [ "${BUILD_TYPE:-}" = "vulkan" ] && [ "${SKIP_DRIVERS:-false}" = "false" ]; then
-    apt-get update
-    apt-get install -y  --no-install-recommends \
+    apt_retry update
+    apt_retry install -y  --no-install-recommends \
         software-properties-common pciutils wget gpg-agent
-    apt-get install -y libglm-dev cmake libxcb-dri3-0 libxcb-present0 libpciaccess0 \
+    apt_retry install -y libglm-dev cmake libxcb-dri3-0 libxcb-present0 libpciaccess0 \
         libpng-dev libxcb-keysyms1-dev libxcb-dri3-dev libx11-dev g++ gcc \
         libwayland-dev libxrandr-dev libxcb-randr0-dev libxcb-ewmh-dev \
         git python-is-python3 bison libx11-xcb-dev liblz4-dev libzstd-dev \
@@ -75,7 +88,7 @@ if [ "${BUILD_TYPE:-}" = "vulkan" ] && [ "${SKIP_DRIVERS:-false}" = "false" ]; t
     # tooling, not hardware drivers — without Mesa the packaged Vulkan backend
     # would ship a loader that finds no GPU. package-gpu-libs.sh bundles these
     # .so files plus their deps into the backend so it stays self-contained.
-    apt-get install -y mesa-vulkan-drivers libdrm2
+    apt_retry install -y mesa-vulkan-drivers libdrm2
     if [ "amd64" = "${TARGETARCH:-}" ]; then
         wget "https://sdk.lunarg.com/sdk/download/1.4.335.0/linux/vulkansdk-linux-x86_64-1.4.335.0.tar.xz"
         tar -xf vulkansdk-linux-x86_64-1.4.335.0.tar.xz
@@ -150,11 +163,11 @@ if case "${BUILD_TYPE:-}" in sycl*) true;; *) false;; esac \
         -o /usr/share/keyrings/intel-graphics.asc
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.asc] https://repositories.intel.com/gpu/ubuntu ${ubuntu_codename} unified" \
         > /etc/apt/sources.list.d/intel-graphics.list
-    apt-get update
+    apt_retry update
     # The first package holds the driver OpenCL talks to, the second the driver
     # Level Zero talks to. Between them they pull in the compiler and the memory
     # manager that both need.
-    apt-get install -y --no-install-recommends \
+    apt_retry install -y --no-install-recommends \
         intel-opencl-icd \
         libze-intel-gpu1
     apt-get clean
@@ -163,8 +176,8 @@ fi
 
 # --- 3. CUDA toolkit (BUILD_TYPE=cublas|l4t) ---
 if { [ "${BUILD_TYPE:-}" = "cublas" ] || [ "${BUILD_TYPE:-}" = "l4t" ]; } && [ "${SKIP_DRIVERS:-false}" = "false" ]; then
-    apt-get update
-    apt-get install -y  --no-install-recommends \
+    apt_retry update
+    apt_retry install -y  --no-install-recommends \
         software-properties-common pciutils
     if [ "amd64" = "${TARGETARCH:-}" ]; then
         curl -O "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION}/x86_64/cuda-keyring_1.1-1_all.deb"
@@ -178,16 +191,17 @@ if { [ "${BUILD_TYPE:-}" = "cublas" ] || [ "${BUILD_TYPE:-}" = "l4t" ]; } && [ "
     fi
     dpkg -i cuda-keyring_1.1-1_all.deb
     rm -f cuda-keyring_1.1-1_all.deb
-    apt-get update
-    apt-get install -y --no-install-recommends \
+    apt_retry update
+    apt_retry install -y --no-install-recommends \
         "cuda-nvcc-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
         "libcufft-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
         "libcurand-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
         "libcublas-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
         "libcusparse-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
-        "libcusolver-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}"
+        "libcusolver-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
+        "cuda-nvml-dev-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}"
     if [ "${CUDA_MAJOR_VERSION}" = "13" ] && [ "arm64" = "${TARGETARCH:-}" ]; then
-        apt-get install -y --no-install-recommends \
+        apt_retry install -y --no-install-recommends \
             "libcufile-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
             "libcudnn9-cuda-${CUDA_MAJOR_VERSION}" \
             "cuda-cupti-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION}" \
@@ -203,13 +217,13 @@ if [ "${BUILD_TYPE:-}" = "cublas" ] && [ "${TARGETARCH:-}" = "arm64" ]; then
     wget "https://developer.download.nvidia.com/compute/cudss/0.6.0/local_installers/cudss-local-tegra-repo-ubuntu${UBUNTU_VERSION}-0.6.0_0.6.0-1_arm64.deb"
     dpkg -i "cudss-local-tegra-repo-ubuntu${UBUNTU_VERSION}-0.6.0_0.6.0-1_arm64.deb"
     cp /var/cudss-local-tegra-repo-ubuntu"${UBUNTU_VERSION}"-0.6.0/cudss-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get -y install cudss "cudss-cuda-${CUDA_MAJOR_VERSION}"
+    apt_retry update
+    apt_retry -y install cudss "cudss-cuda-${CUDA_MAJOR_VERSION}"
     wget "https://developer.download.nvidia.com/compute/nvpl/25.5/local_installers/nvpl-local-repo-ubuntu${UBUNTU_VERSION}-25.5_1.0-1_arm64.deb"
     dpkg -i "nvpl-local-repo-ubuntu${UBUNTU_VERSION}-25.5_1.0-1_arm64.deb"
     cp /var/nvpl-local-repo-ubuntu"${UBUNTU_VERSION}"-25.5/nvpl-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get install -y nvpl
+    apt_retry update
+    apt_retry install -y nvpl
 fi
 
 # --- 5. clBLAS (BUILD_TYPE=clblas) ---
@@ -217,8 +231,8 @@ fi
 # Dockerfile.base-grpc-builder. No CI matrix entry currently uses this,
 # but keep parity so a future BUILD_TYPE=clblas build doesn't drift.
 if [ "${BUILD_TYPE:-}" = "clblas" ] && [ "${SKIP_DRIVERS:-false}" = "false" ]; then
-    apt-get update
-    apt-get install -y --no-install-recommends \
+    apt_retry update
+    apt_retry install -y --no-install-recommends \
         libclblast-dev
     apt-get clean
     rm -rf /var/lib/apt/lists/*
@@ -226,11 +240,12 @@ fi
 
 # --- 6. ROCm / HIP build deps (BUILD_TYPE=hipblas) ---
 if [ "${BUILD_TYPE:-}" = "hipblas" ] && [ "${SKIP_DRIVERS:-false}" = "false" ]; then
-    apt-get update
-    apt-get install -y --no-install-recommends \
-        hipblas-dev \
-        hipblaslt-dev \
-        rocblas-dev
+    apt_retry update
+    # ROCM_PACKAGES lets a build on another ROCm release (e.g. 7.x, whose
+    # package names differ) pass its own list; unset keeps the 10.1 default.
+    # shellcheck disable=SC2086 # word splitting of the package list is intended
+    apt_retry install -y --no-install-recommends \
+        ${ROCM_PACKAGES-amdrocm-blas-dev10.1}
     apt-get clean
     rm -rf /var/lib/apt/lists/*
     # I have no idea why, but the ROCM lib packages don't trigger ldconfig after they install,
@@ -241,6 +256,14 @@ if [ "${BUILD_TYPE:-}" = "hipblas" ] && [ "${SKIP_DRIVERS:-false}" = "false" ]; 
     echo "rocBLAS library data architectures:"
     (ls /opt/rocm*/lib/rocblas/library/Kernels* 2>/dev/null || ls /opt/rocm*/lib64/rocblas/library/Kernels* 2>/dev/null) | grep -oP 'gfx[0-9a-z+-]+' | sort -u || \
         echo "WARNING: No rocBLAS kernel data found"
+fi
+# ROCm 10.x has no /opt/rocm/llvm (its compiler is under
+# /opt/rocm/core-<ver>/lib/llvm), but the hipblas branch of the llama.cpp
+# Makefiles compiles with /opt/rocm/llvm/bin/clang++. The bind-mounted helper
+# adds the link and is a no-op on ROCm 7.x. Outside the SKIP_DRIVERS check on
+# purpose: a base image that already ships ROCm needs the link too.
+if [ "${BUILD_TYPE:-}" = "hipblas" ] && [ -f /usr/local/sbin/rocm-compat-links ]; then
+    sh /usr/local/sbin/rocm-compat-links
 fi
 
 echo "TARGETARCH: ${TARGETARCH:-}"
@@ -269,8 +292,8 @@ if [ "${CMAKE_FROM_SOURCE:-false}" = "true" ]; then
     tar xvf cmake.tar.gz
     ( cd "cmake-${CMAKE_VERSION}" && ./configure && make && make install )
 else
-    apt-get update
-    apt-get install -y \
+    apt_retry update
+    apt_retry install -y \
         cmake
     apt-get clean
     rm -rf /var/lib/apt/lists/*

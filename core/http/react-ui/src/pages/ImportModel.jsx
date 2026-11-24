@@ -2,6 +2,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { readStored, writeStored } from '../utils/storage'
 import { modelsApi, backendsApi } from '../utils/api'
 import { apiUrl } from '../utils/basePath'
 import { FEATURE_BACKEND_INSTALL } from '../utils/capabilities'
@@ -10,6 +11,7 @@ import { useResources } from '../hooks/useResources'
 import { detectSource, fitFor, importChecks, importRequest, machineFacts, requestText } from '../utils/tools'
 import { createTransferRateSampler } from '../utils/transferRate'
 import PageHeader from '../components/PageHeader'
+import { Tabs, Tag } from '../components/ui'
 import CodeEditor from '../components/CodeEditor'
 import SearchableSelect from '../components/SearchableSelect'
 import AmbiguityAlert from '../components/AmbiguityAlert'
@@ -18,6 +20,7 @@ import { classifyImportJob } from '../utils/importJob'
 import Icon from '../components/Icon'
 import ToolSteps from '../components/tools/ToolSteps'
 import Checks from '../components/tools/Checks'
+import { newPoll, pollStep, canStart, isTerminal } from '../utils/jobPolling'
 import '../components/tools/tools.css'
 import './import.css'
 
@@ -145,10 +148,10 @@ export default function ImportModel() {
   // Simple/Power modes they replace, which were the same form at two
   // different lengths.
   const [tab, setTab] = useState(() => {
-    try { return localStorage.getItem('import-form-tab') === 'yaml' ? 'yaml' : 'source' } catch { return 'source' }
+    return readStored('import.tab', ['import-form-tab']) === 'yaml' ? 'yaml' : 'source'
   })
   const [showOptions, setShowOptions] = useState(() => {
-    try { return localStorage.getItem('import-form-options') === 'open' } catch { return false }
+    return readStored('import.options', ['import-form-options']) === 'open'
   })
 
   const optionsToggleRef = useRef(null)
@@ -202,7 +205,7 @@ export default function ImportModel() {
   const pollRef = useRef(null)
 
   useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    return () => { if (pollRef.current) clearInterval(pollRef.current); pollRef.current = null }
   }, [])
 
   useEffect(() => {
@@ -212,11 +215,11 @@ export default function ImportModel() {
   }, [])
 
   useEffect(() => {
-    try { localStorage.setItem('import-form-tab', tab) } catch { /* ignore quota / privacy mode */ }
+    writeStored('import.tab', tab)
   }, [tab])
 
   useEffect(() => {
-    try { localStorage.setItem('import-form-options', showOptions ? 'open' : 'closed') } catch { /* ignore */ }
+    writeStored('import.options', showOptions ? 'open' : 'closed')
   }, [showOptions])
 
   useEffect(() => {
@@ -288,31 +291,57 @@ export default function ImportModel() {
   const startJobPolling = useCallback((jobId) => {
     if (pollRef.current) clearInterval(pollRef.current)
     transferRateRef.current.retain([jobId])
-    pollRef.current = setInterval(async () => {
+    // The poll runs as the state machine in utils/jobPolling.js: it skips a
+    // tick while a request is in flight and ends after repeated failures or
+    // a long silence, so the form never stays locked on a dead endpoint.
+    let poll = newPoll(Date.now())
+    let lastError = ''
+    const advance = (event) => {
+      const before = poll
+      poll = pollStep(poll, { ...event, now: Date.now() })
+      return before
+    }
+    let timer = null
+    // A newer poll replaces this one: its late responses must not touch state.
+    const current = () => pollRef.current === timer
+    const stop = () => {
+      transferRateRef.current.reset(jobId)
+      clearInterval(timer)
+      if (current()) pollRef.current = null
+    }
+    const finish = () => {
+      stop()
+      setIsSubmitting(false)
+      setJob(null)
+    }
+    const giveUp = () => {
+      finish()
+      addToast(t('toasts.importFailed', { message: lastError || 'lost contact with the server' }), 'error')
+    }
+    const tick = async () => {
+      const before = advance({ type: 'tick' })
+      if (poll.phase === 'gave-up') { giveUp(); return }
+      if (!canStart(before, poll)) return
       try {
         const data = await modelsApi.getJobStatus(jobId)
+        if (isTerminal(poll) || !current()) return
         // Failure is classified before completion: a failed or cancelled
         // job also sets `processed`. Shared with the model editor.
         const status = classifyImportJob(data)
         if (status.state === 'failed') {
-          transferRateRef.current.reset(jobId)
-          clearInterval(pollRef.current)
-          pollRef.current = null
-          setIsSubmitting(false)
-          setJob(null)
+          advance({ type: 'failed' })
+          finish()
           addToast(t('toasts.importFailed', { message: status.message }), 'error')
           return
         }
         if (status.state === 'done') {
-          transferRateRef.current.reset(jobId)
-          clearInterval(pollRef.current)
-          pollRef.current = null
-          setIsSubmitting(false)
-          setJob(null)
+          advance({ type: 'done' })
+          finish()
           setDone({ name: status.name })
           addToast(t('toasts.imported'), 'success')
           return
         }
+        advance({ type: 'ok' })
         // Keep the whole status. /api/operations carries the same job (the
         // import endpoint registers it in the opcache) but drops it the moment
         // it finishes, which is indistinguishable from a cancel — so terminal
@@ -322,9 +351,15 @@ export default function ImportModel() {
         const metrics = transferRateRef.current.sample(jobId, currentBytes, totalBytes)
         setJob({ ...data, currentBytes, totalBytes, ...metrics })
       } catch (err) {
+        if (isTerminal(poll) || !current()) return
         console.error('Error polling job status:', err)
+        lastError = err?.message || lastError
+        advance({ type: 'error' })
+        if (poll.phase === 'gave-up') giveUp()
       }
-    }, 1000)
+    }
+    timer = setInterval(tick, 1000)
+    pollRef.current = timer
   }, [addToast, t])
 
   const handleImport = useCallback(async (overrideBackend) => {
@@ -678,35 +713,23 @@ export default function ImportModel() {
         title={t('title')}
         supporting={isYaml ? t('subtitle.yaml') : t('subtitle.source')}
         actions={
-          <div className="dk-segmented" role="tablist" aria-label={t('tabs.ariaLabel')} data-testid="import-tabs">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!isYaml}
-              className={`dk-seg${!isYaml ? ' is-active' : ''}`}
-              onClick={() => setTab('source')}
-              data-testid="import-tab-source"
-            >
-              {t('tabs.source')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={isYaml}
-              className={`dk-seg${isYaml ? ' is-active' : ''}`}
-              onClick={() => setTab('yaml')}
-              data-testid="import-tab-yaml"
-            >
-              {t('tabs.yaml')}
-            </button>
-          </div>
+          <Tabs
+            variant="pill"
+            label={t('tabs.ariaLabel')}
+            idPrefix="import"
+            value={isYaml ? 'yaml' : 'source'}
+            onChange={setTab}
+            testId="import-tabs"
+            itemTestId="import-tab-"
+            items={[{ id: 'source', label: t('tabs.source') }, { id: 'yaml', label: t('tabs.yaml') }]}
+          />
         }
       />
 
       {!isYaml && <ToolSteps steps={steps} current={current} label={t('steps.label')} />}
 
       {!isYaml && (
-        <div className={`import-split${isSplit ? '' : ' import-split--stacked'}`}>
+        <div className={`import-split${isSplit ? '' : ' import-split--stacked'}`} role="tabpanel" id="import-panel-source" aria-labelledby="import-tab-source">
           <form
             className="import-main"
             data-testid="import-form"
@@ -734,7 +757,7 @@ export default function ImportModel() {
               </div>
               <p className="import-source__kind" data-testid="import-source-kind" data-kind={source?.kind || ''}>
                 {source
-                  ? <><span className={`dk-badge${source.ok ? ' dk-badge--accent' : ' dk-badge--warn'}`}>{t(`found.kind.${source.kind}`)}</span> <span className="dk-hint">{t('found.untouched')}</span></>
+                  ? <><Tag tone={source.ok ? 'accent' : 'warn'}>{t(`found.kind.${source.kind}`)}</Tag> <span className="dk-hint">{t('found.untouched')}</span></>
                   : <span className="dk-hint">{t('form.uriHint')}</span>}
               </p>
               {!source && (
@@ -950,7 +973,7 @@ export default function ImportModel() {
       )}
 
       {isYaml && (
-        <div className="import-yaml" data-testid="import-yaml">
+        <div className="import-yaml" role="tabpanel" id="import-panel-yaml" aria-labelledby="import-tab-yaml" data-testid="import-yaml">
           <div className="import-yaml__head">
             <span className="dk-label">{t('form.yamlEditor')}</span>
             <div className="import-yaml__acts">
