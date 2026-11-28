@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/mudler/LocalAI/core/services/studio/provider"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +34,9 @@ import (
 	"github.com/mudler/LocalAI/pkg/downloader"
 	"github.com/mudler/LocalAI/pkg/fsperm"
 	"github.com/mudler/LocalAI/pkg/modelartifacts"
+	"github.com/mudler/LocalAI/pkg/oci/cosignverify"
 	"github.com/mudler/LocalAI/pkg/signals"
+	"github.com/mudler/LocalAI/pkg/system"
 	"github.com/mudler/LocalAI/pkg/vram"
 
 	"github.com/mudler/LocalAI/pkg/model"
@@ -156,15 +160,22 @@ func New(opts ...config.AppOption) (*Application, error) {
 		xlog.Info("Reaped abandoned artifact partials", "count", removed)
 	}
 	recoverModelJournals(options)
+	// Name the folders this user cannot write before creating the optional
+	// ones, so that the warning shows even when a creation fails below.
+	warnUnwritableFolders(options)
+	// Without the generated content and upload folders LocalAI can still
+	// serve the models it has; only the requests that write files fail. A
+	// folder that this user may not create is named by the warning above, so
+	// it does not stop the start. Any other error still does.
 	if options.GeneratedContentDir != "" {
 		err := os.MkdirAll(options.GeneratedContentDir, 0o750)
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrPermission) {
 			return nil, fmt.Errorf("unable to create ImageDir: %q", err)
 		}
 	}
 	if options.UploadDir != "" {
 		err := os.MkdirAll(options.UploadDir, 0o750)
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrPermission) {
 			return nil, fmt.Errorf("unable to create UploadDir: %q", err)
 		}
 	}
@@ -178,6 +189,11 @@ func New(opts ...config.AppOption) (*Application, error) {
 		if options.DynamicConfigsDir != "" && options.DataPath != options.DynamicConfigsDir {
 			migrateDataFiles(options.DynamicConfigsDir, options.DataPath)
 		}
+		// Keep the Sigstore trust data that verifies signed add-ons and
+		// backends with the other persistent data. The default is under
+		// $HOME, which a container may not be able to write and loses when
+		// it is recreated.
+		cosignverify.SetDefaultTUFCachePath(filepath.Join(options.DataPath, "cache", "sigstore"))
 	}
 	// Initialize auth database if auth is enabled
 	if options.Auth.Enabled {
@@ -215,6 +231,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 	}
 	application.initStudioStore()
 	application.studioProvider = provider.New()
+	application.studioProvider.Transport().SetLoadWait(options.ChatsModelLoadWait)
 
 	// Initialize the OTel + Prometheus metric pipeline before any
 	// counter is created. monitoring.NewLocalAIMetricsService calls
@@ -335,6 +352,9 @@ func New(opts ...config.AppOption) (*Application, error) {
 		// Before failoverManager.Run starts below: the gate and sync must be
 		// in place for its first tick.
 		application.startFailoverDistributed(options.Context)
+		// Before the watchdog starts: in distributed mode the stored memory
+		// settings win over env and the file.
+		application.startClusterSettings(options.Context)
 		// Wire remote model unloader so ShutdownModel works for remote nodes
 		// Uses NATS to tell serve-backend nodes to Free + kill their backend process
 		application.modelLoader.SetRemoteUnloader(distSvc.Unloader)
@@ -449,6 +469,9 @@ func New(opts ...config.AppOption) (*Application, error) {
 		return nil, err
 	}
 	application.initStudioService()
+	if err := application.initPlugins(); err != nil {
+		return nil, err
+	}
 
 	if err := coreStartup.InstallModels(options.Context, application.GalleryService(), options.Galleries, options.BackendGalleries, options.SystemState, application.ModelLoader(), options.EnforcePredownloadScans, options.AutoloadBackendGalleries, options.RequireBackendIntegrity, nil, options.ModelsURL...); err != nil {
 		xlog.Error("error installing models", "error", err)
@@ -608,6 +631,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 	startMITMIfConfigured(application, options)
 
 	application.ModelLoader().SetBackendLoggingEnabled(options.EnableBackendLogging)
+	application.startPromptCache(options)
 
 	// Safety-net cleanup if the application context is cancelled without
 	// the caller invoking Shutdown directly. This is fire-and-forget — it
@@ -624,6 +648,7 @@ func New(opts ...config.AppOption) (*Application, error) {
 
 	// Initialize watchdog with current settings (after loading from file)
 	initializeWatchdog(application, options)
+	application.watchdogReady.Store(true)
 
 	if options.LoadToMemory != nil && !options.SingleBackend {
 		for _, m := range options.LoadToMemory {
@@ -711,6 +736,17 @@ func loadRuntimeSettingsFromFile(options *config.ApplicationConfig) {
 		xlog.Warn("failed to read runtime_settings.json", "error", err)
 		return
 	}
+	if options.Distributed.Enabled {
+		// The cluster store owns the memory settings in distributed mode. A
+		// copy in this frontend's file would make it differ from the others
+		// until the cluster document is applied, and for every setting the
+		// document does not hold.
+		var memory config.RuntimeSettings
+		memory, settings = config.SplitMemorySettings(settings)
+		if keys := memory.SetKeys(); len(keys) > 0 {
+			xlog.Warn("Ignoring the memory settings in runtime_settings.json: in distributed mode they are cluster settings. Change them in Settings.", "keys", keys)
+		}
+	}
 	options.ApplyRuntimeSettingsAtStartup(&settings)
 	xlog.Debug("Runtime settings loaded from runtime_settings.json")
 }
@@ -719,6 +755,7 @@ func loadRuntimeSettingsFromFile(options *config.ApplicationConfig) {
 func initializeWatchdog(application *Application, options *config.ApplicationConfig) {
 	// Get effective max active backends (considers both MaxActiveBackends and deprecated SingleBackend)
 	lruLimit := options.GetEffectiveMaxActiveBackends()
+	application.ModelLoader().SetModelSwap(options.ModelSwapEnabled())
 
 	// Create watchdog if enabled OR if LRU limit is set OR if memory reclaimer is enabled
 	if options.WatchDog || lruLimit > 0 || options.MemoryReclaimerEnabled {
@@ -894,6 +931,10 @@ func workspaceStartupCleanup(ctx context.Context, options *config.ApplicationCon
 				_ = a.studioFilesIndex.Close()
 				a.studioFilesIndex = nil
 			}
+			// The upgrade runs keep a SQLite file of their own under the data
+			// path, opened before the later steps that can still fail. Left
+			// open, Windows cannot remove it.
+			a.stopUpgradeRuns()
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -906,4 +947,34 @@ func workspaceStartupCleanup(ctx context.Context, options *config.ApplicationCon
 			}
 		}
 	}
+}
+
+// containerPermissionsDocs is the docs section on the user a container runs
+// as and the folders it must be able to write.
+const containerPermissionsDocs = "https://localai.io/docs/start/install/containers/#container-user-and-permissions"
+
+// warnUnwritableFolders logs one warning that names every folder LocalAI
+// writes to but cannot. A folder that exists passes MkdirAll even when this
+// user cannot write it, so without this check the failure shows only at the
+// first install or upload. It never stops the start: a server that cannot
+// install can still serve the models it has.
+func warnUnwritableFolders(options *config.ApplicationConfig) {
+	home, _ := os.UserHomeDir()
+	folders := []system.Folder{
+		{Name: "models", Path: options.SystemState.Model.ModelsPath},
+		{Name: "backends", Path: options.SystemState.Backend.BackendsPath},
+		{Name: "data", Path: options.DataPath},
+		{Name: "config", Path: options.DynamicConfigsDir},
+		{Name: "generated", Path: options.GeneratedContentDir},
+		{Name: "upload", Path: options.UploadDir},
+		{Name: "staging", Path: options.SystemState.StagingPath},
+		{Name: "home", Path: home},
+		{Name: "temp", Path: os.TempDir()},
+	}
+	bad := system.CheckWritable(folders)
+	if len(bad) == 0 {
+		return
+	}
+	xlog.Warn("LocalAI cannot write to some of its folders; installs, uploads and caches that use them will fail. Give the folders to the user LocalAI runs as, or run it as their owner. See "+containerPermissionsDocs,
+		"folders", system.FormatUnwritable(bad), "uid", os.Getuid(), "gid", os.Getgid())
 }

@@ -217,12 +217,17 @@
       "shared": "Partagée",
       "folder": "Espace de travail",
       "addon": "{{name}}",
-      "addonFrom": "de {{name}}"
+      "addonFrom": "de {{name}}",
+      "plugin": "Plugin"
     },
     "replacedBy": "Remplacée par {{name}}",
     "fallback_one": "{{skills}} intégrée utilisée : la compétence du module {{name}} est désactivée ou ne tourne pas ici.",
     "fallback_other": "{{skills}} intégrées utilisées : les compétences du module {{name}} sont désactivées ou ne tournent pas ici.",
-    "fromProject": "Du projet"
+    "fromProject": "Du projet",
+    "pluginGroup": "Plugin : {{name}}",
+    "pluginSwitch": "Utiliser {{name}} dans ce chat",
+    "pluginOff": "Désactivé dans ce chat. Ses skills, commandes et connecteurs ne servent pas ici.",
+    "pluginNoSkills": "Ce plugin ajoute des commandes ou des connecteurs, pas de skills."
   },
   "agent": {
     "label": "Agent",
@@ -250,7 +255,8 @@
       "context": "Contexte",
       "skills": "Skills et agents",
       "help": "Aide",
-      "yours": "Les vôtres"
+      "yours": "Les vôtres",
+      "plugins": "Plugins"
     },
     "models": {
       "label": "Modèles",
@@ -305,7 +311,9 @@
       "shared": "partagée",
       "yours": "la vôtre",
       "prompt": "prompt",
-      "tool": "outil"
+      "tool": "outil",
+      "plugin": "plugin",
+      "command": "commande"
     },
     "collides": "seulement avec /skill",
     "errors": {
@@ -422,7 +430,15 @@
     "alsoSavedWorking_other": "A aussi enregistré {{count}} fichiers de travail",
     "savedWorking_one": "A enregistré {{count}} fichier de travail",
     "savedWorking_other": "A enregistré {{count}} fichiers de travail",
-    "workingTitle": "Fichier de travail (un script, un journal ou un brouillon) : ouvrir {{path}}"
+    "workingTitle": "Fichier de travail (un script, un journal ou un brouillon) : ouvrir {{path}}",
+    "group": {
+      "used_one": "{{count}} outil utilisé",
+      "used_other": "{{count}} outils utilisés",
+      "calls_one": "{{count}} appel",
+      "calls_other": "{{count}} appels",
+      "failed_one": "{{count}} échec",
+      "failed_other": "{{count}} échecs"
+    }
   },
   "error": {
     "title": "La réponse a échoué",
@@ -437,6 +453,8 @@
       "model_cooldown_anon": "Le modèle a échoué au démarrage il y a un instant et se repose.",
       "model_load_failed": "Le modèle « {{model}} » n'a pas pu démarrer.",
       "model_load_failed_anon": "Le modèle n'a pas pu démarrer.",
+      "model_loading": "Le modèle « {{model}} » est encore en cours de chargement.",
+      "model_loading_anon": "Le modèle est encore en cours de chargement.",
       "model_not_found": "Le modèle « {{model}} » est introuvable.",
       "model_not_found_anon": "Le modèle est introuvable.",
       "upstream_key": "L'upstream a refusé la clé.",
@@ -454,6 +472,7 @@
       "model_backend_missing_admin": "Choisissez un autre modèle ou installez le backend depuis la page Backends.",
       "model_cooldown": "Réessayez dans {{seconds}} secondes.",
       "model_load_failed": "Vérifiez la configuration du modèle et son backend, puis réessayez.",
+      "model_loading": "Un gros modèle peut mettre de nombreuses minutes à se charger. Réessayez dans quelques minutes.",
       "model_not_found": "Choisissez un autre modèle ou installez celui-ci depuis la page Modèles.",
       "upstream_key": "Vérifiez la clé d'API dans les réglages du modèle.",
       "upstream_path": "L'adresse de l'upstream doit être le point d'accès complet, par exemple .../v1/chat/completions.",
@@ -682,7 +701,8 @@
   },
   "invoked": {
     "skill": "Skill : {{name}}",
-    "agent": "Agent : {{name}}"
+    "agent": "Agent : {{name}}",
+    "command": "Commande : {{name}}"
   },
   "marker": {
     "compacted": "Contexte compacté : de {{before}} à {{after}} tokens",
@@ -935,5 +955,10 @@
     "message_one": "Supprimer le chat affiché dans {{project}} ({{count}}) ? Cette action est irréversible.",
     "message_other": "Supprimer les {{count}} chats affichés dans {{project}} ? Cette action est irréversible.",
     "confirm": "Supprimer les affichés"
+  },
+  "plugins": {
+    "toolsGroup": "Plugins",
+    "toolsDescribe": "Ses connecteurs dans ce chat : {{names}}.",
+    "connectorFrom": "Du plugin {{name}}."
   }
 }

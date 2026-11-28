@@ -2,6 +2,8 @@ package p2ppair_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -263,6 +265,176 @@ func serviceSpecs(newStore func() p2ppair.Store) {
 			Expect(m.Warnings).To(ConsistOf(p2ppair.WarnNoRelay, p2ppair.WarnNoPublicAddr))
 		})
 
+		Context("with relay hints", func() {
+			var hints []peer.AddrInfo
+			hint := func(addr string, id peer.ID) peer.AddrInfo {
+				a, err := ma.NewMultiaddr(addr)
+				Expect(err).NotTo(HaveOccurred())
+				return peer.AddrInfo{ID: id, Addrs: []ma.Multiaddr{a}}
+			}
+			withHints := func(src func() []peer.AddrInfo) {
+				var err error
+				svc, err = p2ppair.NewService(newStore(), p2ppair.Config{
+					ServerPeer: server, Addrs: func() []ma.Multiaddr { return addrs },
+					Relays: relays, Registrar: reg, Issuer: iss, Now: clk.Now, Hints: src,
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			hintIDs := func(l *p2ppair.Link) []peer.ID {
+				var out []peer.ID
+				for _, h := range l.Hints {
+					out = append(out, h.ID)
+				}
+				return out
+			}
+			BeforeEach(func() {
+				hints = []peer.AddrInfo{
+					hint("/ip4/192.0.2.10/tcp/4001", newPeer()),
+					hint("/ip4/192.0.2.11/udp/4001/quic-v1", newPeer()),
+					hint("/ip4/192.0.2.12/tcp/4001", newPeer()),
+				}
+				withHints(func() []peer.AddrInfo { return hints })
+			})
+
+			It("puts at most two in the link, which parses with them", func() {
+				m := mint(p2ppair.MintRequest{})
+				Expect(hintIDs(m.Link)).To(Equal([]peer.ID{hints[0].ID, hints[1].ID}))
+				parsed, err := p2ppair.ParseLink(m.Link.String())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(parsed.HintAddrStrings()).To(Equal(m.Link.HintAddrStrings()))
+				Expect(m.Link.Pass).To(Equal("pass-g1"), "the pass stays on the gated relay")
+				Expect(m.Invite.RelayIDs).To(Equal([]string{"g1", "g2"}), "the invite row never keeps a hint")
+			})
+
+			It("leaves out a relay the server knows, the server itself and a repeat", func() {
+				g1, err := peer.AddrInfoFromP2pAddr(relays[0].Addr)
+				Expect(err).NotTo(HaveOccurred())
+				open, err := peer.AddrInfoFromP2pAddr(relays[2].Addr)
+				Expect(err).NotTo(HaveOccurred())
+				hints = []peer.AddrInfo{
+					hint("/ip4/198.51.100.1/tcp/4001", g1.ID),
+					hint("/ip4/198.51.100.3/tcp/4001", open.ID),
+					hint("/ip4/192.0.2.20/tcp/4001", server),
+					hints[0], hints[0],
+					{ID: newPeer()},
+				}
+				m := mint(p2ppair.MintRequest{Relays: p2ppair.RelayNone})
+				Expect(hintIDs(m.Link)).To(Equal([]peer.ID{hints[3].ID}),
+					"a gated or open relay of the settings goes in r with its pass, never as a hint")
+				_, err = p2ppair.ParseLink(m.Link.String())
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("keeps the hints in mode none, and drops them when the request says so", func() {
+				m := mint(p2ppair.MintRequest{Relays: p2ppair.RelayNone})
+				Expect(m.Link.Relays).To(BeEmpty())
+				Expect(m.Link.Hints).To(HaveLen(2))
+				m = mint(p2ppair.MintRequest{OmitRelayHints: true})
+				Expect(m.Link.Hints).To(BeEmpty())
+				Expect(m.Link.String()).NotTo(ContainSubstring("&h="))
+			})
+
+			It("has none when the source is nil or empty", func() {
+				withHints(nil)
+				Expect(mint(p2ppair.MintRequest{}).Link.Hints).To(BeEmpty())
+				withHints(func() []peer.AddrInfo { return nil })
+				Expect(mint(p2ppair.MintRequest{}).Link.Hints).To(BeEmpty())
+			})
+
+			It("warns punch_only instead of no_relay when the link has hints and no carrier", func() {
+				m := mint(p2ppair.MintRequest{Relays: p2ppair.RelayNone})
+				Expect(m.Warnings).To(Equal([]p2ppair.Warning{p2ppair.WarnPunchOnly}))
+				addrs = nil
+				m = mint(p2ppair.MintRequest{Relays: p2ppair.RelayNone})
+				Expect(m.Warnings).To(ConsistOf(p2ppair.WarnPunchOnly, p2ppair.WarnNoPublicAddr))
+				m = mint(p2ppair.MintRequest{Relays: p2ppair.RelayNone, OmitRelayHints: true})
+				Expect(m.Warnings).To(ConsistOf(p2ppair.WarnNoRelay, p2ppair.WarnNoPublicAddr))
+			})
+
+			It("does not change the warnings when a carrier relay is in the link", func() {
+				addrs = nil
+				m := mint(p2ppair.MintRequest{})
+				Expect(m.Link.Hints).To(HaveLen(2))
+				Expect(m.Warnings).To(BeEmpty())
+				reg.fail["g1"] = errors.New("down")
+				reg.fail["g2"] = errors.New("down")
+				m = mint(p2ppair.MintRequest{})
+				Expect(m.Warnings).To(Equal([]p2ppair.Warning{p2ppair.WarnRelayUnreachable}))
+			})
+		})
+
+		Describe("Routes", func() {
+			It("lists the lists of a link without code or pass: public then local addresses, gated relays, at most two hints", func() {
+				lan, err := ma.NewMultiaddr("/ip4/192.168.1.5/tcp/4001")
+				Expect(err).NotTo(HaveOccurred())
+				g1, err := peer.AddrInfoFromP2pAddr(relays[0].Addr)
+				Expect(err).NotTo(HaveOccurred())
+				h := func(addr string, id peer.ID) peer.AddrInfo {
+					a, err := ma.NewMultiaddr(addr)
+					Expect(err).NotTo(HaveOccurred())
+					return peer.AddrInfo{ID: id, Addrs: []ma.Multiaddr{a}}
+				}
+				hints := []peer.AddrInfo{
+					h("/ip4/198.51.100.1/tcp/4001", g1.ID),
+					h("/ip4/192.0.2.10/tcp/4001", newPeer()),
+					h("/ip4/192.0.2.11/tcp/4001", newPeer()),
+					h("/ip4/192.0.2.12/tcp/4001", newPeer()),
+				}
+				svc, err = p2ppair.NewService(newStore(), p2ppair.Config{
+					ServerPeer: server, Addrs: func() []ma.Multiaddr { return addrs },
+					LANAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lan} },
+					Relays:   relays, Registrar: reg, Issuer: iss, Now: clk.Now,
+					Hints: func() []peer.AddrInfo { return hints },
+				})
+				Expect(err).NotTo(HaveOccurred())
+
+				r, err := svc.Routes(ctx, newPeer())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.Addrs).To(Equal([]ma.Multiaddr{addrs[0], lan}))
+				var relayIDs []peer.ID
+				for _, ri := range r.Relays {
+					relayIDs = append(relayIDs, ri.ID)
+				}
+				Expect(relayIDs).To(HaveLen(2), "the open relay is left out")
+				Expect(relayIDs[0]).To(Equal(g1.ID))
+				Expect(r.Hints).To(Equal([]peer.AddrInfo{hints[1], hints[2]}), "a gated relay is never a hint")
+				Expect(reg.registers).To(BeEmpty(), "no pass is registered")
+			})
+
+			It("leaves out the local network addresses when the invite of the device left them out", func() {
+				lan, err := ma.NewMultiaddr("/ip4/192.168.1.5/tcp/4001")
+				Expect(err).NotTo(HaveOccurred())
+				svc, err = p2ppair.NewService(newStore(), p2ppair.Config{
+					ServerPeer: server, Addrs: func() []ma.Multiaddr { return addrs },
+					LANAddrs: func() []ma.Multiaddr { return []ma.Multiaddr{lan} },
+					Relays:   relays, Registrar: reg, Issuer: iss, Now: clk.Now,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				private, plain := newPeer(), newPeer()
+				_, err = redeem(mint(p2ppair.MintRequest{OmitLANAddrs: true}), private)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = redeem(mint(p2ppair.MintRequest{}), plain)
+				Expect(err).NotTo(HaveOccurred())
+
+				r, err := svc.Routes(ctx, private)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.Addrs).To(Equal([]ma.Multiaddr{addrs[0]}))
+				r, err = svc.Routes(ctx, plain)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.Addrs).To(Equal([]ma.Multiaddr{addrs[0], lan}))
+			})
+
+			It("is empty when the server has no route to give", func() {
+				s, err := p2ppair.NewService(newStore(), p2ppair.Config{ServerPeer: server})
+				Expect(err).NotTo(HaveOccurred())
+				r, err := s.Routes(ctx, newPeer())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.Addrs).To(BeEmpty())
+				Expect(r.Relays).To(BeEmpty())
+				Expect(r.Hints).To(BeEmpty())
+			})
+		})
+
 		It("refuses the remote kind with no key issuer", func() {
 			s, err := p2ppair.NewService(newStore(), p2ppair.Config{ServerPeer: server})
 			Expect(err).NotTo(HaveOccurred())
@@ -417,6 +589,146 @@ func serviceSpecs(newStore func() p2ppair.Store) {
 				Expect(svc.Revoke(ctx, res.Device.ID, "admin")).To(Succeed())
 				Expect(iss.revoked).To(Equal([]string{res.ClientKey.ID}))
 			})
+		})
+	})
+
+	Describe("sign-in invites", func() {
+		var (
+			st    p2ppair.Store
+			limit int
+		)
+		BeforeEach(func() {
+			limit = 0
+			st = newStore()
+			var err error
+			svc, err = p2ppair.NewService(st, p2ppair.Config{
+				ServerPeer: server, Addrs: func() []ma.Multiaddr { return addrs },
+				Relays: relays, Registrar: reg, Issuer: iss, Now: clk.Now,
+				HMACSecret:  "secret",
+				OwnerName:   func(_ context.Context, id string) string { return "name of " + id },
+				DeviceLimit: func(context.Context) int { return limit },
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("carry the flag from the mint to the invite and the device", func() {
+			m := mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true})
+			Expect(m.Invite.SignIn).To(BeTrue())
+			Expect(m.Link.Kind).To(Equal(p2ppair.KindDevice), "the link kind stays device for old apps")
+			inv, err := st.GetInvite(ctx, m.Invite.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(inv.SignIn).To(BeTrue())
+		})
+
+		It("are refused for a kind other than device", func() {
+			_, err := svc.Mint(ctx, p2ppair.MintRequest{Kind: p2ppair.KindWorker, SignIn: true})
+			Expect(err).To(MatchError(p2ppair.ErrMalformed))
+		})
+
+		It("return a credential once and store only its HMAC", func() {
+			m := mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true})
+			from := newPeer()
+			res, err := redeem(m, from)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.SignIn).To(BeTrue())
+			Expect(res.OwnerName).To(Equal("name of alice"))
+			raw, err := base64.RawURLEncoding.DecodeString(res.DeviceCredential)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(raw).To(HaveLen(32))
+
+			d, err := st.GetDevice(ctx, res.Device.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d.SignIn).To(BeTrue())
+			Expect(d.CredentialHash).NotTo(BeEmpty())
+			Expect(d.CredentialHash).NotTo(ContainSubstring(res.DeviceCredential))
+
+			for _, v := range []any{res, res.Device, d} {
+				b, err := json.Marshal(v)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(b)).NotTo(ContainSubstring(d.CredentialHash), "no JSON view carries the hash")
+			}
+			b, _ := json.Marshal(res.Device)
+			Expect(string(b)).To(ContainSubstring(`"sign_in":true`))
+			devs, _ := svc.ListDevices(ctx)
+			b, _ = json.Marshal(devs)
+			Expect(string(b)).NotTo(ContainSubstring(d.CredentialHash))
+
+			got, err := svc.VerifyDeviceCredential(ctx, from, res.DeviceCredential)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.ID).To(Equal(res.Device.ID))
+			Expect(got.OwnerID).To(Equal("alice"))
+		})
+
+		It("return no credential for an invite without sign-in", func() {
+			m := mint(p2ppair.MintRequest{OwnerID: "alice"})
+			from := newPeer()
+			res, err := redeem(m, from)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.DeviceCredential).To(BeEmpty())
+			Expect(res.SignIn).To(BeFalse())
+			d, _ := st.GetDevice(ctx, res.Device.ID)
+			Expect(d.CredentialHash).To(BeEmpty())
+			_, err = svc.VerifyDeviceCredential(ctx, from, "anything")
+			Expect(err).To(MatchError(p2ppair.ErrCredentialInvalid))
+		})
+
+		It("leave the owner name empty with no resolver", func() {
+			s, err := p2ppair.NewService(newStore(), p2ppair.Config{ServerPeer: server, Now: clk.Now})
+			Expect(err).NotTo(HaveOccurred())
+			m, err := s.Mint(ctx, p2ppair.MintRequest{Kind: p2ppair.KindDevice, OwnerID: "alice", SignIn: true})
+			Expect(err).NotTo(HaveOccurred())
+			res, err := s.Redeem(ctx, newPeer(), p2ppair.RedeemRequest{V: 1, Code: m.Link.Code})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.OwnerName).To(BeEmpty())
+			Expect(res.DeviceCredential).NotTo(BeEmpty())
+		})
+
+		It("verify refuses a wrong credential, another peer and a revoked device", func() {
+			from := newPeer()
+			res, err := redeem(mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true}), from)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = svc.VerifyDeviceCredential(ctx, from, res.DeviceCredential+"x")
+			Expect(err).To(MatchError(p2ppair.ErrCredentialInvalid))
+			_, err = svc.VerifyDeviceCredential(ctx, from, "")
+			Expect(err).To(MatchError(p2ppair.ErrCredentialInvalid))
+			_, err = svc.VerifyDeviceCredential(ctx, newPeer(), res.DeviceCredential)
+			Expect(err).To(MatchError(p2ppair.ErrCredentialInvalid), "the credential is bound to its peer")
+
+			Expect(svc.Revoke(ctx, res.Device.ID, "alice")).To(Succeed())
+			d, _ := st.GetDevice(ctx, res.Device.ID)
+			Expect(d.CredentialHash).To(BeEmpty(), "revoke clears the hash")
+			_, err = svc.VerifyDeviceCredential(ctx, from, res.DeviceCredential)
+			Expect(err).To(MatchError(p2ppair.ErrCredentialInvalid))
+		})
+
+		It("enforce the device limit at redeem and leave nothing behind", func() {
+			limit = 1
+			_, err := redeem(mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true}), newPeer())
+			Expect(err).NotTo(HaveOccurred())
+			m := mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true})
+			_, err = redeem(m, newPeer())
+			Expect(err).To(MatchError(p2ppair.ErrDeviceLimit))
+			inv, _ := st.GetInvite(ctx, m.Invite.ID)
+			Expect(inv.UsedAt).To(BeNil())
+			n, _ := st.CountActiveDevicesByOwner(ctx, "alice")
+			Expect(n).To(Equal(1))
+
+			_, err = redeem(mint(p2ppair.MintRequest{OwnerID: "bob", SignIn: true}), newPeer())
+			Expect(err).NotTo(HaveOccurred(), "the limit is per owner")
+			_, err = redeem(mint(p2ppair.MintRequest{OwnerID: "alice"}), newPeer())
+			Expect(err).NotTo(HaveOccurred(), "an admission invite has no limit")
+		})
+
+		It("leave nothing behind when the redeem fails", func() {
+			p := newPeer()
+			_, err := redeem(mint(p2ppair.MintRequest{OwnerID: "alice"}), p)
+			Expect(err).NotTo(HaveOccurred())
+			m := mint(p2ppair.MintRequest{OwnerID: "alice", SignIn: true})
+			_, err = redeem(m, p)
+			Expect(err).To(MatchError(p2ppair.ErrPeerPaired))
+			devs, _ := st.ListDevicesByOwner(ctx, "alice")
+			Expect(devs).To(HaveLen(1))
+			Expect(devs[0].CredentialHash).To(BeEmpty())
 		})
 	})
 

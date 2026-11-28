@@ -331,7 +331,9 @@ shared library. The backend then runs the version it ran before. A metadata
 write or a backend registration that fails after the swap is handled the same
 way, with `error_key` `swap`. When the previous build cannot be put back,
 `rolled_back` is false, the text says so, and the failed build stays in place
-for diagnosis next to the previous one (`<name>.backup`).
+for diagnosis next to the previous one (`<name>.backup`). The next upgrade
+moves that previous build to `<name>.backup.kept-<time>` instead of deleting
+it.
 
 A forced reinstall of an installed backend (`force: true`) keeps the replaced
 build in the same way. A first install starts nothing.
@@ -735,7 +737,7 @@ For getting started, see the available backends in LocalAI here: https://github.
 
 LocalAI supports various types of backends:
 
-- **LLM Backends**: For running language models (e.g., llama.cpp, vLLM, vllm.cpp, SGLang, transformers, MLX, the experimental [Strata engine]({{% relref "/models/engines/strata" %}}) (NVIDIA CUDA, AMD ROCm, Intel SYCL, Apple Metal, prebuilt engine packages), and [RKLLM on Rockchip NPUs]({{% relref "/models/engines/rkllm" %}}) through the cloud-proxy backend)
+- **LLM Backends**: For running language models (e.g., llama.cpp, vLLM, vllm.cpp, SGLang, transformers, MLX, the experimental [Strata engine]({{% relref "/models/engines/strata" %}}) (NVIDIA CUDA, AMD ROCm, Intel SYCL, Apple Metal, prebuilt engine packages), the experimental [colibri engine]({{% relref "/models/engines/colibri" %}}) (very large mixture-of-experts models with the experts streamed from disk; CPU, Vulkan, Apple Metal), and [RKLLM on Rockchip NPUs]({{% relref "/models/engines/rkllm" %}}) through the cloud-proxy backend)
 - **Speech-to-Text Backends**: For transcription, forced alignment and speaker diarization (e.g., whisper.cpp, parakeet.cpp, moss-transcribe.cpp, [NeMo-Speech.cpp]({{%relref "/models/engines/nemo-speech-cpp" %}}), faster-whisper, [Whisper-Medusa]({{%relref "/models/engines/whisper-medusa" %}}), FunASR/SenseVoice, NeMo, [audio.cpp]({{%relref "/models/engines/audio-cpp" %}}))
 - **Text-to-Speech Backends**: For speech synthesis (e.g., piper, Kokoro, VibeVoice, Qwen3-TTS, [NeMo-Speech.cpp]({{%relref "/models/engines/nemo-speech-cpp" %}}), [audio.cpp]({{%relref "/models/engines/audio-cpp" %}}))
 - **Sound Generation Backends**: For music and audio generation (e.g., ACE-Step, [audio.cpp]({{%relref "/models/engines/audio-cpp" %}}))

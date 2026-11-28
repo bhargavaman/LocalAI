@@ -33,6 +33,7 @@ type RuntimeSettings struct {
 	SizeAwareEviction        *bool   `json:"size_aware_eviction,omitempty"`         // Evict largest models first rather than least-recently-used (default: false)
 	LRUEvictionMaxRetries    *int    `json:"lru_eviction_max_retries,omitempty"`    // Maximum number of retries when waiting for busy models to become idle (default: 30)
 	LRUEvictionRetryInterval *string `json:"lru_eviction_retry_interval,omitempty"` // Interval between retries when waiting for busy models (e.g., 1s, 2s) (default: 1s)
+	ModelSwap                *bool   `json:"model_swap,omitempty"`                  // Unload a model to make room for another when the limit or memory is reached (default: true)
 
 	// Performance settings
 	Threads                     *int `json:"threads,omitempty"`
@@ -71,6 +72,16 @@ type RuntimeSettings struct {
 	AutoloadGalleries        *bool      `json:"autoload_galleries,omitempty"`
 	AutoloadBackendGalleries *bool      `json:"autoload_backend_galleries,omitempty"`
 	VRAMPersistentCache      *bool      `json:"vram_persistent_cache,omitempty"`
+
+	// Disk tier of the llama.cpp prompt cache (see PromptCacheConfig).
+	PromptCacheDisk                *bool   `json:"prompt_cache_disk,omitempty"`                   // keep long prompt caches on disk (default: true)
+	PromptCacheDiskMaxSizeMiB      *int    `json:"prompt_cache_disk_max_size_mib,omitempty"`      // cap of the disk tier, 0 = automatic (default: 0)
+	PromptCacheDiskTTL             *string `json:"prompt_cache_disk_ttl,omitempty"`               // time to live after the last use (default: 168h)
+	PromptCacheDiskUserQuotaMiB    *int    `json:"prompt_cache_disk_user_quota_mib,omitempty"`    // quota of one user, 0 = automatic, -1 = none (default: 0)
+	PromptCacheDiskMinTokens       *int    `json:"prompt_cache_disk_min_tokens,omitempty"`        // shortest prompt written to disk (default: 1024)
+	PromptCacheDiskShared          *bool   `json:"prompt_cache_disk_shared,omitempty"`            // one namespace for every user (default: false)
+	PromptCacheDiskLowFreeMiB      *int    `json:"prompt_cache_disk_low_free_mib,omitempty"`      // pause under this free space, 0 = max(15%, 10 GiB) (default: 0)
+	PromptCacheDiskCriticalFreeMiB *int    `json:"prompt_cache_disk_critical_free_mib,omitempty"` // disable under this free space, 0 = 5% (default: 0)
 
 	// API keys - No omitempty as we need to save empty arrays to clear keys
 	ApiKeys *[]string `json:"api_keys"`
@@ -115,6 +126,9 @@ type RuntimeSettings struct {
 	ChatsLocalAIClient *bool   `json:"chats_localai_client,omitempty"` // offer the LocalAI client (inference) tools (default: true)
 	ChatsLocalAIAdmin  *bool   `json:"chats_localai_admin,omitempty"`  // offer the LocalAI admin tools to administrators (default: true)
 	ChatsToolSearch    *string `json:"chats_tool_search,omitempty"`    // load the large LocalAI tool groups and the deferred add-on tools on demand: auto, on or off (default: auto)
+	// Incognito conversations of the web UI. Read at each request.
+	Incognito         *string `json:"incognito,omitempty"`           // allow or forbid incognito conversations (default: allow)
+	IncognitoMaxLevel *string `json:"incognito_max_level,omitempty"` // highest incognito level: memory-off or zero-retention (default: zero-retention)
 	// Jobs that an add-on starts for a paired client. Read when a job
 	// runs. By default such a job may only use tools that read.
 	ClientJobsAllowAllTools *bool `json:"client_jobs_allow_all_tools,omitempty"` // let jobs from a paired client use the write and act tools that the task's agent is set up with, no more (default: false)
@@ -164,6 +178,16 @@ type RuntimeSettings struct {
 	// Name each chat's work folder in its prompt, so scripts, logs and drafts
 	// go there and not next to the user's files (default: true). Read at
 	// each turn.
+	// Plugins in the Claude Code plugin format: personal installs of
+	// text-only plugins (default: true), the models of the agent tiers
+	// haiku, sonnet and opus (default: none, the chat's model), the cap of
+	// one hook handler, 1 to 600 seconds (default: 60), and the cap of the
+	// files of one plugin, 1 MiB to 200 MiB (default: 20 MiB).
+	PluginsUserInstalls       *bool              `json:"plugins_user_installs,omitempty"`
+	PluginsModelTiers         *map[string]string `json:"plugins_model_tiers,omitempty"`
+	PluginsHookTimeoutSeconds *int               `json:"plugins_hook_timeout_seconds,omitempty"`
+	PluginsMaxBytes           *int64             `json:"plugins_max_bytes,omitempty"`
+
 	ChatsWorkFolder *bool `json:"chats_work_folder,omitempty"`
 	// Read the text of PDF and Office files in the chats' files so that
 	// search finds them by what they say (default: true), and the most text

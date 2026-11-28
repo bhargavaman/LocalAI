@@ -97,7 +97,8 @@
       "Notes": "메모리",
       "Connections": "연결",
       "Effective": "유효 보기",
-      "Uses": "사용할 수 있는 것"
+      "Uses": "사용할 수 있는 것",
+      "Plugins": "플러그인"
     },
     "name": "Name",
     "description": "Description",
@@ -467,7 +468,14 @@
     },
     "sandboxProfile": "샌드박스 프로필",
     "sandboxProfileDefault": "기본값",
-    "sandboxProfileHelp": "무인 실행에 쓰이며 이 에이전트 채팅의 시작 프로필입니다."
+    "sandboxProfileHelp": "무인 실행에 쓰이며 이 에이전트 채팅의 시작 프로필입니다.",
+    "countPlugins_one": "플러그인 {{count}}개",
+    "countPlugins_other": "플러그인 {{count}}개",
+    "pluginsHelp": "이 에이전트와의 채팅에서 사용할 수 있는 플러그인입니다. 목록은 정확히 적용됩니다. 빈 목록은 아무것도 허용하지 않습니다. 플러그인은 채팅하는 사람에게도 켜져 있어야 합니다.",
+    "pluginsNone": "설치된 플러그인이 없습니다. 애드온 페이지의 플러그인 탭에서 설치하세요.",
+    "pluginOffForYou": "{{plugin}}, 나에게는 꺼짐",
+    "pluginGone": "이 플러그인은 더 이상 설치되어 있지 않습니다.",
+    "pluginsLoadFailed": "플러그인을 불러올 수 없습니다."
   },
   "run": {
     "workingLine": "Working"
@@ -558,7 +566,8 @@
         "prompt": "What to do",
         "schedule": "When",
         "limits": "Limits",
-        "acts": "권한"
+        "acts": "권한",
+        "delivery": "보고"
       },
       "summary": {
         "basics": "{{name}}, {{model}}",
@@ -602,6 +611,25 @@
         "dots": "폴더 이름에 \"..\"를 넣을 수 없습니다.",
         "outside": "이 에이전트는 자신의 폴더 안에 있는 폴더만 감시할 수 있습니다: {{folders}}.",
         "noFolders": "이 에이전트에는 사용할 수 있는 폴더가 없습니다. 에이전트 설정에서 폴더를 선택하세요."
+      },
+      "delivery": {
+        "now": "현재 보고 위치",
+        "where": "실행 결과를 보고할 곳",
+        "mode": "보고 시점",
+        "always": "실행할 때마다",
+        "keep": "유지: {{place}}",
+        "origin": "제안된 채팅",
+        "hint": "채널에 쓸 수 있는 연결에서 내가 승인한 채널만 표시됩니다.",
+        "fromChat": "이 트리거는 메시징 앱의 채팅에서 제안되었습니다. 보고는 그 연결에 남습니다.",
+        "loadFailed": "연결을 읽을 수 없습니다: {{message}}",
+        "unusable": "{{name}}: {{reason}}",
+        "reason": {
+          "off": "꺼짐",
+          "addon_off": "애드온이 실행 중이 아님",
+          "tool_only": "도구용 서비스라 보고를 받을 수 없음",
+          "talkback_off": "채널에 쓸 수 없음",
+          "no_channel": "승인된 채널 없음"
+        }
       }
     },
     "subtitle": "일정에 따라 또는 파일이 도착하면 에이전트를 시작합니다. 각 실행은 열어 볼 수 있는 채팅입니다.",

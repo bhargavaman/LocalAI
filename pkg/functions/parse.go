@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/mudler/LocalAI/pkg/functions/grammars"
 	"github.com/mudler/LocalAI/pkg/utils"
@@ -62,6 +63,11 @@ type GrammarTrigger struct {
 // It includes setting to map the function name and arguments from the response
 // and, for instance, also if processing the requests with BNF grammars.
 type FunctionsConfig struct {
+	// RedactLogs replaces the model output in the debug lines of the parsers
+	// with a mark. The server sets it for a request that may not keep content
+	// (a zero-retention incognito chat); it is never read from a model file.
+	RedactLogs bool `yaml:"-" json:"-"`
+
 	// DisableNoAction disables the "no action" tool
 	// By default we inject a tool that does nothing and is used to return an answer from the LLM
 	DisableNoAction bool `yaml:"disable_no_action,omitempty" json:"disable_no_action,omitempty"`
@@ -269,22 +275,47 @@ func truncForLog(s string) string {
 	return s[:maxHead] + "...(truncated)"
 }
 
+// redactedOutput is what a debug line prints instead of the model output
+// when the request may not keep content (see FunctionsConfig.RedactLogs).
+const redactedOutput = "[redacted: zero-retention]"
+
+// LogText is s as a debug line may print it for this request.
+func (c FunctionsConfig) LogText(s string) string {
+	if c.RedactLogs {
+		return redactedOutput
+	}
+	return s
+}
+
 func CleanupLLMResult(llmresult string, functionConfig FunctionsConfig) string {
-	xlog.Debug("LLM result", "len", len(llmresult), "head", truncForLog(llmresult))
+	xlog.Debug("LLM result", "len", len(llmresult), "head", functionConfig.LogText(truncForLog(llmresult)))
 
 	for _, item := range functionConfig.ReplaceLLMResult {
 		k, v := item.Key, item.Value
 		xlog.Debug("Replacing", "key", k, "value", v)
-		re := regexp.MustCompile(k)
-		llmresult = re.ReplaceAllString(llmresult, v)
+		llmresult = cachedRegexp(k).ReplaceAllString(llmresult, v)
 	}
-	xlog.Debug("LLM result(processed)", "len", len(llmresult), "head", truncForLog(llmresult))
+	xlog.Debug("LLM result(processed)", "len", len(llmresult), "head", functionConfig.LogText(truncForLog(llmresult)))
 
 	return llmresult
 }
 
+// compiledRegexps caches the patterns of ReplaceLLMResult. A stream cleans
+// its output for every token, and compiling the same pattern each time cost
+// more than applying it.
+var compiledRegexps sync.Map // pattern -> *regexp.Regexp
+
+func cachedRegexp(pattern string) *regexp.Regexp {
+	if re, ok := compiledRegexps.Load(pattern); ok {
+		return re.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(pattern)
+	compiledRegexps.Store(pattern, re)
+	return re
+}
+
 func ParseTextContent(llmresult string, functionConfig FunctionsConfig) string {
-	xlog.Debug("ParseTextContent", "result", llmresult)
+	xlog.Debug("ParseTextContent", "result", functionConfig.LogText(llmresult))
 	xlog.Debug("CaptureLLMResult", "config", functionConfig.CaptureLLMResult)
 
 	for _, r := range functionConfig.CaptureLLMResult {
@@ -377,12 +408,48 @@ func ParseJSONIterative(s string, isPartial bool) ([]map[string]any, error) {
 	return parseJSONLegacy(s)
 }
 
+// jsonLiterals maps the first byte of a JSON literal to the literal.
+var jsonLiterals = [256]string{'t': "true", 'f': "false", 'n': "null"}
+
+// skipNonJSON returns how many bytes at the start of s the decoder would
+// reject without reading further: a byte that cannot start a JSON value
+// (whitespace counts too: the decoder skips it), or a literal that breaks off
+// before its end. It returns 0 at a byte the decoder must look at.
+//
+// A stream with tools parses its whole output again for each token, and
+// before this a run of prose cost one decoder per byte.
+func skipNonJSON(s string) int {
+	c := s[0]
+	switch {
+	case c == '{' || c == '[' || c == '"' || c == '-' || (c >= '0' && c <= '9'):
+		return 0
+	case jsonLiterals[c] != "":
+		lit := jsonLiterals[c]
+		k := 1
+		for k < len(lit) && k < len(s) && s[k] == lit[k] {
+			k++
+		}
+		if k == len(lit) || k == len(s) {
+			// The whole literal, or its start at the end of the input: the
+			// decoder decides.
+			return 0
+		}
+		return k + 1
+	default:
+		return 1
+	}
+}
+
 // parseJSONLegacy is the original decoder-based JSON parsing (kept for compatibility)
 func parseJSONLegacy(s string) ([]map[string]any, error) {
 	var objs []map[string]any
 	offset := 0
 
 	for offset < len(s) {
+		if n := skipNonJSON(s[offset:]); n > 0 {
+			offset += n
+			continue
+		}
 		var obj map[string]any
 		decoder := json.NewDecoder(strings.NewReader(s[offset:]))
 
@@ -782,7 +849,9 @@ func parseFunctionaryFormat(s string, format *XMLToolCallFormat) ([]FuncCallResu
 			// Parse JSON content as arguments
 			var args map[string]any
 			if err := json.Unmarshal([]byte(jsonContent), &args); err != nil {
-				xlog.Debug("error parsing Functionary JSON", "error", err, "content", jsonContent)
+				// The parser does not know the request, so the content is never
+				// logged: it can be the output of a zero-retention request.
+				xlog.Debug("error parsing Functionary JSON", "error", err, "content_len", len(jsonContent))
 				continue
 			}
 
@@ -947,7 +1016,7 @@ func parseParameterValue(paramValue string, format *XMLToolCallFormat) any {
 
 func ParseFunctionCall(llmresult string, functionConfig FunctionsConfig) []FuncCallResults {
 
-	xlog.Debug("LLM result", "len", len(llmresult), "head", truncForLog(llmresult))
+	xlog.Debug("LLM result", "len", len(llmresult), "head", functionConfig.LogText(truncForLog(llmresult)))
 
 	for _, item := range functionConfig.ReplaceFunctionResults {
 		k, v := item.Key, item.Value
@@ -955,7 +1024,7 @@ func ParseFunctionCall(llmresult string, functionConfig FunctionsConfig) []FuncC
 		re := regexp.MustCompile(k)
 		llmresult = re.ReplaceAllString(llmresult, v)
 	}
-	xlog.Debug("LLM result(function cleanup)", "len", len(llmresult), "head", truncForLog(llmresult))
+	xlog.Debug("LLM result(function cleanup)", "len", len(llmresult), "head", functionConfig.LogText(truncForLog(llmresult)))
 
 	functionNameKey := defaultFunctionNameKey
 	functionArgumentsKey := defaultFunctionArgumentsKey
@@ -980,51 +1049,12 @@ func ParseFunctionCall(llmresult string, functionConfig FunctionsConfig) []FuncC
 			ss, err := ParseJSON(s)
 			//err := json.Unmarshal([]byte(s), &ss)
 			if err != nil {
-				xlog.Debug("unable to unmarshal llm result in a single object or an array of JSON objects", "error", err, "escapedLLMResult", s)
+				xlog.Debug("unable to unmarshal llm result in a single object or an array of JSON objects", "error", err, "escapedLLMResult", functionConfig.LogText(s))
 			}
 
-			xlog.Debug("Function return", "result", s, "parsed", ss)
+			xlog.Debug("Function return", "result", functionConfig.LogText(s), "parsed", len(ss))
 
-			for _, s := range ss {
-				// The grammar defines the function name as "function", while OpenAI returns "name"
-				func_name, ok := s[functionNameKey]
-				if !ok {
-					continue
-					//return result, fmt.Errorf("unable to find function name in result")
-				}
-				// Arguments from grammar result is a map[string]interface{}, but OpenAI expects a stringified JSON object
-				// We marshal it to JSON string here to match OpenAI's format
-				args, ok := s[functionArgumentsKey]
-				if !ok {
-					continue
-					//return result, fmt.Errorf("unable to find arguments in result")
-				}
-				// Marshal arguments to JSON string (handles both object and string cases)
-				var d []byte
-				if argsStr, ok := args.(string); ok {
-					// Check if the string is valid JSON; if not, auto-heal if enabled
-					var testJSON map[string]any
-					if json.Unmarshal([]byte(argsStr), &testJSON) == nil {
-						d = []byte(argsStr)
-					} else if functionConfig.AutomaticToolParsingFallback {
-						healed := map[string]string{"query": argsStr}
-						d, _ = json.Marshal(healed)
-						xlog.Debug("Automatic tool parsing fallback: wrapped raw string arguments", "raw", argsStr)
-					} else {
-						d = []byte(argsStr)
-					}
-				} else {
-					// Object, marshal to JSON
-					d, _ = json.Marshal(args)
-				}
-				funcName, ok := func_name.(string)
-				if !ok {
-					continue
-					//return result, fmt.Errorf("unable to cast function name to string")
-				}
-
-				result = append(result, FuncCallResults{Name: funcName, Arguments: string(d)})
-			}
+			result = appendFunctionCalls(result, ss, functionConfig)
 		}
 
 		return result, nil
@@ -1082,6 +1112,67 @@ func ParseFunctionCall(llmresult string, functionConfig FunctionsConfig) []FuncC
 		results, _ = extractJSON(llmResults)
 	}
 
+	return mergeMarkupFunctionCalls(llmresult, functionConfig, results)
+}
+
+// appendFunctionCalls appends the calls of the JSON objects that hold a
+// function name and arguments, as ParseFunctionCall reads them.
+func appendFunctionCalls(result []FuncCallResults, ss []map[string]any, functionConfig FunctionsConfig) []FuncCallResults {
+	functionNameKey := defaultFunctionNameKey
+	functionArgumentsKey := defaultFunctionArgumentsKey
+	if functionConfig.FunctionNameKey != "" {
+		functionNameKey = functionConfig.FunctionNameKey
+	}
+	if functionConfig.FunctionArgumentsKey != "" {
+		functionArgumentsKey = functionConfig.FunctionArgumentsKey
+	}
+	for _, s := range ss {
+		// The grammar defines the function name as "function", while OpenAI returns "name"
+		func_name, ok := s[functionNameKey]
+		if !ok {
+			continue
+			//return result, fmt.Errorf("unable to find function name in result")
+		}
+		// Arguments from grammar result is a map[string]interface{}, but OpenAI expects a stringified JSON object
+		// We marshal it to JSON string here to match OpenAI's format
+		args, ok := s[functionArgumentsKey]
+		if !ok {
+			continue
+			//return result, fmt.Errorf("unable to find arguments in result")
+		}
+		// Marshal arguments to JSON string (handles both object and string cases)
+		var d []byte
+		if argsStr, ok := args.(string); ok {
+			// Check if the string is valid JSON; if not, auto-heal if enabled
+			var testJSON map[string]any
+			if json.Unmarshal([]byte(argsStr), &testJSON) == nil {
+				d = []byte(argsStr)
+			} else if functionConfig.AutomaticToolParsingFallback {
+				healed := map[string]string{"query": argsStr}
+				d, _ = json.Marshal(healed)
+				xlog.Debug("Automatic tool parsing fallback: wrapped raw string arguments", "raw", functionConfig.LogText(argsStr))
+			} else {
+				d = []byte(argsStr)
+			}
+		} else {
+			// Object, marshal to JSON
+			d, _ = json.Marshal(args)
+		}
+		funcName, ok := func_name.(string)
+		if !ok {
+			continue
+			//return result, fmt.Errorf("unable to cast function name to string")
+		}
+
+		result = append(result, FuncCallResults{Name: funcName, Arguments: string(d)})
+	}
+	return result
+}
+
+// mergeMarkupFunctionCalls adds to results the calls that the PEG parser
+// finds in llmresult, or the iterative XML parser when the PEG parser finds
+// none and the output holds an XML tool-call tag.
+func mergeMarkupFunctionCalls(llmresult string, functionConfig FunctionsConfig, results []FuncCallResults) []FuncCallResults {
 	// Try PEG parser (unless disabled) — this is the primary tool call parser
 	pegFound := false
 	if !functionConfig.DisablePEGParser {

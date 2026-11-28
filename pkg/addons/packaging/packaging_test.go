@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -902,6 +903,69 @@ var _ = Describe("alias promotion", func() {
 })
 
 var _ = Describe("catalog template", func() {
+	It("pins the digests that the registry holds, not the ones of a rebuilt layout", func() {
+		reg := newRegistry()
+		p := newProject(both)
+		repoName := reg.repo("addons/tables")
+		render := func(layout string, extra ...string) ([]catalogRelease, error) {
+			out := filepath.Join(GinkgoT().TempDir(), "catalog.yaml")
+			args := append([]string{"catalog", "--config", p.config, "--template", "../../../gallery/addons/tables.yaml.tmpl", "--merged", layout, "--repository", repoName, "--tag", "1.2.3", "--channel", "latest", "--owner-repo", "example/localai", "--signer-ref", "refs/tags/v1.2.3", "--out", out}, extra...)
+			if _, err := run(args...); err != nil {
+				return nil, err
+			}
+			b, err := os.ReadFile(out)
+			Expect(err).NotTo(HaveOccurred())
+			return readCatalogIndex(b)
+		}
+		digests := func(entries []catalogRelease) map[string]string {
+			out := map[string]string{}
+			for _, e := range entries {
+				out[e.OS+"/"+e.Arch] = e.Digest
+			}
+			return out
+		}
+		a := p.merged("1.2.3", rev, nil)
+		// Nothing is published yet: there is nothing to pin.
+		_, err := render(a, "--pin-registry")
+		Expect(err).To(HaveOccurred())
+
+		_, err = run("publish", "--config", p.config, "--layout", a, "--repository", repoName, "--tag", "1.2.3")
+		Expect(err).NotTo(HaveOccurred())
+		pushed, err := render(a)
+		Expect(err).NotTo(HaveOccurred())
+
+		// A rebuild of the same version and commit adopts the published index,
+		// so the catalog must pin that index, not the rebuilt layout.
+		rebuilt := p.merged("1.2.3", rev, map[string]string{amd: "rebuilt bytes"})
+		_, err = run("publish", "--config", p.config, "--layout", rebuilt, "--repository", repoName, "--tag", "1.2.3", "--adopt-existing")
+		Expect(err).NotTo(HaveOccurred())
+		local, err := render(rebuilt)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(digests(local)[amd]).NotTo(Equal(digests(pushed)[amd]))
+		pinned, err := render(rebuilt, "--pin-registry")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(digests(pinned)).To(Equal(digests(pushed)))
+
+		// A registry that drops reads for a while is tried again; the
+		// transport retries too, so fail more reads than it alone would.
+		previous := registryRetryDelay
+		registryRetryDelay = 10 * time.Millisecond
+		DeferCleanup(func() { registryRetryDelay = previous })
+		reg.mu.Lock()
+		reg.failReads, reg.manifestReads = 4, 0
+		reg.mu.Unlock()
+		pinned, err = render(rebuilt, "--pin-registry")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(digests(pinned)).To(Equal(digests(pushed)))
+		reg.mu.Lock()
+		Expect(reg.manifestReads).To(BeNumerically(">=", 5))
+		reg.mu.Unlock()
+
+		// The published index of another commit is never pinned.
+		other := p.merged("1.2.3", "fedcba9876543210fedcba9876543210fedcba98", nil)
+		_, err = render(other, "--pin-registry")
+		Expect(err).To(MatchError(ContainSubstring("not built from the same add-on, version and commit")))
+	})
 	It("renders digest-pinned entries with an explicit add-on signer identity", func() {
 		reg := newRegistry()
 		p := newProject(both)
@@ -987,7 +1051,7 @@ var _ = Describe("catalog template", func() {
 		Expect(err).To(MatchError(ContainSubstring("development channel only")))
 	})
 	It("renders an entry for every first-party add-on from its own template", func() {
-		for _, id := range []string{"tables", "voice", "face", "fine-tuning", "quantization", "studio", "talk", "telegram", "slack", "discord", "github", "gdrive", "gmail", "home-assistant", "jellyfin", "calendar", "contacts", "mail", "office", "pikvm", "pirateface-search", "ollama-search", "sandbox", "ssh", "web"} {
+		for _, id := range []string{"tables", "voice", "face", "fine-tuning", "quantization", "studio", "talk", "telegram", "slack", "discord", "github", "gdrive", "gmail", "home-assistant", "jellyfin", "calendar", "contacts", "mail", "office", "pikvm", "pirateface-search", "ollama-search", "sandbox", "ssh", "kubernetes", "web"} {
 			p := newProjectFor(id, both)
 			m := p.merged("1.2.3", rev, nil)
 			repoName := newRegistry().repo("addons")
@@ -1084,7 +1148,7 @@ var _ = Describe("catalog template", func() {
 		for _, e := range entries {
 			got[e.ID] = e.ToolCount
 		}
-		Expect(got).To(Equal(map[string]int{"tables": 16, "fine-tuning": 8, "quantization": 6, "voice": 0, "face": 0, "studio": 0, "talk": 0, "telegram": 0, "slack": 0, "discord": 0, "github": 15, "gdrive": 8, "gmail": 7, "home-assistant": 11, "jellyfin": 16, "calendar": 12, "contacts": 11, "mail": 8, "office": 11, "pikvm": 8, "pirateface-search": 1, "ollama-search": 1, "sandbox": 6, "ssh": 3, "web": 5}))
+		Expect(got).To(Equal(map[string]int{"tables": 16, "fine-tuning": 8, "quantization": 6, "voice": 0, "face": 0, "studio": 0, "talk": 0, "telegram": 0, "slack": 0, "discord": 0, "github": 15, "gdrive": 8, "gmail": 7, "home-assistant": 11, "jellyfin": 16, "calendar": 12, "contacts": 11, "mail": 8, "office": 11, "pikvm": 8, "pirateface-search": 1, "ollama-search": 1, "sandbox": 6, "ssh": 3, "kubernetes": 20, "web": 5}))
 	})
 	It("refuses missing inputs, backend repositories, bad channels and unknown placeholders", func() {
 		reg := newRegistry()
@@ -1190,21 +1254,22 @@ var _ = Describe("workflow policy", func() {
 		anchor := "    name: validate package rules\n"
 		expect(mutate(anchor, anchor+"    continue-on-error: true\n"), "P_VALIDATE_GATE")
 		expect(mutate(anchor, anchor+"    continue-on-error: ${{ github.event_name != 'push' }}\n"), "P_VALIDATE_GATE")
-		expect(mutate(anchor, anchor+"    if: always()\n"), "P_VALIDATE_GATE")
-		expect(mutate(anchor, anchor+"    if: failure() || success()\n"), "P_VALIDATE_GATE")
+		cond := "    if: github.event_name != 'release'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"
+		expect(mutate(cond, "    if: always()\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"), "P_VALIDATE_GATE")
+		expect(mutate(cond, "    if: failure() || success()\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n"), "P_VALIDATE_GATE")
 		expect(mutate("        run: sh scripts/addons/package_test.sh", "        continue-on-error: true\n        run: sh scripts/addons/package_test.sh"), "P_VALIDATE_GATE")
 	})
 	It("rejects a package or promote job that runs after a failed validate", func() {
 		expect(mutate("    if: needs.plan.outputs.has_platforms == 'true'", "    if: always() && needs.plan.outputs.has_platforms == 'true'"), "P_VALIDATE_GATE")
 		expect(mutate("    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.aliases != ''", "    if: always() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.aliases != ''"), "P_VALIDATE_GATE")
 	})
-	It("keeps validate unprivileged on every event", func() {
+	It("keeps validate unprivileged, and skips it only on the release event, which builds nothing", func() {
 		var doc struct {
 			Jobs map[string]map[string]any `yaml:"jobs"`
 		}
 		Expect(yaml.Unmarshal([]byte(base), &doc)).To(Succeed())
 		v := doc.Jobs["validate"]
-		Expect(v).NotTo(HaveKey("if"))
+		Expect(v["if"]).To(Equal("github.event_name != 'release'"))
 		Expect(v).NotTo(HaveKey("environment"))
 		Expect(fmt.Sprint(v)).NotTo(ContainSubstring("secrets."))
 		Expect(fmt.Sprint(v)).NotTo(ContainSubstring("id-token"))
@@ -1246,7 +1311,7 @@ var _ = Describe("workflow policy", func() {
 	})
 	It("rejects a workflow that names one add-on by path or skips an add-on in the matrix", func() {
 		expect(mutate("node \"addons/$ADDON/ui/build.mjs\"\n      - name: Fill", "node addons/tables/ui/build.mjs\n      - name: Fill"), "P_ADDON_PATH")
-		expect(mutate("        addon: [tables, voice, face, fine-tuning, quantization, studio, talk, telegram, slack, discord, github, gdrive, gmail, home-assistant, jellyfin, calendar, contacts, mail, office, pikvm, pirateface-search, ollama-search, sandbox, ssh, web]\n", "        platform: [x]\n"), "P_MATRIX")
+		expect(mutate("        addon: [tables, voice, face, fine-tuning, quantization, studio, talk, telegram, slack, discord, github, gdrive, gmail, home-assistant, jellyfin, calendar, contacts, mail, office, pikvm, pirateface-search, ollama-search, sandbox, ssh, kubernetes, web]\n", "        platform: [x]\n"), "P_MATRIX")
 	})
 	It("rejects a plan that does not refuse an add-on without an enabled platform", func() {
 		expect(mutate("has no enabled platform; refusing to publish", "has no platform"), "P_FAIL_CLOSED")
@@ -1289,6 +1354,33 @@ var _ = Describe("workflow policy", func() {
 	It("rejects a publishing job without an environment or a gate", func() {
 		expect(mutate("    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.aliases != ''", "    if: needs.plan.outputs.aliases != ''"), "P_TRUSTED_GATE")
 	})
+	It("rejects a build or publish job that runs on the release event", func() {
+		expect(mutate("    if: needs.plan.outputs.has_platforms == 'true' && github.event_name != 'release'", "    if: needs.plan.outputs.has_platforms == 'true'"), "P_RELEASE_BUILD")
+		expect(mutate("    if: needs.plan.outputs.publish == 'true' && github.event_name != 'release'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60", "    if: needs.plan.outputs.publish == 'true'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 60"), "P_RELEASE_BUILD")
+		expect(mutate("    # The release event stamps no package, so it needs no guest image.\n    if: github.event_name != 'release'\n", ""), "P_RELEASE_BUILD")
+	})
+	It("rejects a release promotion that does not wait for a green tag push run of the same commit", func() {
+		expect(mutate("    needs: [plan, tag-run]\n    if: github.event_name == 'release' && needs.plan.outputs.publish", "    needs: [plan]\n    if: github.event_name == 'release' && needs.plan.outputs.publish"), "P_RELEASE_GATE")
+		expect(mutate(`select(.status == "completed" and .conclusion == "success")`, `select(.status == "completed")`), "P_RELEASE_GATE")
+		expect(mutate(`select(.headSha == \"$SHA\")`, `select(.headSha != \"\")`), "P_RELEASE_GATE")
+		expect(mutate("    if: github.event_name == 'release' && needs.plan.outputs.publish == 'true' && needs.plan.outputs.aliases != ''", "    if: always() && github.event_name == 'release' && needs.plan.outputs.publish == 'true' && needs.plan.outputs.aliases != ''"), "P_TRUSTED_GATE")
+		expect(mutate("    needs: [plan, tag-run, promote-release]", "    needs: [plan, promote-release]"), "P_RELEASE_GATE")
+	})
+	It("rejects a release promotion of a digest that verify-published did not print", func() {
+		expect(mutate("          DIGEST: ${{ steps.published.outputs.digest }}", "          DIGEST: ${{ needs.plan.outputs.digest }}"), "P_DIGEST")
+		expect(mutate("        id: published\n", "        id: other\n"), "P_DIGEST")
+	})
+	It("rejects a catalog attached before the release indexes were verified", func() {
+		expect(mutate("    needs: [plan, tag-run, promote-release]", "    needs: [plan, tag-run]"), "P_RELEASE_GATE")
+	})
+	It("rejects a release promotion that does not verify the published index first", func() {
+		expect(mutate("          go run ./scripts/addons/cmd/addonpkg verify-published", "          go run ./scripts/addons/cmd/addonpkg target"), "P_SIGNER")
+		expect(mutate("            --owner-repo \"$OWNER_REPO\" | tee published.txt", "            | tee published.txt"), "P_SIGNER")
+		expect(mutate("      - name: Verify the index of the tag push\n", "      - uses: actions/download-artifact@v8\n        with:\n          name: digest-${{ matrix.addon }}\n      - name: Verify the index of the tag push\n"), "P_ARTIFACTS")
+		perms := "    permissions:\n      contents: read\n    strategy:\n      fail-fast: false\n      matrix:\n        addon: ${{ fromJSON(needs.plan.outputs.addons) }}\n    env:\n      ADDON_OCI_REPOSITORY: ${{ vars.ADDON_OCI_REPOSITORY }}\n      ADDON: ${{ matrix.addon }}\n    steps:\n      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false"
+		Expect(strings.Count(base, perms)).To(Equal(1))
+		expect(mutate(perms, strings.Replace(perms, "      contents: read\n", "      contents: read\n      id-token: write\n", 1)), "P_SIGNER")
+	})
 	It("does not trust the backend workflow identity in the documented verification", func() {
 		Expect(strings.Contains(base, "backend_merge")).To(BeFalse())
 	})
@@ -1296,7 +1388,7 @@ var _ = Describe("workflow policy", func() {
 
 // firstPartyAddons are the add-ons the release workflow packages. The list is
 // written out so a new add-on is a deliberate change here and in the workflow.
-var firstPartyAddons = []string{"tables", "voice", "face", "fine-tuning", "quantization", "studio", "talk", "telegram", "slack", "discord", "github", "gdrive", "gmail", "home-assistant", "jellyfin", "calendar", "contacts", "mail", "office", "pikvm", "pirateface-search", "ollama-search", "sandbox", "ssh", "web"}
+var firstPartyAddons = []string{"tables", "voice", "face", "fine-tuning", "quantization", "studio", "talk", "telegram", "slack", "discord", "github", "gdrive", "gmail", "home-assistant", "jellyfin", "calendar", "contacts", "mail", "office", "pikvm", "pirateface-search", "ollama-search", "sandbox", "ssh", "kubernetes", "web"}
 
 // uilessAddons are the first-party add-ons that ship no UI: a source of the
 // model search, say. The host draws what they give, and the library entry

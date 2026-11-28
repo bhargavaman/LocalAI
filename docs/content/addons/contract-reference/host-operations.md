@@ -166,6 +166,73 @@ scope (today `connector.inbound`):
 Every other operation keeps all its checks. An operation cannot become inbound by
 a field of the request: the scope is part of its registration.
 
+### Events
+
+An add-on that keeps the owner's own data (a calendar, a task list, a table)
+can tell the owner's watches when something in it is added, changed or
+removed. It does two things: it declares its event types in the manifest, and
+it calls `events.emit` from the tool that made the change.
+
+**Declare the events.** `capabilities.events` lists the types, and needs
+`featureLevel: 12`:
+
+```json
+"events": [
+  {
+    "type": "calendar.event.created",
+    "lifecycle": "created",
+    "key": "event.id",
+    "anchor": { "time": "event.next", "zone": "event.zone", "allDay": "event.allDay", "moves": ["event.start", "event.end"], "following": "event.following" },
+    "title": "event.title",
+    "link": "calendar?event={key}",
+    "label": { "en": "An event is added", "it": "Si aggiunge un evento" }
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | The name of the event. It starts with the add-on ID and a dot. |
+| `lifecycle` | `created`, `updated` or `deleted`: what happened to the thing. |
+| `key` | A dot path to the ID of the thing in the payload. The host makes the key `<add-on ID>:<id>`, and keeps one reminder per key per watch. |
+| `anchor` | Optional. `time` is a dot path to an RFC 3339 time of the thing (for a repeating thing, the next occurrence). `zone` is a path to its IANA zone, `allDay` a path to a boolean. `moves` lists the other paths that change when the thing moves (its end, its local start), so the host tells a move from any other change. `following` is an optional path to a list of RFC 3339 times: the starts of the occurrences after `time`, for a thing that repeats (the host reads at most 64). Once the time of the current occurrence has passed, the host moves the reminder to the next one by itself, with no model run, so the series goes on even when one reminder's task fails. Send the list again with each event of the thing. A thing with no time can still get reminders at a set time or after a delay. |
+| `title` | A dot path to a short title that the owner reads. |
+| `link` | Optional. A route of the add-on's page that opens the thing; `{key}` stands for the ID. |
+| `label` | The name of the event on the watch form, plain text or one entry per language. |
+
+The host reads only these paths. It never reads another field of the payload,
+so an add-on can send what it likes for the agent, and the host code stays the
+same for every source. The parser refuses an empty or malformed path, an unknown
+lifecycle, a type of another add-on and a type declared twice.
+
+**Emit.** Ask for the operation in the manifest
+(`"hostOperations": {"optional": ["events.emit"]}`) and call it with the
+operation ID of the live call that made the change:
+
+```json
+{"type": "calendar.event.updated", "payload": {"event": {"id": "42", "title": "Standup", "start": "2026-11-26T09:30:00+01:00", "zone": "Europe/Rome"}}, "dedupe_key": "42@7"}
+```
+
+- `payload` is a JSON object of at most 256 KiB. `dedupe_key` is optional: the
+  same key is handled once. Without it the host uses a hash of the type and the
+  payload.
+- The type must be one that the add-on's current package declares, and the
+  payload must hold the key path. Otherwise the call is refused with
+  `bad_request`.
+- The add-on cannot say who made the change. The host reads it from the live
+  call: the owner (the add-on's page or the owner's own chat), a run of a
+  trigger or watch, or a paired client. A watch uses it to stay quiet about the
+  owner's own changes and to never wake on a change it made itself.
+- The payload goes to an agent as data from outside, between markers, never as
+  instructions. It cannot widen what the run may do.
+- An event reaches only the triggers and watches of the user whose data
+  changed. A server with triggers off drops it.
+- A failed emit must not fail the change itself: report it in the log and
+  answer the tool as usual.
+
+The operation runs under any live call, a page tool of the read class included,
+and a call of a paired client may make it too.
+
 ### How the pieces fit
 
 The owner process holds everything about host grants. A frontend stores nothing and enforces nothing, and it forwards the host access routes to the owner.
@@ -194,7 +261,10 @@ reads the answer for its own rules. The add-on does not store it and is not call
 
 A key is lowercase letters, digits and dashes, at most 40, and starts with a letter.
 A setting has 2 to 8 values of the same form, and a default that is one of them. An
-add-on declares at most 8 settings. A person who has not chosen has the default. The
+add-on declares at most 8 settings besides the approval settings of its tools. The
+approval settings have no cap of their own: there is one for each
+`approvalOverridable` tool, so the cap on tools bounds them. A person who has not
+chosen has the default. The
 manifest fixes the allowed values and nothing else: the words on the page and the
 help text are the add-on's own.
 

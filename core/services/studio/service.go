@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/mudler/LocalAI/pkg/sandboxpolicy"
 	"log/slog"
 	"maps"
 	"slices"
@@ -20,7 +19,9 @@ import (
 
 	"github.com/mudler/LocalAI/core/http/auth"
 	mcpendpoint "github.com/mudler/LocalAI/core/http/endpoints/mcp"
+	"github.com/mudler/LocalAI/core/privacy"
 	"github.com/mudler/LocalAI/core/services/notify"
+	"github.com/mudler/LocalAI/core/services/plugins"
 	"github.com/mudler/LocalAI/core/services/studio/agents"
 	"github.com/mudler/LocalAI/core/services/studio/bgjob"
 	"github.com/mudler/LocalAI/core/services/studio/builtins"
@@ -41,6 +42,7 @@ import (
 	"github.com/mudler/LocalAI/core/services/studio/store"
 	"github.com/mudler/LocalAI/core/services/studio/workspace"
 	"github.com/mudler/LocalAI/core/services/studio/wsfeed"
+	"github.com/mudler/LocalAI/pkg/sandboxpolicy"
 )
 
 // AnonymousPrincipal is the owner of conversations when auth is off. The loop
@@ -119,6 +121,9 @@ type Deps struct {
 	// AddonTools supplies the tools of the installed add-ons the user may use.
 	// Nil: a chat has none.
 	AddonTools AddonTools
+	// Plugins gives the plugins in the Claude Code plugin format that
+	// contribute to a turn. It is read at each turn. Nil: no plugins.
+	Plugins plugins.TurnViewer
 	// Assistant gives a chat the tools that manage this instance. Nil: no
 	// assistant chat can start.
 	Assistant Assistant
@@ -352,6 +357,8 @@ type CreateInput struct {
 // opt-in groups of built-in tools that are on.
 type Switches struct {
 	AddonsOff, McpOff, BuiltinsOff, BuiltinsOn, SkillsOff []string
+	// PluginsOff are the plugin installs the chat starts with off.
+	PluginsOff []string
 	// Connections is the set of connections (connector binding IDs) the chat
 	// may use for each add-on whose tools run with a credential, by add-on ID.
 	Connections connsets.Sets
@@ -374,6 +381,9 @@ func (s *Service) cleanSwitches(sw Switches) (Switches, error) {
 		return out, err
 	}
 	if out.SkillsOff, err = cleanSkillSwitches(sw.SkillsOff); err != nil {
+		return out, err
+	}
+	if out.PluginsOff, err = cleanPluginSwitches(sw.PluginsOff); err != nil {
 		return out, err
 	}
 	out.Connections = connsets.Clone(sw.Connections)
@@ -418,6 +428,8 @@ type Service struct {
 	// few seconds (see projectattached.go). Per instance by design: it is a
 	// cache, and the manifest is the record.
 	attached attachedCache
+	// incognito holds the incognito chats and their privacy levels.
+	incognito *store.Incognito
 	// builtins holds the built-in chat tools an add-on may replace.
 	builtins *builtins.Registry
 	// access holds the grants of the running connector turns and the recent
@@ -555,6 +567,10 @@ func New(d Deps) (*Service, error) {
 	if d.Connectors == nil && d.MCPConnectors != nil {
 		d.Connectors = d.MCPConnectors
 	}
+	// The incognito chats live in memory beside the server's store
+	// (store/incognito.go); every part of the service reads them through it.
+	var incog *store.Incognito
+	d.Store, incog = store.NewIncognito(d.Store)
 	if d.PageConsents == nil {
 		// One store for the endpoints and for the sharing service: a share
 		// that is taken back drops the consents in the same store.
@@ -570,6 +586,8 @@ func New(d Deps) (*Service, error) {
 	}
 	s := &Service{d: d, bus: bus, log: log, runs: map[string]*run{}, pumps: map[string]<-chan session.Event{}, rings: map[string]*eventRing{}, streams: map[string]int{}, locks: map[string]*keyLock{},
 		videos: map[string][]string{}, children: map[string]map[string]*child{}, allowed: map[string][]session.Tool{}, waiters: map[string][]chan store.TurnStatus{}, closed: make(chan struct{})}
+	s.incognito = incog
+	go s.sweepIncognito(incognitoSweepEvery) // #nosec G118 -- the sweep lives as long as the service and stops on Close
 	s.egressAuditStore = d.EgressAudit
 	if s.egressAuditStore == nil {
 		s.egressAuditStore, _ = audit.NewJSON("")
@@ -614,6 +632,9 @@ func New(d Deps) (*Service, error) {
 		return nil, err
 	}
 	if err := s.registerTriggerTools(); err != nil {
+		return nil, err
+	}
+	if err := s.registerReminderTools(); err != nil {
 		return nil, err
 	}
 	if err := s.registerTalkbackTool(); err != nil {
@@ -739,6 +760,9 @@ func (s *Service) Close(ctx context.Context) error {
 	select {
 	case <-s.closed:
 	default:
+		// The incognito chats end with the process: their harness files go
+		// while the manager can still delete them.
+		s.discardIncognito(time.Now().Add(time.Hour))
 		close(s.closed)
 	}
 	if s.feed != nil {
@@ -998,7 +1022,7 @@ func (s *Service) CreateAs(ctx context.Context, user string, in CreateInput, ori
 	rec := session.ChatRecord{ID: newID(), Principal: principal(user), Title: title, Created: now, Updated: now, Kind: session.KindChat, Model: model,
 		AgentID: in.AgentID, ScopedAgent: scoped, ProjectID: projectID, Collections: collections, Origin: origin.Kind, OriginID: origin.ID, Assistant: in.Assistant,
 		AddonsOff: orNil(sw.AddonsOff), McpOff: orNil(sw.McpOff), BuiltinsOff: orNil(sw.BuiltinsOff),
-		BuiltinsOn: orNil(sw.BuiltinsOn), SkillsOff: orNil(sw.SkillsOff), Connections: nilIfEmpty(sw.Connections)}
+		BuiltinsOn: orNil(sw.BuiltinsOn), SkillsOff: orNil(sw.SkillsOff), PluginsOff: orNil(sw.PluginsOff), Connections: nilIfEmpty(sw.Connections)}
 	if origin.Kind == "" {
 		// A chat a person starts gets the instance default, or the network
 		// of its saved agent when the agent sets one, under the ceiling. An
@@ -1015,6 +1039,11 @@ func (s *Service) CreateAs(ctx context.Context, user string, in CreateInput, ori
 				rec.Egress.Preset = egress.Min(n, startLimit(set, shared))
 			}
 		}
+	}
+	if privacy.FromContext(ctx).Incognito() && (origin.Kind != "" || rec.ProjectID != "") {
+		// An incognito chat is a person's, and lives outside the projects:
+		// a project lists its chats and reads its notes into them.
+		return session.ChatRecord{}, fmt.Errorf("%w: an incognito chat cannot belong to a project or start by itself", ErrIncognito)
 	}
 	if err := s.d.Store.CreateChat(ctx, rec); err != nil {
 		return session.ChatRecord{}, err
@@ -1222,6 +1251,10 @@ func (s *Service) sendWithFiles(ctx context.Context, user, conv, text string, up
 	}
 	if len(up) > 0 && !s.d.Files.Available() {
 		return SendResult{}, fmt.Errorf("%w: %s", files.ErrUnavailable, s.d.Files.Unavailable())
+	}
+	if len(up) > 0 && s.incognito.Level(conv) >= privacy.ZeroRetention {
+		// An attachment is saved in the person's files.
+		return SendResult{}, fmt.Errorf("%w: attachments are saved in your files, so a zero-retention chat takes none", ErrIncognito)
 	}
 	note := ""
 	if len(up) > 0 && s.d.Media != nil {
@@ -1958,13 +1991,23 @@ func (s *Service) llmFor(a workspace.Actor) (nibharness.Model, error) {
 	}
 	params := provider.Params{
 		Temperature: set.Temperature, TopP: set.TopP, TopK: set.TopK, ReasoningEffort: set.ReasoningEffort,
-		OnUsage:    func(u provider.Usage) { s.reportUsage(a, u, rec.Model, limit) },
+		OnUsage: func(u provider.Usage) { s.reportUsage(a, u, rec.Model, limit) },
+		// A turn has no event for a model that is loading: it only waits, and
+		// the log says why the turn is slow.
+		OnLoading: func(l provider.Loading) {
+			s.log.Info("studio: the chat's model is loading, waiting", "chat", a.ChatID, "model", rec.Model,
+				"state", l.State, "node", l.Node, "progress", l.Progress, "retry_after", l.RetryAfter, "waited", l.Waited)
+		},
 		TakeVideos: func() []string { return s.takeVideos(a.Principal, a.ChatID) },
 		// An image goes to the model with its message, not with every later one.
 		OnlyLastImages: true,
 		// The prompt of a new turn must start with the prompt of the turn
 		// before, so that the server reads only what is new.
 		PreserveThinking: s.d.PreserveThinking == nil || s.d.PreserveThinking(rec.Model),
+		// The model route keeps what the chat's privacy level lets it keep.
+		Privacy: s.incognito.Level(a.ChatID),
+		// A chat a person waits on goes before work that runs on its own.
+		Priority: chatPriority(rec),
 	}
 	m := nibharness.Model{
 		LLM: s.d.Provider.LLMWith(user, rec.Model, params), Name: rec.Model,

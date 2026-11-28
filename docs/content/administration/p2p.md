@@ -39,7 +39,7 @@ setting `p2p_mode`, or with `--p2p-mode` (environment variable
 | Mode | In the interface | What the server does |
 |---|---|---|
 | `off` | Off | Nothing. This is the default. |
-| `connect` | Connect only | It connects out to remotes over P2P and accepts nobody. It has no listener, no invites and no devices. It needs no authentication. |
+| `connect` | Connect only | It connects out to remotes over P2P and accepts nobody. It listens on random ports only so that a hole punch can reach it, and it drops every machine that connects. It runs no local network discovery and holds no relay reservation. It has no invites and no devices. It needs no authentication. |
 | `share` | Connect and share | It also accepts paired devices: it listens, mints invites, and has the devices and relays pages. |
 
 Mode `share` needs [authentication]({{% relref "/administration/authentication" %}}).
@@ -103,14 +103,40 @@ The dialog shows what the link carries: the peer ID of your server, the relay
 it names, and whether a relay pass was registered on that relay. It also warns
 when the invite can pair only over a direct connection:
 
-- **No relay.** The server has no relay. A device behind a strict NAT cannot
-  connect. Add a relay, or run one.
+- **No relay.** The server has no relay and knows no public relay for hole
+  punching. A device behind a strict NAT cannot connect. Add a relay, or run
+  one.
+- **Hole punching only.** The server has no relay of its own, but the link names
+  public relays for hole punching. Devices can connect by hole punching. About
+  3 in 10 networks block it. Add a relay, or run one, so that every device can
+  connect.
 - **No relay pass.** The relay did not answer when the invite was made, so no
   pass is registered on it. Make the invite again when the relay is back.
 - **Open relay.** The link names a relay that anyone can use. It may limit the
   speed of each connection.
 
+When the server has no public address, the dialog also says so, and what that
+means for this invite: with public relays in the link, a device outside your
+network connects by hole punching; without them, only a device on the same
+network can pair until the server finds a public relay or you add one.
+
 The link is shown once. The list of pending invites does not show it again.
+
+**Public relays in the link.** A server behind a NAT holds reservations on
+public relays that it finds through the public DHT. The link names up to two
+of them (the dialog shows how many under **Hole punching**). A device uses such
+a relay only to reach the server and set up a hole punch. A public relay never
+carries your data and never gets the relay pass. Once a link names public
+relays for a server, the device sends data to that server only directly or
+through the relays that its own links name as relays. This holds also for the
+other public relays of the server that the device learns while connected. Your own relays from the
+settings are never named this way: they go in the link as relays, with the
+pass. The link names public relays also with `"relays": "none"`. Pass
+`"omit_relay_hints": true` to `POST /api/p2p/invites` to leave them out, for
+example for a shorter QR code. With `p2p_public_dht` off the server finds no
+public relay, and the link names none. A public relay learns nothing more than
+that your server uses it; it does not see the address of your server in the
+link.
 
 **Addresses in the link.** The link carries up to four direct addresses of the
 server: public ones first, then the private addresses of its local networks
@@ -173,6 +199,77 @@ If both networks block direct connections and the relay does not answer, the
 page says so and lists what helps: run a relay, forward UDP and TCP port 4001, or
 try from another network.
 
+## Users pair their own phones
+
+A user who has the feature **Pair own devices (P2P)** (`p2p_pair`) can pair
+their own phone. The phone then signs in as that user, with no password: see
+[Device sign-in](#device-sign-in). The feature is off by default. Turn it on
+for one user on the **Users** page, or change its default for every user (see
+[Feature defaults]({{% relref "/administration/authentication#feature-defaults" %}})).
+Administrators always have it.
+
+In the web UI the user opens **Account > My devices** and presses **Pair a
+phone**. The tab shows only to a user with the feature while the server is in
+mode `share`. The dialog asks for a name and a life, up to the limit, and shows
+the QR code and the link. An administrator who pairs their own phone is told
+that the phone gets an admin session. The tab lists the user's phones, with the
+path and the last-seen time, and the invites that wait; the user renames or
+revokes a phone and cancels an invite there.
+
+The administrator finds the matching controls in three places. On **Users**,
+the access sheet of a user has the switch **Pair own devices (P2P)** and, under
+it, **On by default for users**, which changes the default at once for every
+user whose access does not set the feature. In **Sharing > Settings**, the
+section **User pairing** edits `p2p_user_pairing`. In **Sharing > Devices and
+invites**, the device table has an **Owner** column, a **Signs in** tag on each
+device that signs in, and a filter by owner.
+
+The user mints the invite with `POST /api/p2p/me/invites`. The body takes a
+`label` and `ttl_seconds` only. The server fixes the rest: the kind is `device`
+with sign-in, the invite grants no models, and the relays, open relays and local
+addresses come from the setting `p2p_user_pairing`. A user sees and changes only
+their own sign-in invites and devices; any other ID gets `404`. This includes
+the invites and devices without sign-in that the user minted as an
+administrator (workers, remotes, laptops): they belong to the instance, so a
+demoted administrator cannot list, rename or revoke them through these routes. A client key cannot use
+these routes, and neither can the API key of `LOCALAI_API_KEY`, which has no
+account (`409`, error type `needs_account`).
+
+Limits keep the pairing window small, because every pending invite lets unknown
+machines connect to the redeem route:
+
+| Limit | Default | Where |
+|---|---|---|
+| Active devices of one user | 5 | `max_devices`, checked when the user mints and again when the device redeems |
+| Pending invites of one user | 2 | `max_pending` |
+| Life of an invite | 1 hour | `max_ttl_seconds`; a longer `ttl_seconds` gets `400` |
+| Invites one user mints in an hour | 10 | fixed |
+| Pending sign-in invites on the server | 20 | fixed |
+
+A mint over a limit gets `429` with error type `limit_reached` and a message
+that names the limit.
+
+The administrator edits `p2p_user_pairing` with `GET` and `PUT
+/api/p2p/user-pairing`. It is kept in the authentication database, so every
+frontend of a cluster uses the same value. A `PUT` changes only the fields it
+names:
+
+```bash
+curl -X PUT http://localhost:8080/api/p2p/user-pairing \
+  -H "Authorization: Bearer <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"relays": "auto", "allow_open_relay": false, "omit_lan_addrs": false, "max_devices": 5, "max_pending": 2, "max_ttl_seconds": 3600}'
+```
+
+`relays` is `auto` (the relays of this server) or `none`. `max_devices` is 1 to
+100, `max_pending` 1 to 20 and `max_ttl_seconds` 60 to 86400. A change applies to
+the next invite and the next redeem; devices and invites that exist stay.
+
+The device list of the administrator shows the owner of each device
+(`owner_id`, `owner_name`) and whether it signs in (`sign_in`).
+`GET /api/p2p/devices?owner=<user ID>` lists the devices of one user. A device of
+an administrator also shows in that administrator's own list.
+
 ## How machines connect
 
 LocalAI tries three paths in this order:
@@ -225,36 +322,38 @@ runtime settings: the names below are the keys of `/api/settings` and of
 | Setting | Default | Meaning |
 |---|---|---|
 | `p2p_mode` | `off` | `off`, `connect` or `share`. See [Turn on P2P](#turn-on-p2p). |
-| `p2p_public_dht` | on | Finds public relays for hole punching through the public DHT. The DHT uses about 0.5 to 0.9 MB per minute. |
+| `p2p_public_dht` | on | Finds public relays for hole punching through the public DHT. Invite links name up to two of them, so that a device can reach a server behind a NAT. Off, links name none. The DHT uses about 0.5 to 0.9 MB per minute. |
 | `p2p_bootstrap_peers` | empty | Your own list of bootstrap peers, addresses that end in `/p2p/<peer ID>`. Empty uses the public bootstrap peers while the public DHT is on. |
 | `p2p_relays` | empty | Your own relays: a list of `{id, addr, label}`, where `addr` ends in `/p2p/<relay peer ID>`. Manage them on the **Relays** page. |
 | `p2p_relay_paired` | on | "Via your server": this server relays for its paired devices. Mode `share` only. |
 | `p2p_relay_mode` | `auto` | When this server relays for its devices: `auto` while it is reachable from the internet, `on` always, `off` never. |
 | `p2p_relay_rate_limit` | 0 | Bandwidth limit of each relayed connection through this server, in bytes per second. 0 is no limit. |
-| `p2p_mdns` | on | Finds machines on the local network. |
+| `p2p_mdns` | on | Finds machines on the local network. Mode `connect` never runs it. |
 
 Command-line flags, read at start:
 
 | Flag | Environment variable | Meaning |
 |---|---|---|
 | `--p2p-mode` | `LOCALAI_P2P_MODE` | The mode at start. The setting `p2p_mode` wins when the flag keeps its default. |
-| `--p2p-listen` | `LOCALAI_P2P_LISTEN_MADDRS` | Addresses to listen on in mode `share`. The default is TCP and QUIC on every interface, on random ports. |
+| `--p2p-listen` | `LOCALAI_P2P_LISTEN_MADDRS` | Addresses to listen on in mode `share`. The default is TCP and QUIC on every interface, on random ports. Mode `connect`, `local-ai p2p pair` and the Android app always use the default. |
 | `--p2p-bootstrap` | `LOCALAI_P2P_BOOTSTRAP_PEERS_MADDRS` | Bootstrap peers at start (setting `p2p_bootstrap_peers`). |
 | `--p2p-identity` | `LOCALAI_P2P_IDENTITY` | The identity key file. The default is `p2p/identity.key` under the data path. |
 
 ## HTTP API
 
-All routes but redeem are for administrators. The routes of invites, devices and
-relays need mode `share`. In another mode they answer 409 with a message that
+The routes are for administrators, except three groups: the `/api/p2p/me`
+routes, for a user who has the feature `p2p_pair` (a client key is refused);
+and redeem, routes and device session, which are served only over P2P. The
+routes of invites, devices and relays need mode `share`. In another mode they answer 409 with a message that
 names the mode.
 
 | Route | What it does |
 |---|---|
-| `GET /api/p2p/status` | Mode, peer ID, addresses, reachability, relay reservations, whether the server relays for its devices, and the number of pending invites and devices. Works in every mode. |
-| `POST /api/p2p/invites` | Creates an invite: `{kind, label, ttl_seconds, models, all_models, relays, allow_open_relay, omit_lan_addrs}`. `kind` is `device`, `remote`, `worker` or `split`. `models` limits the key of a remote. `all_models: true` grants every model a client key may use, explicitly; it is refused (`400`) together with a non-empty `models`. With neither, the key may use every model a client key may use. A model that does not exist or has tools attached gets `400`. A remote invite made without a user account (the API key of `LOCALAI_API_KEY`) gets `409` with error type `needs_account`. `relays` is `"auto"`, `"none"` or a list of relay IDs. `omit_lan_addrs: true` keeps the private addresses of this server out of the link (see above). The answer has the link (shown once), whether a relay pass was registered, and warnings such as `no_relay` or `relay_unreachable`. |
+| `GET /api/p2p/status` | Mode, peer ID, addresses, reachability, relay reservations (`reservations`; `hint_relays` lists the ones on public relays, which invites name for hole punching), whether the server relays for its devices, and the number of pending invites and devices. Works in every mode. |
+| `POST /api/p2p/invites` | Creates an invite: `{kind, label, ttl_seconds, models, all_models, relays, allow_open_relay, omit_lan_addrs, omit_relay_hints}`. `kind` is `device`, `remote`, `worker` or `split`. `models` limits the key of a remote. `all_models: true` grants every model a client key may use, explicitly; it is refused (`400`) together with a non-empty `models`. With neither, the key may use every model a client key may use. A model that does not exist or has tools attached gets `400`. A remote invite made without a user account (the API key of `LOCALAI_API_KEY`) gets `409` with error type `needs_account`. `relays` is `"auto"`, `"none"` or a list of relay IDs. `omit_lan_addrs: true` keeps the private addresses of this server out of the link (see above). `omit_relay_hints: true` keeps the public relays for hole punching out of the link (see above). The answer has the link (shown once), whether a relay pass was registered, `hints` (how many public relays the link names), and the warnings: `no_relay`, `punch_only`, `relay_unreachable`, `open_relay` and `no_public_addr`. |
 | `GET /api/p2p/invites` | The invites and their state: `pending`, `used`, `expired` or `canceled`, and `relay_pass`, the relay that holds the pass. A used invite also has `device_peer_id` and `phrase`, the confirmation phrase the device was shown. A remote invite has `all_models` or `models`, what it grants. |
 | `DELETE /api/p2p/invites/{id}` | Cancels a pending invite and its relay pass. |
-| `GET /api/p2p/devices` | The devices, with the path of each one: `direct`, `hole_punched` or `relayed`, and the relay limits. A remote has `all_models` or `models`, what its key may use. |
+| `GET /api/p2p/devices` | The devices, with the path of each one: `direct`, `hole_punched` or `relayed`, and the relay limits. A remote has `all_models` or `models`, what its key may use. Each device has `owner_id`, `owner_name` and `sign_in`. `?owner=<user ID>` lists the devices of one user. |
 | `PATCH /api/p2p/devices/{id}` | Renames a device: `{label}`. |
 | `DELETE /api/p2p/devices/{id}` | Revokes a device. |
 | `GET`, `POST /api/p2p/relays` | Lists the relays, or adds one: `{addr, label, claim_code}`. |
@@ -263,8 +362,18 @@ names the mode.
 | `GET /api/p2p/split-workers` | Lists the model-split workers with their state and path. See [Model-split workers over P2P]({{% relref "/administration/p2p-model-split" %}}#http-api-and-assistant). |
 | `PATCH /api/p2p/split-workers/{id}` | `{allow_slow_path}`: uses a worker over a relay ("Use anyway"), or stops. |
 | `GET`, `PUT /api/p2p/relays/{id}/limits` | Reads the limits of a relay (`circuit_bytes`, `circuit_seconds`, `rate_bps`; 0 is no limit) and whether this server may change them, or changes them: a field left out stays. A new data or time limit restarts the circuit service of the relay (`restarted` is `true`). `409` when this server is not an admin of the relay or the relay is open. |
+| `GET`, `PUT /api/p2p/user-pairing` | Reads or changes the setting `p2p_user_pairing`: `{relays, allow_open_relay, omit_lan_addrs, max_devices, max_pending, max_ttl_seconds}`. A field left out stays. See [Users pair their own phones](#users-pair-their-own-phones). |
 | `POST /api/p2p/identity/regenerate` | Makes a new identity. The body must be `{"confirm": true}`. Every device must pair again. |
+| `GET /api/p2p/me` | For a user with `p2p_pair`: whether a device can pair now (`available`; `reason` is `not_share` in another mode), the limits, and the number of own devices and pending invites. |
+| `POST /api/p2p/me/invites` | For a user with `p2p_pair`: mints a sign-in invite for an own device: `{label, ttl_seconds}`. Any other field is ignored. The answer is the one of `POST /api/p2p/invites`. |
+| `GET /api/p2p/me/invites` | For a user with `p2p_pair`: the own pending invites. |
+| `DELETE /api/p2p/me/invites/{id}` | For a user with `p2p_pair`: cancels an own invite and its relay pass. |
+| `GET /api/p2p/me/devices` | For a user with `p2p_pair`: the own devices, with path and last-seen time. |
+| `PATCH /api/p2p/me/devices/{id}` | For a user with `p2p_pair`: renames an own device: `{label}`. |
+| `DELETE /api/p2p/me/devices/{id}` | For a user with `p2p_pair`: revokes an own device and ends its sessions. |
 | `POST /api/p2p/redeem` | Redeems an invite: `{v: 1, code, name, platform}`. Served **only over P2P**; the normal HTTP listener answers 404. |
+| `GET /api/p2p/routes` | The current routes to this server, for a paired device: `{server, addrs, relays, hints}`. Served **only over P2P** and only to a paired device; the normal HTTP listener answers 404. |
+| `POST /api/p2p/device/session` | Signs a paired sign-in device in as its owner: `{credential}` as JSON, or the form field `credential`. Sets the session cookie; a form post gets `303` to `/`, JSON gets `200` with the user. Served **only over P2P** and only to a paired device; the normal HTTP listener answers 404. See [Device sign-in](#device-sign-in). |
 
 The redeem route takes the peer ID of the caller from the P2P connection. A
 wrong, used, canceled or expired code all get the same answer, 410, so the route
@@ -274,10 +383,81 @@ or 60 from all peers in a minute, it answers 429.
 While an invite is pending, a machine that is not paired may connect, but it may
 call only the redeem route. Every other request gets 403.
 
+The routes route has the lists of an invite link minted now with `"relays":
+"auto"`, without the code and the pass: the direct addresses (public ones, then
+local network ones), every gated relay of this server, also when the invite of
+the device named fewer or none, and up to two public relays for hole punching
+(`hints`). The local network addresses are left out when the invite of the
+device was created with `"omit_lan_addrs": true`. A paired device asks
+for them while it is connected, so it still finds this server after a relay
+reservation moves or an address changes. The Android app and the desktop
+launcher (through `local-ai p2p forward`) ask when a connection opens and every
+10 minutes after, and keep the new lists for this server. A peer that is not
+paired gets 403.
+
+### Device sign-in
+
+A device that redeemed a sign-in invite gets a device credential in the redeem
+answer (`device_credential`, shown once), with `sign_in: true` and
+`owner_name`, the account it signs in as. The server keeps only a keyed hash of
+the credential. The device posts the credential to `POST
+/api/p2p/device/session` over P2P and gets a normal web session of its owner,
+with the rights of the owner and no more. The route checks, in this order:
+
+1. the peer of the connection is an active device that was paired with sign-in;
+2. the credential is the credential of that device;
+3. the owner is an active user;
+4. the owner still has the feature **Pair own devices (P2P)** (`p2p_pair`).
+   Administrators always have it.
+
+Every other case gets the same `403`, so the route does not tell which check
+failed. Wrong credentials have their own limit, counted for the peer alone:
+after 5 in an hour from one peer the route answers `429` to that peer. The
+limit does not count by network source, because the P2P connection proves the
+peer, and it does not share the count of wrong invite codes, so peers behind
+the same relay or NAT cannot lock each other out. The credential works only
+from the peer that redeemed the invite, because the route reads the peer ID
+that the P2P connection proved. It is not an API key: the normal HTTP listener
+does not accept it.
+
+The session is bound to the device. LocalAI accepts it only on a request that
+arrives over P2P from the device that opened it, and only while that device is
+active and signs in. The same cookie or `Authorization: Bearer` token on the
+normal HTTP listener, or over P2P from another paired peer, gets `401`. The app
+on the phone always reaches the server through its P2P forwarder, so this does
+not limit normal use. Each request with such a session reads the device row by
+its ID from the shared database, so a revoke takes effect on every frontend at
+once.
+
+A device keeps one live session. When it signs in again, the new session
+replaces the earlier ones of that device.
+
+Revoking a device ends the sessions it opened. If the server cannot delete
+those sessions, the revoke answers an error; the device is revoked all the
+same, and its sessions no longer work. When an administrator disables
+or deletes a user, the server revokes the sign-in devices of that user and ends
+their sessions. Every frontend also leaves the sign-in devices of a user who is
+not active out of its allowlist at its next reload. Devices without sign-in (an
+admission-only phone or laptop, a remote, a worker) stay: an administrator pairs
+them for the instance, not for the account that made the invite. Taking
+`p2p_pair` away from a user keeps the devices of that user, but they can no
+longer open a new session.
+
+The in-process relay ("Via your server") does not let a sign-in device, or a
+device of a user who is not an administrator, hold a reservation or open a
+circuit: such a device never waits for connections, and it talks to the server
+directly, so it has no use for a circuit through the server.
+
+A device that was away too long can have routes that are all out of date. Send
+it a new invite: the app sees that it already has this server, dials the routes
+of the invite and does not redeem the code. It saves new routes only when this
+server gives them over that connection. Then cancel that invite.
+
 The LocalAI Assistant has the tools `get_p2p_status`, `list_p2p_devices`,
 `list_p2p_invites`, `list_p2p_relays`, `get_p2p_relay_limits`,
 `list_p2p_split_workers`, `revoke_p2p_device`, `cancel_p2p_invite`,
-`set_p2p_relay_limits`, `set_p2p_split_slow_path` and `set_p2p_split_node`. It cannot create invites: a link is a credential.
+`set_p2p_relay_limits`, `set_p2p_split_slow_path`, `set_p2p_split_node`,
+`get_p2p_user_pairing` and `set_p2p_user_pairing`. It cannot create invites: a link is a credential.
 
 ## Several frontends
 
@@ -293,8 +473,9 @@ The relay pass of an invite is kept in the memory of the frontend that made the
 invite, until the invite ends. Only that frontend can cancel the pass: when
 another frontend cancels the invite, or after a restart, the pass is not
 cancelled and ends with its time limit. The same holds for the count of wrong
-invite codes, which each frontend keeps for itself, so an attacker gets the
-limit once for each frontend.
+invite codes and of wrong device credentials, which each frontend keeps for
+itself (per-instance state), so an attacker gets the limit once for each
+frontend.
 
 ## Command line
 

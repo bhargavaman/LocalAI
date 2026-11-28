@@ -26,6 +26,8 @@ const (
 	ToolListScheduling            = "list_scheduling"
 	ToolGetScheduling             = "get_scheduling"
 	ToolVRAMEstimate              = "vram_estimate"
+	ToolParseEngineCommand        = "parse_engine_command"
+	ToolPreviewEngineCommand      = "preview_engine_command"
 	ToolGetBranding               = "get_branding"
 	ToolGetUsageStats             = "get_usage_stats"
 	ToolGetPIIEvents              = "get_pii_events"
@@ -38,6 +40,7 @@ const (
 	ToolListHostExecEvents        = "list_host_exec_events"
 	ToolGetChatEgress             = "get_chat_egress"
 	ToolListEgressEvents          = "list_egress_events"
+	ToolGetPromptCache            = "get_prompt_cache"
 
 	// Mutating tools — guarded by Options.DisableMutating and the
 	// LLM-side safety prompt (see prompts/10_safety.md).
@@ -67,8 +70,15 @@ const (
 	ToolSetSharedFolderMember    = "set_shared_folder_member"
 	ToolRemoveSharedFolderMember = "remove_shared_folder_member"
 	ToolSetNodeVRAMBudget        = "set_node_vram_budget"
-	ToolSetScheduling            = "set_scheduling"
-	ToolDeleteScheduling         = "delete_scheduling"
+	ToolClearPromptCache         = "clear_prompt_cache"
+	// ToolSetNodeLimits sets or clears the per-node overrides of the memory
+	// settings (models kept loaded, VRAM budget, threshold, model swap).
+	ToolSetNodeLimits = "set_node_limits"
+	// ToolSetModelMemoryPolicy changes Settings > Models in memory: the
+	// model limit, model swap, eviction, idle unload and the reclaimer.
+	ToolSetModelMemoryPolicy = "set_model_memory_policy"
+	ToolSetScheduling        = "set_scheduling"
+	ToolDeleteScheduling     = "delete_scheduling"
 	// ToolPinFailoverTarget and ToolUnpinFailoverTarget live here (rather
 	// than grouped with ToolListFailoverChains below) so mutatingToolNames
 	// stays a contiguous scan of this block.
@@ -83,7 +93,11 @@ const (
 	ToolSetP2PSplitSlowPath   = "set_p2p_split_slow_path"
 	ToolSetP2PSplitNode       = "set_p2p_split_node"
 	ToolSetNodeSplitServer    = "set_node_split_server"
-	ToolSetP2PRelayLimits     = "set_p2p_relay_limits"
+	// ToolDrainNode drains a node or resumes a draining one (an action
+	// parameter).
+	ToolDrainNode         = "drain_node"
+	ToolSetP2PRelayLimits = "set_p2p_relay_limits"
+	ToolSetP2PUserPairing = "set_p2p_user_pairing"
 	// ToolSetCarrierWeights changes the carrier weights of a distributed cluster.
 	ToolSetCarrierWeights = "set_carrier_weights"
 
@@ -106,6 +120,9 @@ const (
 	ToolListP2PInvites    = "list_p2p_invites"
 	ToolListP2PRelays     = "list_p2p_relays"
 	ToolGetP2PRelayLimits = "get_p2p_relay_limits"
+	// ToolGetP2PUserPairing reads p2p_user_pairing; set_p2p_user_pairing is
+	// in the mutating block above.
+	ToolGetP2PUserPairing = "get_p2p_user_pairing"
 	// ToolListP2PSplitWorkers lists the model-split workers;
 	// set_p2p_split_slow_path and set_p2p_split_node are in the mutating
 	// block above.
@@ -114,6 +131,12 @@ const (
 	// ToolListFederation is read-only: the instances and the federation
 	// groups; manage_federation_group is in the mutating block above.
 	ToolListFederation = "list_federation"
+
+	// ToolPlugins manages the plugins in the Claude Code plugin format with
+	// an action parameter. It is in the read-only catalog because its read
+	// actions stay in the read-only flavour; that flavour refuses the
+	// mutating actions in the handler, and the safety prompt names the tool.
+	ToolPlugins = "plugins"
 )
 
 // DefaultServerName is the MCP Implementation.Name surfaced when
@@ -144,6 +167,7 @@ var mutatingToolNames = []string{
 	ToolSetAlias,
 	ToolSeedRouterCorpus,
 	ToolClearRouterCorpus,
+	ToolClearPromptCache,
 	ToolCreateSharedFolder,
 	ToolRenameSharedFolder,
 	ToolDeleteSharedFolder,
@@ -151,6 +175,8 @@ var mutatingToolNames = []string{
 	ToolSetSharedFolderMember,
 	ToolRemoveSharedFolderMember,
 	ToolSetNodeVRAMBudget,
+	ToolSetNodeLimits,
+	ToolSetModelMemoryPolicy,
 	ToolSetScheduling,
 	ToolDeleteScheduling,
 	ToolPinFailoverTarget,
@@ -162,6 +188,8 @@ var mutatingToolNames = []string{
 	ToolSetP2PSplitSlowPath,
 	ToolSetP2PSplitNode,
 	ToolSetNodeSplitServer,
+	ToolDrainNode,
 	ToolSetP2PRelayLimits,
+	ToolSetP2PUserPairing,
 	ToolSetCarrierWeights,
 }

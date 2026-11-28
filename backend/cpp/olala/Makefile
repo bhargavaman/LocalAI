@@ -72,6 +72,23 @@ olala-fallback:
 # through to the copied build: SHARED_LIBS=ON, the DL flags, and --target ggml (which
 # pulls in the per-microarch libggml-cpu-*.so via ggml's add_dependencies). The .so set
 # is collected for package.sh to bundle into package/lib.
+# CPU_VARIANTS_DIR (absolute path) holds libggml-cpu-*.so built from this fork's pin by
+# .docker/llama-cpp-cpu-variants.sh. When set, the tree here is built with -DGGML_CPU=OFF
+# (loader and accelerator backend only) and the variants are copied into ggml-shared-libs.
+# Unset, the variants are built in tree. The stage reads OLALA_CMAKE_ARGS from this file,
+# so the flags that shape the CPU kernels stay defined in one place.
+CPU_VARIANTS_DIR?=
+
+# CPU_ALL_RPC=ON builds the RPC backend and ggml-rpc-server in the cpu-all tree too and
+# ships them as olala-grpc and olala-rpc-server, so the GPU backend is compiled once
+# instead of a second time for the static olala-grpc tree. See CPU_ALL_RPC in
+# backend/cpp/llama-cpp/Makefile.
+CPU_ALL_RPC?=OFF
+ifeq ($(CPU_ALL_RPC),ON)
+CPU_ALL_RPC_CMAKE_ARGS:=-DGGML_RPC=ON
+CPU_ALL_RPC_TARGET:=--target ggml-rpc-server
+endif
+
 olala-cpu-all:
 	rm -rf $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build
 	cp -rf $(LLAMA_CPP_DIR) $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build
@@ -86,12 +103,26 @@ olala-cpu-all:
 	LLAMA_REPO=$(LLAMA_REPO) LLAMA_VERSION=$(OLALA_VERSION) \
 	$(MAKE) -C $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build llama.cpp
 	bash $(CURRENT_MAKEFILE_DIR)/apply-patches.sh $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build/llama.cpp $(PATCHES_DIR)
-	SHARED_LIBS=ON EXTRA_CMAKE_ARGS="$(OLALA_CMAKE_ARGS) -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON" TARGET="--target grpc-server --target ggml" \
+ifneq ($(strip $(CPU_VARIANTS_DIR)),)
+	test "$$(cat $(CPU_VARIANTS_DIR)/LLAMA_VERSION)" = "$(OLALA_VERSION)" || { echo "CPU variants in $(CPU_VARIANTS_DIR) were built for another commit than $(OLALA_VERSION)" >&2; exit 1; }
+	SHARED_LIBS=ON EXTRA_CMAKE_ARGS="$(OLALA_CMAKE_ARGS) -DGGML_BACKEND_DL=ON -DGGML_CPU=OFF $(CPU_ALL_RPC_CMAKE_ARGS)" TARGET="--target grpc-server --target ggml $(CPU_ALL_RPC_TARGET)" \
 	LLAMA_REPO=$(LLAMA_REPO) LLAMA_VERSION=$(OLALA_VERSION) \
 	$(MAKE) -C $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build grpc-server
+else
+	SHARED_LIBS=ON EXTRA_CMAKE_ARGS="$(OLALA_CMAKE_ARGS) -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON $(CPU_ALL_RPC_CMAKE_ARGS)" TARGET="--target grpc-server --target ggml $(CPU_ALL_RPC_TARGET)" \
+	LLAMA_REPO=$(LLAMA_REPO) LLAMA_VERSION=$(OLALA_VERSION) \
+	$(MAKE) -C $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build grpc-server
+endif
 	cp -rfv $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build/grpc-server olala-cpu-all
+ifeq ($(CPU_ALL_RPC),ON)
+	cp -fv $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build/grpc-server olala-grpc
+	cp -fv $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build/llama.cpp/build/bin/ggml-rpc-server olala-rpc-server
+endif
 	rm -rf ggml-shared-libs && mkdir -p ggml-shared-libs
 	find $(CURRENT_MAKEFILE_DIR)/../olala-cpu-all-build/llama.cpp/build \( -name '*.so*' -o -name '*.dylib' \) -exec cp -av {} ggml-shared-libs/ \;
+ifneq ($(strip $(CPU_VARIANTS_DIR)),)
+	cp -av $(CPU_VARIANTS_DIR)/libggml-cpu-*.so ggml-shared-libs/
+endif
 	@echo "Collected ggml shared backends:" && ls -la ggml-shared-libs/
 
 olala-grpc:

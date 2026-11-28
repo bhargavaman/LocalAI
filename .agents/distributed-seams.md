@@ -22,7 +22,7 @@ files to that spec.
 |---|---|---|---|
 | Fan-out | `messaging.Broadcaster` | `core/services/messaging` | `carrier.Broadcaster` over the pgbus bus and the NATS client |
 | Control verbs, frontend half | `nodes.NodeCommandSender`, `nodes.FileStager` | `core/services/nodes` | `RemoteUnloaderAdapter` over NATS request/reply and `TunnelControl` over the HTTP control plane of a worker; `S3FileStager` over either (`NewS3NATSFileStager`, `NewS3TunnelFileStager`); `HTTPFileStager` over HTTP |
-| Control verbs, worker half | unexported `controlServer` (`handle`, `handleWithProgress`) | `core/services/worker` | `natsControlServer`, `httpControlServer` |
+| Control verbs, worker half | unexported `controlServer` (`handle`, `handleConcurrent`, `handleWithProgress`) | `core/services/worker` | `natsControlServer`, `httpControlServer` |
 | Agent RPC, frontend half | `AgentControl` (package `mcp`), and `nodes.NodeAgentControl` for a call that names the worker | `core/http/endpoints/mcp`, `core/services/nodes` | `nodes.NATSAgentControl`, `nodes.AgentControlClient` (tunnel) |
 | Agent RPC, worker half | `agentworker.ServeConfig`, which serves every route of the worker: `nodes.NATSAgentRPCServer` on NATS, `agentworker.Handler` on the tunnel | `core/services/agentworker`, `core/services/nodes` | `nodes.NATSAgentRPCServer`, `agentworker.Config` |
 | Chat start, frontend half | `studio.ChatWorkers` | `core/services/studio` | `nodes.ChatStarter`, over the queue request of the peer link (`messaging.ProcessReplies`): the frontend picks the chat worker |
@@ -403,9 +403,11 @@ runs its requests one at a time on every carrier.
 Worker half: each verb is a `controlVerb`, named by the constants of
 `core/services/workerctl` (`workerctl.AllVerbs` lists them). A handler is typed
 with `unary`, `withProgress` or `noReply` and registered with `handle` (one
-request of the verb at a time on NATS, panic not recovered) or
-`handleWithProgress` (a goroutine per request, progress published on the
-install-progress subject). An undecodable body is still answered with the verb's
+request of the verb at a time on NATS, panic not recovered),
+`handleConcurrent` (a goroutine per request on NATS too, for a verb whose
+handler may wait: `model.stop` waits for a process that another stop is
+ending) or `handleWithProgress` (a goroutine per request, progress published
+on the install-progress subject). An undecodable body is still answered with the verb's
 typed refusal on NATS.
 
 `httpControlServer` is the second server of the same handlers. It mounts each
@@ -432,10 +434,13 @@ is `ErrNoRoute`, whether a wait that ran out means that the worker may still be
 installing (`waitExpired`), whether a missing acknowledgement of `backend.stop`
 may be read as an older worker (`acknowledgementMissing`: true only for NATS), and
 how the carrier is named in a log line. An HTTP link never reads silence as a
-stop that was done. A 404 is a worker that does not serve the verb. It becomes
-`ErrNoRoute` only for `backend.upgrade`: the worker is older than the verb, and
-the upgrade fails on it. There is no fallback to a forced install; an old worker
-must be upgraded with the frontend. A 404 is a plain error for every other verb.
+stop that was done. A 404 is a worker that does not serve the verb. For
+`backend.upgrade` it becomes `nodes.ErrWorkerTooOld`: the worker is older than
+the verb, and the upgrade fails on it. It is the worker's own answer, never
+`ErrNoRoute`: the node is not marked unhealthy, and its pending upgrade waits
+without counting a failed attempt. There is no fallback to a forced install; an
+old worker must be upgraded with the frontend. A 404 is a plain error for every
+other verb.
 
 ## Agent RPC
 
@@ -605,8 +610,8 @@ grace, and nothing but `PresenceGone` may be read as absence.
 
 On `ErrNoRoute` the only change to the node's own state is the status-only
 `MarkUnhealthy`, which the next heartbeat reverses. A caller may also route
-around the node (the scheduler skips it, and an upgrade falls back to the older
-install subject). Never delete `node_models` rows on it. Timeouts are not
+around the node (the scheduler skips it). An upgrade has no fallback: it fails
+on that node. Never delete `node_models` rows on it. Timeouts are not
 `ErrNoRoute`.
 
 A pending backend op that fails with `ErrNoRoute` is still recorded as a failed

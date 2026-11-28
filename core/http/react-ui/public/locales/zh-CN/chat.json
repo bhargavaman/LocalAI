@@ -219,12 +219,17 @@
       "shared": "共享",
       "folder": "工作区",
       "addon": "{{name}}",
-      "addonFrom": "来自 {{name}}"
+      "addonFrom": "来自 {{name}}",
+      "plugin": "插件"
     },
     "replacedBy": "已被 {{name}} 替换",
     "fallback_one": "正在使用内置 {{skills}}：{{name}} 插件自己的技能在此处已关闭或未运行。",
     "fallback_other": "正在使用内置 {{skills}}：{{name}} 插件自己的技能在此处已关闭或未运行。",
-    "fromProject": "来自项目"
+    "fromProject": "来自项目",
+    "pluginGroup": "插件：{{name}}",
+    "pluginSwitch": "在此聊天中使用 {{name}}",
+    "pluginOff": "在此聊天中已关闭。它的技能、命令和连接器在这里不起作用。",
+    "pluginNoSkills": "此插件添加命令或连接器，不添加技能。"
   },
   "agent": {
     "label": "智能体",
@@ -252,7 +257,8 @@
       "context": "上下文",
       "skills": "技能和智能体",
       "help": "帮助",
-      "yours": "你的"
+      "yours": "你的",
+      "plugins": "插件"
     },
     "models": {
       "label": "模型",
@@ -307,7 +313,9 @@
       "shared": "共享",
       "yours": "你的",
       "prompt": "提示词",
-      "tool": "工具"
+      "tool": "工具",
+      "plugin": "插件",
+      "command": "命令"
     },
     "collides": "仅通过 /skill",
     "errors": {
@@ -424,7 +432,15 @@
     "alsoSavedWorking_other": "另外保存了 {{count}} 个工作文件",
     "savedWorking_one": "保存了 {{count}} 个工作文件",
     "savedWorking_other": "保存了 {{count}} 个工作文件",
-    "workingTitle": "工作文件（脚本、日志或草稿）：打开 {{path}}"
+    "workingTitle": "工作文件（脚本、日志或草稿）：打开 {{path}}",
+    "group": {
+      "used_one": "使用了 {{count}} 个工具",
+      "used_other": "使用了 {{count}} 个工具",
+      "calls_one": "{{count}} 次调用",
+      "calls_other": "{{count}} 次调用",
+      "failed_one": "{{count}} 个失败",
+      "failed_other": "{{count}} 个失败"
+    }
   },
   "error": {
     "title": "回复失败",
@@ -439,6 +455,8 @@
       "model_cooldown_anon": "模型刚才启动失败,正在冷却。",
       "model_load_failed": "无法启动模型“{{model}}”。",
       "model_load_failed_anon": "无法启动模型。",
+      "model_loading": "模型“{{model}}”仍在加载。",
+      "model_loading_anon": "模型仍在加载。",
       "model_not_found": "找不到模型“{{model}}”。",
       "model_not_found_anon": "找不到该模型。",
       "upstream_key": "上游拒绝了该密钥。",
@@ -456,6 +474,7 @@
       "model_backend_missing_admin": "请选择其他模型,或在“后端”页面安装该后端。",
       "model_cooldown": "请在 {{seconds}} 秒后重试。",
       "model_load_failed": "请检查模型的配置及其后端,然后重试。",
+      "model_loading": "大型模型可能需要好几分钟才能加载完成。请过几分钟再试。",
       "model_not_found": "请选择其他模型,或在“模型”页面安装此模型。",
       "upstream_key": "请检查模型设置中的 API 密钥。",
       "upstream_path": "上游地址必须是完整的端点,例如 .../v1/chat/completions。",
@@ -684,7 +703,8 @@
   },
   "invoked": {
     "skill": "技能：{{name}}",
-    "agent": "智能体：{{name}}"
+    "agent": "智能体：{{name}}",
+    "command": "命令：{{name}}"
   },
   "marker": {
     "compacted": "上下文已压缩：从 {{before}} 到 {{after}} 个 token",
@@ -935,5 +955,10 @@
     "message_one": "删除 {{project}} 中显示的 {{count}} 个对话？此操作无法撤销。",
     "message_other": "删除 {{project}} 中显示的 {{count}} 个对话？此操作无法撤销。",
     "confirm": "删除显示的"
+  },
+  "plugins": {
+    "toolsGroup": "插件",
+    "toolsDescribe": "它在此聊天中的连接器：{{names}}。",
+    "connectorFrom": "来自插件 {{name}}。"
   }
 }

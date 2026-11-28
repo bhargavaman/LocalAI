@@ -105,6 +105,10 @@ type ApplicationConfig struct {
 
 	Addons AddonConfig `json:"-" yaml:"-"`
 
+	// Plugins holds the settings of the plugins in the Claude Code plugin
+	// format.
+	Plugins PluginsConfig `json:"-" yaml:"-"`
+
 	// AddonHostOps maps an add-on ID to the host operation prefixes it may
 	// call. It is startup-only. Nil or empty means no add-on gets a host
 	// operation endpoint.
@@ -273,6 +277,16 @@ type ApplicationConfig struct {
 	AutoUpgradeAddons                           bool
 	PreferDevelopmentBackends                   bool
 
+	// PromptCache is the disk tier of the llama.cpp prompt cache.
+	PromptCache PromptCacheConfig
+	// PromptCachePath is the root of the disk tier of this node when the
+	// operator sets it; it wins over <DataPath>/prompt-cache.
+	PromptCachePath string
+	// PromptCacheAutoQuota returns the automatic per-user quota of the disk
+	// tier in bytes (0 = none), so a backend enforces it on each write and
+	// not only at the next janitor sweep. Set when the tier starts.
+	PromptCacheAutoQuota func() int64
+
 	// UpgradeRunKeep is the most finished upgrade runs kept. Zero means 200
 	// (upgraderun.DefaultRetention), a negative value keeps any number.
 	UpgradeRunKeep int
@@ -310,6 +324,10 @@ type ApplicationConfig struct {
 	SizeAwareEviction        bool          // Evict largest models first rather than least-recently-used (default: false)
 	LRUEvictionMaxRetries    int           // Maximum number of retries when waiting for busy models to become idle (default: 30)
 	LRUEvictionRetryInterval time.Duration // Interval between retries when waiting for busy models (default: 1s)
+	// DisableModelSwap stops a load from unloading another model to make
+	// room. The load waits for the LRU retry window, then fails with a
+	// retryable 503. Stored negated so the zero value keeps swap on.
+	DisableModelSwap bool
 
 	// ModelLoadFailureCooldown is the base cooldown applied after a model load
 	// fails: new load attempts for that model are refused (HTTP 503 + Retry-After)
@@ -388,6 +406,10 @@ type ApplicationConfig struct {
 	// ChatsAutoResume makes the server go on by itself with a chat turn that
 	// a restart interrupted (LOCALAI_CHATS_AUTO_RESUME). Read at startup.
 	ChatsAutoResume bool
+	// ChatsModelLoadWait is how long a chat turn waits, in total, for a model
+	// that is still loading (LOCALAI_CHATS_MODEL_LOAD_WAIT). Zero is the
+	// default of the chats. Read at startup.
+	ChatsModelLoadWait time.Duration
 	// ChatsToolProviders pins, for a built-in chat tool or skill that several
 	// add-ons replace, the add-on that serves it (tool or skill name -> add-on
 	// ID). Tool and skill names never overlap.
@@ -540,6 +562,15 @@ type ApplicationConfig struct {
 	// at startup or in a later runtime settings change, does not override it.
 	AdminOffByDeprecatedOption bool
 
+	// Incognito is the setting incognito: allow (empty) or forbid. It decides
+	// whether web UI sessions may start incognito conversations. Read at each
+	// request, see IncognitoPolicy.
+	Incognito string
+	// IncognitoMaxLevelName is the setting incognito_max_level: memory-off or
+	// zero-retention (empty). An administrator who needs audit logs allows
+	// memory isolation only. See IncognitoMaxLevel.
+	IncognitoMaxLevelName string
+
 	// ChatsToolSearch is the setting chats_tool_search: whether the large
 	// LocalAI tool groups and the deferred add-on tools are replaced by the
 	// three tool-search tools. One of
@@ -653,6 +684,7 @@ func NewApplicationConfig(o ...AppOption) *ApplicationConfig {
 		// loadRuntimeSettingsFromFile).
 		EnableBackendLogging:        true,
 		VRAMPersistentCache:         true,
+		PromptCache:                 DefaultPromptCacheConfig(),
 		ArtifactDownloadConcurrency: modelartifacts.DefaultDownloadConcurrency,
 
 		MaxConcurrentBackendOperations: 2,
@@ -915,6 +947,14 @@ func WithSizeAwareEviction(enabled bool) AppOption {
 		o.SizeAwareEviction = enabled
 	}
 }
+
+// DisableModelSwap turns model swap off (see ApplicationConfig.DisableModelSwap).
+var DisableModelSwap = func(o *ApplicationConfig) {
+	o.DisableModelSwap = true
+}
+
+// ModelSwapEnabled reports whether a load may unload another model to make room.
+func (o *ApplicationConfig) ModelSwapEnabled() bool { return !o.DisableModelSwap }
 
 // WithLRUEvictionMaxRetries sets the maximum number of retries when waiting for busy models to become idle
 func WithLRUEvictionMaxRetries(maxRetries int) AppOption {
@@ -1584,6 +1624,12 @@ const (
 	DefaultAgentJobRetentionDays = 30
 	DefaultMCPCIJobTimeout       = 10 * time.Minute
 )
+
+// WithChatsModelLoadWait sets how long a chat turn waits for a model that is
+// still loading.
+func WithChatsModelLoadWait(d time.Duration) AppOption {
+	return func(o *ApplicationConfig) { o.ChatsModelLoadWait = d }
+}
 
 // WithChatsAutoResume sets whether the server resumes interrupted chat turns
 // by itself.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/mudler/LocalAI/core/services/collections"
 	"github.com/mudler/LocalAI/core/services/messaging"
+	"github.com/mudler/LocalAI/core/services/promptcachesvc"
 	"github.com/mudler/LocalAI/core/services/remotes"
 	"github.com/mudler/LocalAI/pkg/modelsearch"
 	"io"
@@ -43,6 +44,7 @@ import (
 	"github.com/mudler/LocalAI/core/services/advisorylock"
 	"github.com/mudler/LocalAI/core/services/backendupdates"
 	"github.com/mudler/LocalAI/core/services/cloudproxy/mitm"
+	"github.com/mudler/LocalAI/core/services/clustersettings"
 	"github.com/mudler/LocalAI/core/services/facerecognition"
 	"github.com/mudler/LocalAI/core/services/failover"
 	"github.com/mudler/LocalAI/core/services/failover/distsync"
@@ -53,6 +55,7 @@ import (
 	"github.com/mudler/LocalAI/core/services/monitoring"
 	"github.com/mudler/LocalAI/core/services/nodes"
 	"github.com/mudler/LocalAI/core/services/notify"
+	"github.com/mudler/LocalAI/core/services/plugins"
 	"github.com/mudler/LocalAI/core/services/routing/admission"
 	"github.com/mudler/LocalAI/core/services/routing/billing"
 	"github.com/mudler/LocalAI/core/services/routing/corpus"
@@ -104,6 +107,15 @@ const faceEmbeddingDim = 0
 const voiceEmbeddingDim = 0
 
 type Application struct {
+	// promptCache is the disk tier of the prompt cache of this node and
+	// promptCacheNodes the seam purges and usage go through (see
+	// prompt_cache.go). Guarded by promptCacheMu.
+	promptCacheMu    sync.RWMutex
+	promptCache      *promptcachesvc.Node
+	promptCacheNodes promptcachesvc.Nodes
+	// promptCacheDist is the worker sync of distributed mode, nil otherwise.
+	promptCacheDist *promptcachesvc.Distributed
+
 	// shareKinds are the services whose resource kinds are shared through
 	// the policy; shareKindsPolicy is the policy they were registered with
 	// once the owner opened it. See RegisterShareKinds.
@@ -132,8 +144,13 @@ type Application struct {
 	addonAdminCheck func(context.Context, contract.Actor) error
 	librarySnap     librarySnapshot
 	backendLibrary  *backendlib.Installer
-	addonManager    *addons.Manager
-	addonHostOps    *addonruntime.HostOps
+	// libraryJobs runs every library install of this node under one guard;
+	// see LibraryJobs.
+	libraryJobsMu  sync.Mutex
+	libraryJobs    *backendlib.JobRunner
+	libraryJobsFor *backendlib.Installer
+	addonManager   *addons.Manager
+	addonHostOps   *addonruntime.HostOps
 	// hostAuthority answers what each add-on may call; see addonAuthority.
 	hostAuthority      hostops.Authority
 	addonAuthorityOnce sync.Once
@@ -222,6 +239,8 @@ type Application struct {
 	studioConnectorsStop  context.CancelFunc
 	bindingCapsStop       context.CancelFunc // stops the one-time permissions migration of the connector bindings
 	bindingCapsDone       chan struct{}      // closed when that migration returned
+	pluginsStop           context.CancelFunc // stops the refresh loop of the Plugins service
+	pluginsDone           chan struct{}      // closed when that loop returned
 	studioProvider        *provider.Provider
 	studioService         *studio.Service
 	studioWorkerSub       messaging.Subscription // the chat start subscription of a chat worker; nil otherwise
@@ -229,6 +248,8 @@ type Application struct {
 	studioTempDir         string                 // removed at shutdown; set only in memory-only mode
 	studioHostExec        *hostexec.Runner       // the chats' built-in bash on this machine
 	studioFiles           *files.Service
+	pluginsService        atomic.Pointer[plugins.Service] // set at startup after the chats service; turns read it
+	pluginsReason         string
 	studioFilesIndex      io.Closer          // closes the workspace index: ends pending blob removals, frees the JSON folder
 	studioFilesTemp       string             // blob cache folder of a cluster with no data path; removed at shutdown
 	studioTextIndex       *textindex.Indexer // the text of the documents in the files; nil when files are off
@@ -274,6 +295,13 @@ type Application struct {
 	// for; nil when failoverSync is nil.
 	failoverLock *advisorylock.HeldLock
 
+	// clusterSettings holds the memory settings every frontend shares in
+	// distributed mode; nil in standalone mode.
+	clusterSettings *clustersettings.Service
+	// watchdogReady is set once the boot watchdog exists, so a cluster
+	// settings change before it only updates the config.
+	watchdogReady atomic.Bool
+
 	// Upgrade checker (background service for detecting backend upgrades)
 	upgradeChecker *UpgradeChecker
 	// modelUpdates is the update check of gallery models; nil without model
@@ -285,7 +313,7 @@ type Application struct {
 	// upgradeRuns owns the server-owned upgrade runs; nil when they could not
 	// start. upgradeRunsStop stops its sweep and runners and closes a
 	// database opened for it. See upgrade_runs.go.
-	upgradeRuns      *upgraderun.Service
+	upgradeRuns      atomic.Pointer[upgraderun.Service]
 	upgradeRunsStop  func()
 	addonRunUpgrader *addonendpoints.QueuedUpgrader
 	// upgradeRunTweak changes the options of the service before it starts;
@@ -798,6 +826,13 @@ func (a *Application) Shutdown() error {
 			a.bindingCapsStop()
 			<-a.bindingCapsDone
 		}
+		// The refresh loop of the plugins fetches into DataPath and writes
+		// the package files: it ends before Shutdown returns, for the same
+		// reason.
+		if a.pluginsStop != nil {
+			a.pluginsStop()
+			<-a.pluginsDone
+		}
 		if a.studioConnectors != nil {
 			a.studioConnectors.Close()
 		}
@@ -864,6 +899,7 @@ func (a *Application) Shutdown() error {
 		// Before distributed shutdown: the sync's subscriptions live on the
 		// NATS connection that closes there.
 		a.stopFailoverDistributed()
+		a.stopClusterSettings()
 		a.stopUpgradeRuns()
 		a.distributed.Shutdown()
 		if a.modelLoader != nil {
@@ -974,6 +1010,15 @@ func (a *Application) start() (startErr error) {
 		return nil
 	}
 	assistantClient.Chats = a.StudioService
+	// The Plugins service starts after the assistant; the tool reads it at
+	// each call. An install it queues shows in /api/operations like one
+	// from the REST API.
+	assistantClient.Plugins = a.Plugins
+	assistantClient.PluginJobs = func(pluginID, jobID string) {
+		if c := a.operationCache(); c != nil && jobID != "" {
+			c.Set(galleryop.PluginOpKey(pluginID), jobID)
+		}
+	}
 	// The client tools reach the API in memory, as the acting user, with
 	// the transport the chats use. The provider is built before the
 	// assistant but is read at each call.
@@ -987,7 +1032,7 @@ func (a *Application) start() (startErr error) {
 		return a.studioVisionModel("")
 	}
 	if a.backendLibrary != nil {
-		assistantClient.BackendLibrary = libraryInstallNoProgress{a.backendLibrary}
+		assistantClient.BackendLibrary = libraryInstallNoProgress{in: a.backendLibrary, jobs: a.LibraryJobs}
 	}
 	assistantClient.UpdatesChecker = func() localaiInproc.BackendUpdatesSource {
 		if a.upgradeChecker == nil {
@@ -1025,6 +1070,8 @@ func (a *Application) start() (startErr error) {
 	assistantClient.PIIRedactor = a.piiRedactor
 	assistantClient.PIIEvents = a.piiEvents
 	assistantClient.RouterDecisions = a.routerDecisions
+	// The prompt cache goes through the same seam as the REST routes.
+	assistantClient.PromptCache = a
 	// Router corpus tools — same factories the RouteModel middleware
 	// uses, so the assistant and the request path agree on store
 	// namespaces and model resolution.
@@ -1032,6 +1079,8 @@ func (a *Application) start() (startErr error) {
 	assistantClient.RouterEmbedder = a.Embedder
 	assistantClient.RouterEmbedderFingerprint = a.EmbedderFingerprint
 	assistantClient.RouterVectorStore = a.VectorStore
+	// The memory settings go where POST /api/settings sends them.
+	assistantClient.MemorySettings = a.UpdateMemorySettings
 	// Failover chains: failoverManager does not exist yet at this point
 	// in startup (New() in startup.go builds it after start() returns),
 	// so it can't be wired here like the fields above. New() sets
@@ -1102,6 +1151,23 @@ func (a *Application) AddonManager() *addons.Manager { return a.addonManager }
 // BackendLibrary installs backends from the library entries of kind backend.
 // It is nil unless this instance owns the add-on libraries.
 func (a *Application) BackendLibrary() *backendlib.Installer { return a.backendLibrary }
+
+// LibraryJobs runs the library installs of this node: the install route, the
+// library items of upgrade runs and the Assistant's install all go through it,
+// so one install of a backend name runs at a time. nil without a backend
+// library.
+func (a *Application) LibraryJobs() *backendlib.JobRunner {
+	lib := a.BackendLibrary()
+	if lib == nil {
+		return nil
+	}
+	a.libraryJobsMu.Lock()
+	defer a.libraryJobsMu.Unlock()
+	if a.libraryJobs == nil || a.libraryJobsFor != lib {
+		a.libraryJobs, a.libraryJobsFor = &backendlib.JobRunner{Install: lib.Install}, lib
+	}
+	return a.libraryJobs
+}
 
 // AddonSources exposes owner-only source administration and explicit live refresh.
 // Forwarders never load source configuration or perform catalog I/O.
@@ -1321,10 +1387,14 @@ func startLibraryRefresh(ctx context.Context, refresh func(context.Context) erro
 
 // libraryInstallNoProgress adapts the library installer to the assistant's
 // installer interface, which does not report progress.
-type libraryInstallNoProgress struct{ in *backendlib.Installer }
+// The install runs under the guard of every library install of this node.
+type libraryInstallNoProgress struct {
+	in   *backendlib.Installer
+	jobs func() *backendlib.JobRunner
+}
 
 func (l libraryInstallNoProgress) Install(ctx context.Context, sourceID, backend, version string) error {
-	return l.in.Install(ctx, sourceID, backend, version, backendlib.Progress{})
+	return l.jobs().Run(ctx, backendlib.Job{SourceID: sourceID, Backend: backend, Version: version})
 }
 
 func (l libraryInstallNoProgress) Updates(ctx context.Context) ([]localaitools.BackendLibraryUpdate, error) {

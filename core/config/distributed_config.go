@@ -94,7 +94,7 @@ type DistributedConfig struct {
 	MCPToolTimeout          time.Duration // MCP tool execution timeout (default 360s)
 	MCPDiscoveryTimeout     time.Duration // MCP discovery timeout (default 60s)
 	WorkerWaitTimeout       time.Duration // Max wait for healthy worker at startup (default 5m)
-	DrainTimeout            time.Duration // Time to wait for in-flight requests during drain (default 30s)
+	DrainTimeout            time.Duration // Deadline of a node drain before the replicas left on the node are removed (default 10m)
 	HealthCheckInterval     time.Duration // Health monitor check interval (default 15s)
 	StaleNodeThreshold      time.Duration // Time before a node is considered stale (default 5m)
 	NodeHeartbeatCheckpoint time.Duration // Minimum gap between durable heartbeat writes (default 60s, 0 = every beat)
@@ -129,6 +129,12 @@ type DistributedConfig struct {
 	// records the operator asking for unbounded waiting with
 	// LOCALAI_MODEL_LOAD_WAIT=0.
 	ModelLoadWait time.Duration
+	// ModelLoadStall is how long a running cold load of a model may make no
+	// progress before a request starts a load of the same model on another
+	// matching node instead of waiting for it. Zero means unset
+	// (DefaultModelLoadStall applies); ModelLoadStallNever records
+	// LOCALAI_MODEL_LOAD_STALL=0.
+	ModelLoadStall time.Duration
 
 	MaxUploadSize int64 // Maximum upload body size in bytes (default 50 GB)
 
@@ -406,6 +412,18 @@ func WithModelLoadWait(d time.Duration) AppOption {
 	}
 }
 
+// WithModelLoadStall sets how long a running load may make no progress before
+// a request starts another load of the model on another node. A zero d means
+// never.
+func WithModelLoadStall(d time.Duration) AppOption {
+	return func(o *ApplicationConfig) {
+		if d == 0 {
+			d = ModelLoadStallNever
+		}
+		o.Distributed.ModelLoadStall = d
+	}
+}
+
 // WithModelConfigResyncInterval sets how often a frontend resyncs its model
 // configs from the shared models directory. Zero means the default.
 func WithModelConfigResyncInterval(d time.Duration) AppOption {
@@ -422,6 +440,13 @@ func WithModelConfigResyncInterval(d time.Duration) AppOption {
 func WithStaleNodeThreshold(d time.Duration) AppOption {
 	return func(o *ApplicationConfig) {
 		o.Distributed.StaleNodeThreshold = d
+	}
+}
+
+// WithDrainTimeout sets the default deadline of a node drain.
+func WithDrainTimeout(d time.Duration) AppOption {
+	return func(o *ApplicationConfig) {
+		o.Distributed.DrainTimeout = d
 	}
 }
 
@@ -552,7 +577,9 @@ const (
 	DefaultMCPToolTimeout      = 360 * time.Second
 	DefaultMCPDiscoveryTimeout = 60 * time.Second
 	DefaultWorkerWaitTimeout   = 5 * time.Minute
-	DefaultDrainTimeout        = 30 * time.Second
+	// DefaultDrainTimeout is the deadline of a node drain. It matches
+	// nodes.DefaultDrainTimeout.
+	DefaultDrainTimeout        = 10 * time.Minute
 	DefaultHealthCheckInterval = 15 * time.Second
 	// A beat that only refreshes the timestamp is now dropped until the
 	// checkpoint interval elapses, so the persisted column is up to one
@@ -570,7 +597,16 @@ const (
 	// LocalAI (with progress the client can act on) rather than from a proxy
 	// dropping the connection.
 	DefaultModelLoadWait = 60 * time.Second
+	// DefaultModelLoadStall is how long a running load may sit without
+	// progress before requests start a load on another node. A checkpoint
+	// load reports no progress while the backend reads its weights, so this
+	// is well above the time of a healthy phase change.
+	DefaultModelLoadStall = 5 * time.Minute
 )
+
+// ModelLoadStallNever records LOCALAI_MODEL_LOAD_STALL=0: requests never start
+// a second load because the first one stalls.
+const ModelLoadStallNever = -1 * time.Second
 
 // ModelLoadWaitUnbounded records LOCALAI_MODEL_LOAD_WAIT=0 — "wait as long as
 // it takes" — which a plain zero cannot express, since zero also means "unset,
@@ -648,7 +684,7 @@ func (c DistributedConfig) WorkerWaitTimeoutOrDefault() time.Duration {
 	return cmp.Or(c.WorkerWaitTimeout, DefaultWorkerWaitTimeout)
 }
 
-// DrainTimeoutOrDefault returns the configured timeout or the default.
+// DrainTimeoutOrDefault returns the configured drain deadline or the default.
 func (c DistributedConfig) DrainTimeoutOrDefault() time.Duration {
 	return cmp.Or(c.DrainTimeout, DefaultDrainTimeout)
 }

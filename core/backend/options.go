@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/mudler/LocalAI/core/config"
+	"github.com/mudler/LocalAI/core/priority"
+	"github.com/mudler/LocalAI/core/privacy"
+	"github.com/mudler/LocalAI/core/promptcache"
 	"github.com/mudler/LocalAI/core/trace"
 	"github.com/mudler/LocalAI/pkg/downloader"
 	pb "github.com/mudler/LocalAI/pkg/grpc/proto"
@@ -225,6 +228,15 @@ func ModelOptions(c config.ModelConfig, so *config.ApplicationConfig, opts ...mo
 	c.Threads = &threads
 
 	grpcOpts := grpcModelOpts(c, so.SystemState.Model.ModelsPath)
+	// The disk prompt cache settings are global and change at runtime: they
+	// reach the backend at load, and an option of the model wins.
+	pcCfg := so.PromptCache
+	if pcCfg.UserQuotaMiB == 0 && so.PromptCacheAutoQuota != nil {
+		if q := so.PromptCacheAutoQuota(); q > 0 {
+			pcCfg.UserQuotaMiB = int(max(q>>20, 1))
+		}
+	}
+	grpcOpts.Options = config.WithPromptCacheDiskOptions(grpcOpts.Options, c.Backend, pcCfg)
 	defOpts = append(defOpts, model.WithLoadGRPCLoadModelOpts(grpcOpts))
 	if c.IsRemoteProxy() && c.Proxy.Remote != "" {
 		// The model loader runs this finalizer only for a load in this
@@ -439,17 +451,17 @@ func grpcModelOpts(c config.ModelConfig, modelPath string) *pb.ModelOptions {
 		reranking = *c.Reranking
 	}
 
-	mmap := false
-	if c.MMap != nil {
-		mmap = *c.MMap
-	}
+	// An unset mmap goes out as true, the historic default, so backends that
+	// do not read MMapManaged load as before; llama-cpp reads MMapManaged and
+	// lets llama.cpp choose the load mode instead.
+	mmap, mmapManaged := mmapOption(c)
 
 	// Intel SYCL backend has issues with mmap enabled
 	// See: https://github.com/mudler/LocalAI/issues/9012
 	// Automatically disable mmap for Intel SYCL backends
 	if c.Backend != "" {
 		if strings.Contains(strings.ToLower(c.Backend), "intel") || strings.Contains(strings.ToLower(c.Backend), "sycl") {
-			mmap = false
+			mmap, mmapManaged = false, false
 			xlog.Info("Auto-disabling mmap for Intel SYCL backend", "backend", c.Backend)
 		}
 	}
@@ -548,6 +560,7 @@ func grpcModelOpts(c config.ModelConfig, modelPath string) *pb.ModelOptions {
 		LowVRAM:             lowVRAM,
 		NGPULayers:          int32(nGPULayers),
 		MMap:                mmap,
+		MMapManaged:         mmapManaged,
 		MainGPU:             c.MainGPU,
 		Threads:             int32(*c.Threads),
 		TensorSplit:         c.TensorSplit,
@@ -651,6 +664,52 @@ func LoadOptionsFinalizer(configs ModelConfigGetter) func(ctx context.Context, m
 	}
 }
 
+// hideOutputFor hides the output of the model's backend from the server's
+// log and the backend logs while a request that may not keep content runs
+// (see model.ModelLoader.HideBackendOutput). The release is a no-op for any
+// other request.
+func hideOutputFor(ctx context.Context, loader *model.ModelLoader, c config.ModelConfig) (release func()) {
+	if loader == nil || privacy.Allows(ctx, privacy.StoreContent) {
+		return func() {}
+	}
+	return loader.HideBackendOutput(c.ModelID())
+}
+
+// withRequestPrivacy drops every cache that would outlive a request that may
+// not keep content: the prompt cache file of the model goes, and the backend
+// is told with NoPromptCache (see backend.proto).
+func withRequestPrivacy(ctx context.Context, opts *pb.PredictOptions) {
+	if privacy.Allows(ctx, privacy.StoreContent) {
+		return
+	}
+	opts.NoPromptCache = true
+	opts.PromptCachePath = ""
+	opts.PromptCacheAll = false
+	opts.PromptCacheRO = false
+}
+
+// withRequestPriority sets the priority class of the request (see
+// core/priority). The class comes from the context only: request Metadata is
+// merged into the options later and is the caller's to write, so it must never
+// decide the class.
+func withRequestPriority(ctx context.Context, opts *pb.PredictOptions) {
+	opts.Priority = int32(priority.Of(ctx))
+}
+
+// withPromptCacheSalt sets the salt of the disk prompt cache namespace of the
+// request (see core/promptcache). The namespace comes from the context only,
+// which the request middleware fills from the authenticated principal:
+// request Metadata is merged later and is the caller's to write, so it must
+// never decide whose cache a request reads. A request that may not keep
+// content still carries the salt: the backend keeps it in RAM only.
+func withPromptCacheSalt(ctx context.Context, opts *pb.PredictOptions, c config.ModelConfig, o *config.ApplicationConfig) {
+	ns := promptcache.NamespaceFrom(ctx)
+	if o != nil && config.PromptCacheShared(c.Options, o.PromptCache) {
+		ns = promptcache.Shared
+	}
+	opts.PromptCacheSalt = promptcache.Salt(ns)
+}
+
 func gRPCPredictOpts(c config.ModelConfig, modelPath string) *pb.PredictOptions {
 	promptCachePath := ""
 	if c.PromptCachePath != "" {
@@ -710,7 +769,7 @@ func gRPCPredictOpts(c config.ModelConfig, modelPath string) *pb.PredictOptions 
 		IgnoreEOS:           c.IgnoreEOS,
 		Seed:                getSeed(c),
 		MLock:               *c.MMlock,
-		MMap:                *c.MMap,
+		MMap:                mmapEnabled(c),
 		MainGPU:             c.MainGPU,
 		TensorSplit:         c.TensorSplit,
 		TailFreeSamplingZ:   float32(*c.TFZ),
@@ -735,7 +794,7 @@ func gRPCPredictOpts(c config.ModelConfig, modelPath string) *pb.PredictOptions 
 	// reaches every backend through these standalone string keys (Python backends
 	// read them directly). The reserved blob key is server-owned and skipped.
 	for k, v := range c.RequestMetadata {
-		if k == "chat_template_kwargs" {
+		if k == "chat_template_kwargs" || k == llguidanceGrammarMetadataKey {
 			continue
 		}
 		metadata[k] = v
@@ -750,8 +809,33 @@ func gRPCPredictOpts(c config.ModelConfig, modelPath string) *pb.PredictOptions 
 			metadata["chat_template_kwargs"] = string(b)
 		}
 	}
+	// The llguidance form of a grammar LocalAI built from a JSON schema. The
+	// llama.cpp backend uses it instead of the GBNF grammar when its build has
+	// llguidance and grammar_engine allows it; other backends ignore it. Set
+	// after chat_template_kwargs so it never enters the template variables.
+	if llg := c.LLGuidanceGrammar(); llg != "" {
+		metadata[llguidanceGrammarMetadataKey] = llg
+	}
 	pbOpts.Metadata = metadata
 
 	// Logprobs and TopLogprobs are set by the caller if provided
 	return pbOpts
+}
+
+// llguidanceGrammarMetadataKey is the PredictOptions metadata key of the
+// llguidance form of the grammar (backend/cpp/llama-cpp/grammar_engine.h).
+const llguidanceGrammarMetadataKey = "llguidance_grammar"
+
+// mmapOption returns the mmap value to send to a backend and whether LocalAI
+// chose it (the model config leaves mmap unset) rather than the user.
+func mmapOption(c config.ModelConfig) (mmap, managed bool) {
+	if c.MMap == nil {
+		return true, true
+	}
+	return *c.MMap, false
+}
+
+func mmapEnabled(c config.ModelConfig) bool {
+	mmap, _ := mmapOption(c)
+	return mmap
 }

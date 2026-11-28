@@ -66,6 +66,10 @@ type TriggerInput struct {
 	// Route is the connector place a proposal came from and where its runs
 	// report. A person's form leaves it empty and an edit keeps the old one.
 	Route triggers.Route
+	// Delivery is where the runs report, as the owner chose it on the trigger
+	// form. It is checked as a change that update_trigger asks for, and
+	// applies at once: the owner saw it before saving. Nil keeps the route.
+	Delivery *DeliveryPatch
 	// Acts are the action classes an unattended run of the trigger may use
 	// (act.files, act.addons, act.addons:<id>, act.send, act.spend). Nil keeps
 	// what the trigger has; an empty list takes everything away. Only a
@@ -75,6 +79,9 @@ type TriggerInput struct {
 	// triggers.Trigger). The secret is not an input: the host makes it.
 	Source, EventType string
 	Matches           []string
+	// Watch makes an event trigger a watch: its reminder rule. Nil on an
+	// update keeps the rule the watch has.
+	Watch *triggers.WatchRule
 }
 
 // newEventSecret makes the secret of an event trigger: 32 random bytes as
@@ -128,6 +135,51 @@ func bad(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrBadTrigger, fmt.Sprintf(format, args...))
 }
 
+// badDelivery makes a refused delivery a bad trigger, so the API answers 400
+// with the reason.
+func badDelivery(err error) error {
+	if errors.Is(err, ErrBadTrigger) {
+		return err
+	}
+	return bad("%s", err.Error())
+}
+
+// asksSamePlace says whether d asks for the place that r reports to
+// already. A form sends back the delivery it was shown, and a save that does
+// not move it must not fail because its connection is now off: the place was
+// checked when it was set and is checked again at each delivery.
+func asksSamePlace(r triggers.Route, d DeliveryPatch) bool {
+	return (d.Target == "" || d.Target == r.TargetOrDefault()) &&
+		(d.Channel == "" || d.Channel == r.Channel) &&
+		(d.Connection == "" || d.Connection == r.Connection)
+}
+
+// changeDelivery sets on t, the trigger old after an edit by its owner, the
+// delivery d of the trigger form. The place is checked as update_trigger
+// checks it, but only when it moves; a change of the mode alone keeps it.
+func (h *Triggers) changeDelivery(ctx context.Context, old triggers.Trigger, t *triggers.Trigger, d DeliveryPatch) error {
+	if asksSamePlace(old.Route, d) {
+		if d.Mode == "" || d.Mode == old.Route.ModeOrDefault() {
+			return nil
+		}
+		d = DeliveryPatch{Mode: d.Mode}
+	}
+	// The capability check names the agent the trigger runs as after this
+	// save, which may be a new one.
+	target := old
+	target.AgentID = t.AgentID
+	p, err := h.checkDeliveryChange(ctx, ownerAsker(old.Owner, t.AgentID), target, d.Target, d.Mode, d.Channel, d.Connection)
+	if err != nil {
+		return badDelivery(err)
+	}
+	r := p.applyTo(old.Route)
+	if err := r.Validate(); err != nil {
+		return badDelivery(err)
+	}
+	t.Route = r
+	return nil
+}
+
 // Triggers returns the trigger host, or nil.
 func (s *Service) Triggers() *Triggers { return s.triggers }
 
@@ -173,7 +225,9 @@ func (h *Triggers) pendingProposal(ctx context.Context, user, id string) (trigge
 func countLive(ts []triggers.Trigger) int {
 	n := 0
 	for _, t := range ts {
-		if !t.Answered() && !t.IsChange() {
+		// A reminder belongs to its watch: it counts as part of it, not as a
+		// trigger of its own.
+		if !t.Answered() && !t.IsChange() && !t.IsReminder() {
 			n++
 		}
 	}
@@ -187,6 +241,14 @@ func (h *Triggers) build(ctx context.Context, owner string, in TriggerInput) (tr
 		TZ: in.TZ, Quiet: in.Quiet, DailyCap: in.DailyCap, RunLimit: in.RunLimit, AgentID: in.AgentID, Model: in.Model, SourceChatID: in.SourceChatID,
 		MinGap: in.MinGap, Reads: strings.TrimSpace(in.Reads), Widget: in.Widget, EstTokens: in.EstTokens, Route: in.Route,
 		Source: strings.TrimSpace(in.Source), EventType: strings.TrimSpace(in.EventType), Matches: in.Matches}
+	if in.Watch != nil {
+		w := *in.Watch
+		w.Types = slices.Clone(w.Types)
+		t.Watch = &w
+		if err := h.checkWatchSource(ctx, t); err != nil {
+			return t, err
+		}
+	}
 	acts, err := cleanActs(in.Acts)
 	if err != nil {
 		return t, err
@@ -294,6 +356,13 @@ func (h *Triggers) checkTriggerFolder(ctx context.Context, owner, abs string, sc
 // for the time before.
 func (h *Triggers) CreateTrigger(ctx context.Context, user string, in TriggerInput) (triggers.Trigger, error) {
 	owner := principal(user)
+	if d := in.Delivery; d != nil {
+		r, err := h.checkStudioDelivery(ctx, ownerAsker(owner, in.AgentID), studioDeliveryArgs{Target: d.Target, Connection: d.Connection, Channel: d.Channel, Mode: d.Mode})
+		if err != nil {
+			return triggers.Trigger{}, badDelivery(err)
+		}
+		in.Route = r
+	}
 	t, err := h.build(ctx, owner, in)
 	if err != nil {
 		return triggers.Trigger{}, err
@@ -332,6 +401,10 @@ func (h *Triggers) UpdateTrigger(ctx context.Context, user, id string, in Trigge
 		return triggers.Trigger{}, err
 	}
 	in = keepPlan(old, in)
+	if in.Watch == nil && old.Watch != nil && in.Kind == triggers.KindEvent {
+		w := *old.Watch
+		in.Watch = &w
+	}
 	// A form that sends back the default it was shown has not chosen it.
 	if old.DailyCap == 0 && in.DailyCap == old.EffectiveCap(h.o.Clock()) {
 		in.DailyCap = 0
@@ -348,6 +421,11 @@ func (h *Triggers) UpdateTrigger(ctx context.Context, user, id string, in Trigge
 		}
 	}
 	t.ID, t.Route = old.ID, old.Route
+	if d := in.Delivery; d != nil {
+		if err := h.changeDelivery(ctx, old, &t, *d); err != nil {
+			return triggers.Trigger{}, err
+		}
+	}
 	// The client never sends the secret: an event trigger keeps its own, and
 	// one that becomes an event trigger gets a new one (see RotateSecret).
 	if t.Kind == triggers.KindEvent {
@@ -406,6 +484,9 @@ func (h *Triggers) SetTriggerEnabled(ctx context.Context, user, id string, on bo
 	if err := h.o.Store.PutTrigger(ctx, t); err != nil {
 		return triggers.Trigger{}, err
 	}
+	if old.Enabled && !on && t.IsWatch() {
+		h.holdReminders(ctx, t)
+	}
 	h.Notify()
 	return t, nil
 }
@@ -442,13 +523,14 @@ func (h *Triggers) GetTrigger(ctx context.Context, user, id string) (triggers.Tr
 	return h.owned(ctx, user, id)
 }
 
-// ListTriggers returns the user's triggers sorted by name, without proposals.
+// ListTriggers returns the user's triggers sorted by name, without proposals
+// and without reminders, which show under their watch.
 func (h *Triggers) ListTriggers(ctx context.Context, user string) ([]triggers.Trigger, error) {
 	all, err := h.o.Store.ListTriggers(ctx, principal(user))
 	if err != nil {
 		return nil, err
 	}
-	return slices.DeleteFunc(all, func(t triggers.Trigger) bool { return t.Proposed }), nil
+	return slices.DeleteFunc(all, func(t triggers.Trigger) bool { return t.Proposed || t.IsReminder() }), nil
 }
 
 // HasProposal says whether a trigger the chat proposed, or a change of one it
@@ -703,6 +785,9 @@ func (h *Triggers) linkWidget(ctx context.Context, t triggers.Trigger) {
 // EditProposal replaces the fields of a proposal that waits for an answer. It
 // stays a proposal: it is not enabled and runs nothing until it is confirmed.
 func (h *Triggers) EditProposal(ctx context.Context, user, id string, in TriggerInput) (triggers.Trigger, error) {
+	if in.Delivery != nil {
+		return triggers.Trigger{}, bad("the delivery of a proposal cannot be edited; confirm it, then change the delivery of the trigger")
+	}
 	h.wmu.Lock()
 	defer h.wmu.Unlock()
 	old, err := h.pendingProposal(ctx, user, id)
@@ -771,6 +856,11 @@ func (h *Triggers) DeleteTrigger(ctx context.Context, user, id string) error {
 		return err
 	}
 	h.wmu.Unlock()
+	if t.IsWatch() {
+		if err := h.dropReminders(ctx, t); err != nil {
+			return fmt.Errorf("studio: remove the reminders of the watch: %w", err)
+		}
+	}
 
 	runs, err := h.o.Store.ListRuns(ctx, id, 0)
 	if err != nil {
@@ -873,18 +963,10 @@ func (h *Triggers) MaxRunsPerDay(t triggers.Trigger) int {
 	if err != nil {
 		return limit
 	}
-	loc, err := t.Location()
-	if err != nil {
+	if _, err := t.Location(); err != nil {
 		return limit
 	}
-	gap := sch.MinGap(h.o.Clock(), loc)
-	if gap <= 0 {
-		return 1 // runs once
-	}
-	if per := int((24*time.Hour + gap - 1) / gap); per < limit {
-		return per
-	}
-	return limit
+	return min(limit, sch.TimesPerDay())
 }
 
 // DailyCapOf is the daily limit of t as it applies now, before the

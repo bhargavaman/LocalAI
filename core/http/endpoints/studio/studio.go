@@ -63,6 +63,8 @@ type Handlers struct {
 	hooks hookLimiter
 	// clock is the time of the trigger hook; nil is the wall clock.
 	clock func() time.Time
+	// incognito reads the incognito setting (see WithIncognito).
+	incognito func() schema.ChatsIncognito
 }
 
 // New returns the handlers. A nil models skips the model check.
@@ -84,6 +86,13 @@ func New(svc *studiosvc.Service, models ModelChecker) *Handlers {
 // without it every such user is unknown.
 func WithUserLookup(exists func(ctx context.Context, id string) (bool, error)) HandlerOption {
 	return func(h *Handlers) { h.userExists = exists }
+}
+
+// WithIncognito tells the list endpoint the server's incognito setting, read
+// at each request: the policy (allow or forbid) and the highest level. Without
+// it the list says nothing and the page offers no incognito chat.
+func WithIncognito(setting func() schema.ChatsIncognito) HandlerOption {
+	return func(h *Handlers) { h.incognito = setting }
 }
 
 // WithClock sets the clock that the trigger hook reads, for a spec that moves
@@ -145,10 +154,11 @@ var chatRules = []errRule{
 	fixed(http.StatusConflict, "project_unavailable", studiosvc.ProjectUnavailableText, studiosvc.ErrProjectUnavailable),
 	verbatim(http.StatusBadRequest, typeInvalid, "studio: ", studiosvc.ErrNothingToRegenerate, studiosvc.ErrNotUserMessage,
 		studiosvc.ErrInvalidSettings, studiosvc.ErrBadImport, session.ErrInvalid),
-	verbatim(http.StatusBadRequest, typeInvalid, "", studiosvc.ErrBadSkillName, studiosvc.ErrBadAddonID, studiosvc.ErrBadConnection, studiosvc.ErrBadMCPSwitch, studiosvc.ErrBadBuiltinGroup),
+	verbatim(http.StatusBadRequest, typeInvalid, "", studiosvc.ErrBadSkillName, studiosvc.ErrBadAddonID, studiosvc.ErrBadConnection, studiosvc.ErrBadMCPSwitch, studiosvc.ErrBadBuiltinGroup, studiosvc.ErrBadPluginSwitch),
 	verbatim(http.StatusConflict, typeFilesOff, "", files.ErrUnavailable),
 	fixed(http.StatusRequestEntityTooLarge, typeInvalid, "an attachment is too large", workspace.ErrTooLarge),
 	fixed(http.StatusConflict, typeConflict, "a sub-agent conversation takes no messages from you", studiosvc.ErrSubAgentReadOnly),
+	verbatim(http.StatusConflict, "incognito", "studio: ", studiosvc.ErrIncognito),
 	verbatim(http.StatusBadRequest, typeInvalid, "", studiosvc.ErrNoModel),
 	sentinelText(http.StatusBadRequest, typeInvalid, studiosvc.ErrBadCommand),
 	verbatim(http.StatusConflict, typeConflict, "studio: ", studiosvc.ErrCommandBusy),
@@ -216,11 +226,20 @@ func conversation(rec session.ChatRecord, info store.TurnInfo) schema.ChatsConve
 		ID: rec.ID, Title: rec.Title, Model: rec.Model, Kind: rec.Kind, ParentID: rec.ParentID,
 		AgentID: rec.AgentID, Origin: rec.Origin, OriginID: rec.OriginID, Assistant: rec.Assistant,
 		ProjectID: rec.ProjectID, PulledProjects: rec.PulledProjects, Collections: rec.Collections,
-		Created: rec.Created, Updated: rec.Updated, Running: info.Running, LastTurn: string(info.Last),
+		PluginsOff: rec.PluginsOff, Created: rec.Created, Updated: rec.Updated, Running: info.Running, LastTurn: string(info.Last),
 		WillResume: info.WillResume, ResumeAttempts: info.ResumeAttempts,
 		Settings: settingsJSON(rec.Settings),
 		Dock:     dockJSON(rec.Dock),
 	}
+}
+
+// incognitoOf is the level of an incognito chat as the API writes it, empty
+// for any other chat.
+func (h *Handlers) incognitoOf(id string) string {
+	if l := h.svc.ChatPrivacy(id); l.Incognito() {
+		return l.String()
+	}
+	return ""
 }
 
 // harnessJSON is the window check of a chat as the API reports it.
@@ -236,6 +255,7 @@ func (h *Handlers) describe(c echo.Context, user string, rec session.ChatRecord)
 	}
 	conv := conversation(rec, info)
 	conv.Goal = h.goalJSON(rec.Goal)
+	conv.Incognito = h.incognitoOf(rec.ID)
 	if rec.Origin == session.OriginConnector {
 		if conns := h.svc.Connectors(); conns != nil {
 			if p, ok := conns.InfoOf(c.Request().Context(), rec.OriginID, rec.ID); ok {
@@ -299,7 +319,7 @@ func (h *Handlers) Create(c echo.Context) error {
 	user := userID(c)
 	in := studiosvc.CreateInput{Title: req.Title, Model: req.Model, AgentID: req.AgentID, Assistant: req.Assistant, ProjectID: req.ProjectID, Collections: req.Collections}
 	if sw := req.Switches; sw != nil {
-		in.Switches = studiosvc.Switches{AddonsOff: sw.AddonsOff, McpOff: sw.McpOff, BuiltinsOff: sw.BuiltinsOff, BuiltinsOn: sw.BuiltinsOn, SkillsOff: sw.SkillsOff, Connections: sw.Connections}
+		in.Switches = studiosvc.Switches{AddonsOff: sw.AddonsOff, McpOff: sw.McpOff, BuiltinsOff: sw.BuiltinsOff, BuiltinsOn: sw.BuiltinsOn, SkillsOff: sw.SkillsOff, PluginsOff: sw.PluginsOff, Connections: sw.Connections}
 	}
 	rec, err := h.svc.Create(c.Request().Context(), user, in)
 	if err != nil {
@@ -339,6 +359,10 @@ func (h *Handlers) List(c echo.Context) error {
 		return failFor(c, err)
 	}
 	out := schema.ChatsConversationList{Conversations: make([]schema.ChatsConversation, 0, len(recs)), Persistent: h.svc.Persistent(), Files: h.svc.Files().Available(), FilesReason: h.svc.Files().Unavailable(), ImageModel: h.svc.ImageModel()}
+	if h.incognito != nil {
+		set := h.incognito()
+		out.Incognito = &set
+	}
 	for _, rec := range recs {
 		conv, err := h.describe(c, user, rec)
 		if err != nil {
@@ -368,6 +392,7 @@ func (h *Handlers) Get(c echo.Context) error {
 	}
 	conv := conversation(rec, info)
 	conv.Goal = h.goalJSON(rec.Goal)
+	conv.Incognito = h.incognitoOf(rec.ID)
 	conv.Harness = harnessJSON(h.svc.Harness(c.Request().Context(), user, rec))
 	pend, err := h.svc.Pending(c.Request().Context(), user, id)
 	if err != nil {
@@ -572,6 +597,12 @@ func (h *Handlers) Send(c echo.Context) error {
 		cmd = studiosvc.Command{Skill: req.Skill, Agent: req.Agent}
 	}
 	cmd.Skill, cmd.Agent = strings.TrimSpace(cmd.Skill), strings.TrimSpace(cmd.Agent)
+	// The text of a message sent with a skill or a plugin command is what
+	// the person typed after its name: its arguments, before any MCP context
+	// joins the text.
+	if cmd.Skill != "" {
+		cmd.Args = text
+	}
 	if text == "" && len(up) == 0 && len(refs) == 0 && cmd.Skill == "" {
 		return fail(c, http.StatusBadRequest, "invalid_request_error", "text is required")
 	}

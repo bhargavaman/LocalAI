@@ -222,12 +222,17 @@
       "shared": "Compartilhada",
       "folder": "Espaço de trabalho",
       "addon": "{{name}}",
-      "addonFrom": "de {{name}}"
+      "addonFrom": "de {{name}}",
+      "plugin": "Plugin"
     },
     "replacedBy": "Substituída por {{name}}",
     "fallback_one": "{{skills}} integrada em uso: a habilidade própria do complemento {{name}} está desligada ou não está em execução aqui.",
     "fallback_other": "{{skills}} integradas em uso: as habilidades próprias do complemento {{name}} estão desligadas ou não estão em execução aqui.",
-    "fromProject": "Do projeto"
+    "fromProject": "Do projeto",
+    "pluginGroup": "Plugin: {{name}}",
+    "pluginSwitch": "Usar {{name}} neste chat",
+    "pluginOff": "Desativado neste chat. Suas skills, comandos e conectores não funcionam aqui.",
+    "pluginNoSkills": "Este plugin adiciona comandos ou conectores, não skills."
   },
   "agent": {
     "label": "Agente",
@@ -255,7 +260,8 @@
       "context": "Contexto",
       "skills": "Skills e agentes",
       "help": "Ajuda",
-      "yours": "Seus"
+      "yours": "Seus",
+      "plugins": "Plugins"
     },
     "models": {
       "label": "Modelos",
@@ -310,7 +316,9 @@
       "shared": "compartilhada",
       "yours": "sua",
       "prompt": "prompt",
-      "tool": "ferramenta"
+      "tool": "ferramenta",
+      "plugin": "plugin",
+      "command": "comando"
     },
     "collides": "só com /skill",
     "errors": {
@@ -427,7 +435,15 @@
     "alsoSavedWorking_other": "Também salvou {{count}} arquivos de trabalho",
     "savedWorking_one": "Salvou {{count}} arquivo de trabalho",
     "savedWorking_other": "Salvou {{count}} arquivos de trabalho",
-    "workingTitle": "Arquivo de trabalho (um script, um log ou um rascunho): abrir {{path}}"
+    "workingTitle": "Arquivo de trabalho (um script, um log ou um rascunho): abrir {{path}}",
+    "group": {
+      "used_one": "Usou {{count}} ferramenta",
+      "used_other": "Usou {{count}} ferramentas",
+      "calls_one": "{{count}} chamada",
+      "calls_other": "{{count}} chamadas",
+      "failed_one": "{{count}} falhou",
+      "failed_other": "{{count}} falharam"
+    }
   },
   "error": {
     "title": "A resposta falhou",
@@ -442,6 +458,8 @@
       "model_cooldown_anon": "O modelo falhou ao iniciar há pouco e está em pausa.",
       "model_load_failed": "Não foi possível iniciar o modelo \"{{model}}\".",
       "model_load_failed_anon": "Não foi possível iniciar o modelo.",
+      "model_loading": "O modelo \"{{model}}\" ainda está carregando.",
+      "model_loading_anon": "O modelo ainda está carregando.",
       "model_not_found": "O modelo \"{{model}}\" não foi encontrado.",
       "model_not_found_anon": "O modelo não foi encontrado.",
       "upstream_key": "O upstream recusou a chave.",
@@ -459,6 +477,7 @@
       "model_backend_missing_admin": "Escolha outro modelo ou instale o backend pela página Backends.",
       "model_cooldown": "Tente de novo em {{seconds}} segundos.",
       "model_load_failed": "Confira a configuração do modelo e o backend dele e tente de novo.",
+      "model_loading": "Um modelo grande pode levar muitos minutos para carregar. Tente de novo em alguns minutos.",
       "model_not_found": "Escolha outro modelo ou instale este pela página Modelos.",
       "upstream_key": "Confira a chave de API nas configurações do modelo.",
       "upstream_path": "O endereço do upstream deve ser o endpoint completo, por exemplo .../v1/chat/completions.",
@@ -687,7 +706,8 @@
   },
   "invoked": {
     "skill": "Skill: {{name}}",
-    "agent": "Agente: {{name}}"
+    "agent": "Agente: {{name}}",
+    "command": "Comando: {{name}}"
   },
   "marker": {
     "compacted": "Contexto compactado: de {{before}} para {{after}} tokens",
@@ -940,5 +960,10 @@
     "message_one": "Excluir o chat exibido em {{project}} ({{count}})? Isso não pode ser desfeito.",
     "message_other": "Excluir os {{count}} chats exibidos em {{project}}? Isso não pode ser desfeito.",
     "confirm": "Excluir os exibidos"
+  },
+  "plugins": {
+    "toolsGroup": "Plugins",
+    "toolsDescribe": "Seus conectores neste chat: {{names}}.",
+    "connectorFrom": "Do plugin {{name}}."
   }
 }

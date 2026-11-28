@@ -5,7 +5,7 @@ icon: download
 weight: 40
 aliases:
   - "/installation/"
-keywords: ["install", "desktop", "launcher", "appimage", "script", "docker", "macos", "linux", "kubernetes", "setup"]
+keywords: ["install", "desktop", "android", "launcher", "appimage", "script", "docker", "macos", "linux", "kubernetes", "setup"]
 ---
 
 Install the server with a script, a binary, a container or Helm. Windows has a PowerShell install script and a native binary. The desktop app, which installs and runs the server for you, is in the 5.0 release.
@@ -17,6 +17,7 @@ Install the server with a script, a binary, a container or Helm. Windows has a P
 | Windows on amd64 | PowerShell script or binary | [Windows]({{% relref "/start/install/windows" %}}) |
 | An Intel Mac, a server, or a GPU image | Container | [Containers]({{% relref "/start/install/containers" %}}) |
 | A cluster | Helm chart | [Kubernetes]({{% relref "/start/install/kubernetes" %}}) |
+| An Android phone, and a server to connect to | Android app | [Android app]({{% relref "/start/install/android" %}}) |
 | A change to the code | Source | [Build from source]({{% relref "/contributing/build-from-source" %}}) |
 
 ## Install script
@@ -66,16 +67,21 @@ To remove the worker: `sudo systemctl disable --now localai-worker`, then remove
 ## Container
 
 ```bash
-docker run -p 8080:8080 --name local-ai -ti localai/localai:latest
+curl -fsSL https://localai.io/install/docker-compose.yaml -o docker-compose.yaml
+docker compose up -d
 ```
 
-Podman works the same way for the CPU image. For GPU images and persistent storage, see [Containers]({{% relref "/start/install/containers" %}}).
+The compose file runs the CPU image and keeps models, backends, settings and data in named volumes. For GPU images, `docker run`, Podman and file permissions, see [Containers]({{% relref "/start/install/containers" %}}).
 
 ## Desktop app
 
 The desktop app installs, updates, starts and stops the LocalAI server on your computer and shows the web interface in a window. It can also connect to a LocalAI server that runs somewhere else.
 
 The 5.0 release has the DMG for a Mac with Apple Silicon and the AppImages for Linux (x86-64 and ARM64). Later releases also have a Windows installer for x86-64. Download them from the [latest release](https://github.com/mudler/LocalAI/releases/latest). See [Desktop app]({{% relref "/start/install/desktop" %}}) for the steps, the first start, the update channels and troubleshooting.
+
+## Android app
+
+The Android app shows the web interface of a LocalAI server on your phone. It runs nothing on the phone. It connects to a server by its address, or over P2P with an invite link. See [Android app]({{% relref "/start/install/android" %}}) for the install steps, the sign-in, P2P and updates.
 
 ## Development builds
 

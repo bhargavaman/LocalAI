@@ -492,7 +492,6 @@
           "is valid for a tool that shadows bash",
           "is valid with a key, its values and a default among them",
           "refuses a bad key, bad values and a default that is not allowed",
-          "refuses a repeated key and too many settings",
           "fixes the values and the default of a role the host reads",
           "answers whether a value is allowed",
           "is tools.write for a tool that is not a read, in an add-on that holds a credential",
@@ -870,7 +869,28 @@
           "is false when omitted and is not written when false",
           "survives a JSON round trip",
           "is not counted against the limits of the definitions",
-          "requires featureLevel 11 for a deferred tool, and a level 10 host refuses it"
+          "requires featureLevel 11 for a deferred tool, and a level 10 host refuses it",
+          "takes up to four buttons with short unique ids and labels",
+          "accepts a declaration with paths, an anchor and a label, and needs feature level 12",
+          "an unknown lifecycle",
+          "an empty lifecycle",
+          "an empty key path",
+          "a key path with an empty segment",
+          "a key path through a prototype",
+          "an empty title path",
+          "an empty anchor time",
+          "a bad zone path",
+          "a bad moves path",
+          "a bad following path",
+          "a type of another add-on",
+          "a link that leaves the page",
+          "no label",
+          "refuses the same type twice",
+          "reads the declarations from JSON with a plain or a translated label",
+          "carries a kubeconfig with an embedded RSA client certificate and key",
+          "refuses a repeated key",
+          "refuses more than eight settings that are not approval settings",
+          "does not count against the cap of eight other settings"
         ]
       },
       {
@@ -990,7 +1010,6 @@
           "rejects a package leg that does not need validate",
           "rejects a validate job that cannot stop the release",
           "rejects a package or promote job that runs after a failed validate",
-          "keeps validate unprivileged on every event",
           "rejects promotion that does not wait for signing",
           "rejects alias promotion before signing",
           "rejects an alias command inside the publishing job",
@@ -1150,7 +1169,45 @@
           "refuses a package whose manifest disagrees with the row",
           "takes the osSettings block only from the row, never from the manifest template",
           "is refused on any other platform, and any other value",
-          "refuses a runtime file named as the executable of a Windows package"
+          "refuses a runtime file named as the executable of a Windows package",
+          "prints the digest of a complete index of the release commit signed by the workflow of the tag",
+          "fails when the tag push has not published the add-on yet",
+          "refuses an index of another commit",
+          "refuses an index or a platform image without the signature of the workflow of the tag",
+          "another OIDC issuer",
+          "the workflow of another repository",
+          "a valid bundle of another digest attached to the index",
+          "refuses bad inputs before any request",
+          "builds an image only when the plan says so, under the tag the plan names",
+          "keeps the runs of one commit in groups of their own event",
+          "builds every image and looks nothing up when it pushes nothing",
+          "reuses the sha tags that exist and builds only the missing ones",
+          "never takes a tag it cannot read as missing",
+          "gives a tag push release tags of its own, from the images of the commit when they exist",
+          "refuses the release event, which builds no guest image",
+          "refuses a manual run on a tag",
+          "refuses a release tag that is not a valid image tag",
+          "pins the digests that the registry holds, not the ones of a rebuilt layout",
+          "keeps validate unprivileged, and skips it only on the release event, which builds nothing",
+          "rejects a build or publish job that runs on the release event",
+          "rejects a release promotion that does not wait for a green tag push run of the same commit",
+          "rejects a release promotion of a digest that verify-published did not print",
+          "rejects a catalog attached before the release indexes were verified",
+          "rejects a release promotion that does not verify the published index first",
+          "builds, checks and publishes nothing on the release event",
+          "promotes on the release event the index the tag push published, after checking it in the registry",
+          "takes only a successful run of the same commit",
+          "waits the grace period for a re-run of a failed run, then fails",
+          "fails at the deadline when no tag push run ends",
+          "pins the release catalog to the digests in the registry",
+          "checks every pinned digest and guest image before it attaches the catalog",
+          "passes when every digest is served, after retrying a dropped connection",
+          "fails on a guest image the registry does not serve",
+          "fails when a digest cannot be checked",
+          "audits actual host calls and strict package contract for kubernetes",
+          "translates the title and the description of kubernetes in every main language",
+          "gives every translated connector kind of kubernetes the fields of its English kind, and no others",
+          "has consistent package files for kubernetes"
         ]
       },
       {
@@ -1454,7 +1511,10 @@
       "takes the Linux program of a package that runs in WSL 2 on Windows, without .exe",
       "needs the .exe extension on Windows, which has no execute bit",
       "follows the redirect to an allowed https host",
-      "still checks the pinned digest of the redirected bytes"
+      "still checks the pinned digest of the redirected bytes",
+      "names the check that refused a package, and keeps ErrPackage for the caller",
+      "names a package folder that other users can open",
+      "is the receipt on disk when the manifest has an empty list"
     ],
     "report": ".cache/addons/logs/packages.json"
   },
@@ -1624,7 +1684,17 @@
       "lists and installs with a rule, and sends no credential to the redirect target",
       "logs the start error as the cause and keeps the previous generation running",
       "is one bounded line without credentials",
-      "carries the launch stage and reason in the log, bounded and without credentials"
+      "carries the launch stage and reason in the log, bounded and without credentials",
+      "starts the new generation",
+      "removes the package of the failed candidate and keeps the running add-on",
+      "removes the packages of failed candidates and keeps the current and the previous generation",
+      "keeps a package that a data recovery journal names",
+      "keeps the package of a canceled upgrade that the same operation can continue",
+      "a corrupt journal",
+      "a journal without a kind",
+      "a corrupt state",
+      "removes nothing when a journaled package is outside the package folder",
+      "does not follow a link out of the package folder"
     ],
     "report": ".cache/addons/logs/lifecycle.json"
   },
@@ -1795,7 +1865,11 @@
           "is the text of any other error",
           "names a process that never reports its endpoint",
           "names a process that reports an endpoint that is not loopback",
-          "names a process that exits before it reports"
+          "names a process that exits before it reports",
+          "accepts the receipt.json of every shipped manifest, against the receipt in memory and the receipt read back",
+          "accepts an empty list in memory that receipt.json leaves out",
+          "refuses a receipt.json that differs from the journal receipt",
+          "refuses a receipt.json that is not a receipt"
         ]
       },
       {
@@ -2396,7 +2470,11 @@
           "refuses the cookie without the confirm header",
           "refuses the cookie on a tool call",
           "refuses a cookie that is not a configured key",
-          "refuses the cookie in named-user mode"
+          "refuses the cookie in named-user mode",
+          "answers 202 with the run and no job, and the run later runs the caller's recorded operation",
+          "is the one another frontend runs when it takes the run over",
+          "is dropped on the owner when the item ends without starting it, so the add-on is free again",
+          "serves and stores every setting of an add-on that declares more than eight"
         ]
       },
       {
@@ -3446,7 +3524,11 @@
           "refuses the cookie without the confirm header",
           "refuses the cookie on a tool call",
           "refuses a cookie that is not a configured key",
-          "refuses the cookie in named-user mode"
+          "refuses the cookie in named-user mode",
+          "answers 202 with the run and no job, and the run later runs the caller's recorded operation",
+          "is the one another frontend runs when it takes the run over",
+          "is dropped on the owner when the item ends without starting it, so the add-on is free again",
+          "serves and stores every setting of an add-on that declares more than eight"
         ]
       }
     ]
@@ -4021,7 +4103,11 @@
           "refuses the cookie without the confirm header",
           "refuses the cookie on a tool call",
           "refuses a cookie that is not a configured key",
-          "refuses the cookie in named-user mode"
+          "refuses the cookie in named-user mode",
+          "answers 202 with the run and no job, and the run later runs the caller's recorded operation",
+          "is the one another frontend runs when it takes the run over",
+          "is dropped on the owner when the item ends without starting it, so the add-on is free again",
+          "serves and stores every setting of an add-on that declares more than eight"
         ]
       }
     ]
@@ -4266,7 +4352,17 @@
           "lists and installs with a rule, and sends no credential to the redirect target",
           "logs the start error as the cause and keeps the previous generation running",
           "is one bounded line without credentials",
-          "carries the launch stage and reason in the log, bounded and without credentials"
+          "carries the launch stage and reason in the log, bounded and without credentials",
+          "starts the new generation",
+          "removes the package of the failed candidate and keeps the running add-on",
+          "removes the packages of failed candidates and keeps the current and the previous generation",
+          "keeps a package that a data recovery journal names",
+          "keeps the package of a canceled upgrade that the same operation can continue",
+          "a corrupt journal",
+          "a journal without a kind",
+          "a corrupt state",
+          "removes nothing when a journaled package is outside the package folder",
+          "does not follow a link out of the package folder"
         ]
       },
       {
@@ -4408,7 +4504,11 @@
           "is the text of any other error",
           "names a process that never reports its endpoint",
           "names a process that reports an endpoint that is not loopback",
-          "names a process that exits before it reports"
+          "names a process that exits before it reports",
+          "accepts the receipt.json of every shipped manifest, against the receipt in memory and the receipt read back",
+          "accepts an empty list in memory that receipt.json leaves out",
+          "refuses a receipt.json that differs from the journal receipt",
+          "refuses a receipt.json that is not a receipt"
         ]
       },
       {
@@ -4626,7 +4726,11 @@
           "refuses the cookie without the confirm header",
           "refuses the cookie on a tool call",
           "refuses a cookie that is not a configured key",
-          "refuses the cookie in named-user mode"
+          "refuses the cookie in named-user mode",
+          "answers 202 with the run and no job, and the run later runs the caller's recorded operation",
+          "is the one another frontend runs when it takes the run over",
+          "is dropped on the owner when the item ends without starting it, so the add-on is free again",
+          "serves and stores every setting of an add-on that declares more than eight"
         ]
       }
     ]
@@ -6616,7 +6720,13 @@
       "is an outage, not a refusal, when the grant store fails",
       "refuses without the owner's files feature",
       "reads another owner's files never: the owner is the one of the call",
-      "registers nothing without a files service or a grant source"
+      "registers nothing without a files service or a grant source",
+      "hands the event to the host with the owner and credential of the live call",
+      "lets a paired client's call report a change",
+      "refuses an argument that tries to name who made the change, and a bad payload",
+      "refuses a payload larger than 256 KiB",
+      "passes a refusal of the host back as a bad request",
+      "needs a live call"
     ],
     "report": ".cache/addons/logs/host-admission.json"
   },

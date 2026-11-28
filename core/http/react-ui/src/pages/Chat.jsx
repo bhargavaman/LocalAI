@@ -33,7 +33,7 @@ import { useChatPreviewPane } from '../hooks/useChatPreviewPane'
 // eslint-disable-next-line no-unused-vars
 import { FileChipRow } from '../components/chat/FileChips'
 import { codeBlocksOf, extensionForLanguage, isPreviewableBlock, turnFiles } from '../utils/previewPane'
-import { chatsApi, modelsApi } from '../utils/api'
+import { chatsApi, discardIncognitoChat, modelsApi } from '../utils/api'
 import { apiUrl } from '../utils/basePath'
 // eslint-disable-next-line no-unused-vars
 import ChatComposer from '../components/chat/ChatComposer'
@@ -45,6 +45,7 @@ import LiveSetupSheet from '../components/chat/LiveSetupSheet'
 import LiveDock from '../components/chat/LiveDock'
 import { OPEN_CHAT_FILE_EVENT } from '../components/chat/chatActions'
 import { contextSinceClear, parseGoalCommand, parseInvocation } from '../utils/slashCommands'
+import { withPluginDraft } from '../utils/chatPlugins'
 import { findLoop, parseLoopCommand } from '../utils/chatLoops'
 // eslint-disable-next-line no-unused-vars
 import { ChatAboutCard, ContextMarker, GoalCard, SlashHelpCard } from '../components/chat/CommandCards'
@@ -105,11 +106,15 @@ import HomeUndoToast from '../components/home/HomeUndoToast'
 // eslint-disable-next-line no-unused-vars
 import ConfirmDialog from '../components/ConfirmDialog'
 // eslint-disable-next-line no-unused-vars
+import { IncognitoButton, IncognitoNote } from '../components/chat/Incognito'
+import { incognitoBlocks, incognitoChatLevel, incognitoLevels, offeredLevel, rememberIncognitoChat, setIncognitoMarker } from '../utils/incognito'
+// eslint-disable-next-line no-unused-vars
 import ChatsMenu from '../components/ChatsMenu'
 import { ChatSendContext } from '../components/chat/chatSendContext'
 import { useAuth } from '../context/AuthContext'
 import { useOperations } from '../hooks/useOperations'
 import { useLoadedModels } from '../hooks/useLoadedModels'
+import { withLoadedAliases } from '../utils/loadedAliases'
 import { copyToClipboard } from '../utils/clipboard'
 import { chatAddress, seqOfSearch } from '../utils/chatSearch'
 import Icon from '../components/Icon'
@@ -189,13 +194,51 @@ function ChatPage() {
   // The composer: the text and files belong to the open chat (useChatDrafts);
   // a new chat has a model, an agent and drafted switches (useChatComposer).
   const activeChat = activeId ? (chat.detail || chat.chats.find(c => c.id === activeId) || null) : null
+  // Incognito: the level of the open chat (the server says it), or the one
+  // picked for the next chat. It lives in this component only.
+  const [incognitoDraft, setIncognitoDraft] = useState(() => location.state?.incognito || '')
+  const incognitoLevel = activeId ? (activeChat?.incognito || incognitoChatLevel(activeId)) : incognitoDraft
+  const incognitoBlocked = incognitoBlocks(incognitoLevel)
   const composer = useChatComposer({
-    chatId: activeId, userId: user?.id, activeChat, filesOn: chat.files.on, canAgents,
+    chatId: activeId, userId: user?.id, activeChat, filesOn: chat.files.on && !incognitoBlocked.attach, pluginsOn: chat.files.on, canAgents,
     initialModel: searchParams.get('model') || '', initialAgent: location.state?.agentId || '',
   })
   const { drafts, draftModel, agentId, pickedAgent, effectiveModel, switches } = composer
   const { models: chatModels, modelsLoading: chatModelsLoading } = composer
   const { text: input, setText: setInput, files } = drafts
+
+  // Every request of the page carries the level while an incognito chat is
+  // open or being started (utils/incognito.js).
+  useEffect(() => {
+    setIncognitoMarker(incognitoLevel)
+    return () => setIncognitoMarker('')
+  }, [incognitoLevel])
+  // An incognito chat ends when the page leaves it: another chat, Home, a
+  // closed tab. The server would drop it after an idle hour anyway.
+  const incognitoOpen = activeId && incognitoLevel ? activeId : ''
+  // A chat opened by its address is known from the server's answer.
+  if (incognitoOpen) rememberIncognitoChat(incognitoOpen, incognitoLevel)
+  // The discard of a cleanup waits a tick: React runs an effect twice on
+  // mount in development (StrictMode), and the second run takes the discard
+  // back instead of losing a chat that just opened.
+  const pendingDiscardRef = useRef(null)
+  useEffect(() => {
+    if (!incognitoOpen) return undefined
+    const pending = pendingDiscardRef.current
+    if (pending?.id === incognitoOpen) {
+      clearTimeout(pending.timer)
+      pendingDiscardRef.current = null
+    }
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    const discardNow = () => discardIncognitoChat(incognitoOpen, { keepalive: true })
+    window.addEventListener('beforeunload', warn)
+    window.addEventListener('pagehide', discardNow)
+    return () => {
+      window.removeEventListener('beforeunload', warn)
+      window.removeEventListener('pagehide', discardNow)
+      pendingDiscardRef.current = { id: incognitoOpen, timer: setTimeout(() => discardIncognitoChat(incognitoOpen), 0) }
+    }
+  }, [incognitoOpen])
 
   // The dock: pages beside the chat, kept with the chat (usePageDock). There
   // is none until something opens it.
@@ -316,7 +359,9 @@ function ChatPage() {
     return browserChatStores(st)
   })
   const importInputRef = useRef(null)
-  const { ids: loadedIds, loaded: loadedModels } = useLoadedModels()
+  const { ids: realLoadedIds, loaded: loadedModels } = useLoadedModels()
+  // An alias is warm when its target is loaded: the server lists the target only.
+  const loadedIds = useMemo(() => withLoadedAliases(realLoadedIds, chatModels), [realLoadedIds, chatModels])
   const messagesEndRef = useRef(null)
   const messagesRef = useRef(null)
   const stickToBottomRef = useRef(true)
@@ -364,13 +409,16 @@ function ChatPage() {
     byTool: cardsByTool(egress.cards.filter(c => c.state !== 'pending' && c.tool_seq)), chatId: activeId, egress,
   }), [egress, activeId])
   const waitingCards = egress.cards.filter(c => c.state === 'pending' || (!c.tool_seq && c.state !== 'expired'))
-  const chatFiles = useChatFiles(chat.files.on ? activeId : null, chat.ticks.files)
+  // A zero-retention chat has no files: it takes no attachment, so the chat
+  // reads no file list and draws no Files button and no preview pane.
+  const filesOn = chat.files.on && !incognitoBlocked.attach
+  const chatFiles = useChatFiles(filesOn ? activeId : null, chat.ticks.files)
   // The preview pane on the right: the chat's files and what its answers
   // produced. It opens by itself on a new result (useChatPreviewPane).
   const pane = useChatPreviewPane({
-    chatId: activeId, userId: user?.id, files: chatFiles.files, loaded: chat.files.on ? chatFiles.loaded : true,
+    chatId: activeId, userId: user?.id, files: chatFiles.files, loaded: filesOn ? chatFiles.loaded : true,
     messages: chat.messages, ready: !!activeId && !chat.loading && chat.detail?.id === activeId, running: chat.running,
-    blocked: pageDock.dock.open, madeHere: chat.madeHere || arrival.handoff?.chat?.id || null, startedTurn: chat.startedTurn,
+    blocked: pageDock.dock.open || incognitoBlocked.attach, madeHere: chat.madeHere || arrival.handoff?.chat?.id || null, startedTurn: chat.startedTurn,
   })
   // The dock and the files pane share the right side, one at a time: the one
   // the person opens last takes it, and the other hides without being closed
@@ -664,6 +712,7 @@ function ChatPage() {
 
   // The Download and Open preview buttons of a code block.
   const openBlock = pane.openBlock
+  const paneBlocked = incognitoBlocked.attach
   useEffect(() => {
     const el = messagesRef.current
     if (!el) return undefined
@@ -673,6 +722,8 @@ function ChatPage() {
       const pre = btn.closest('.code-block')?.querySelector('pre')
       const found = pre && blockOfRef.current(pre)
       if (btn.classList.contains('code-preview-btn')) {
+        // A zero-retention chat has no preview pane.
+        if (paneBlocked) { addToast(tc('incognito.blocked'), 'warning'); return }
         if (found) openBlock(`${found.msg.seq}-${found.block.index}`)
         return
       }
@@ -687,7 +738,7 @@ function ChatPage() {
     }
     el.addEventListener('click', handler)
     return () => el.removeEventListener('click', handler)
-  }, [openBlock])
+  }, [openBlock, paneBlocked, addToast, tc])
 
   // Sends the composer. The message that starts a chat creates it first. In a
   // chat that exists a message always goes: while a turn runs it waits and
@@ -712,7 +763,7 @@ function ChatPage() {
     const savedGroup = switches.builtins.find(b => b.group === 'saved_agents')
     const subOff = !!switches.builtins.find(b => b.group === 'subagents')?.off
     const inv = typeof override === 'string' ? null : parseInvocation(text, {
-      skills: switches.skills, agents: composer.agents, savedAgentsOn: !!savedGroup && !savedGroup.off && !subOff,
+      skills: switches.skills, agents: composer.agents, savedAgentsOn: !!savedGroup && !savedGroup.off && !subOff, pluginCommands: composer.plugins?.commands,
     })
     if (inv?.error) {
       setLocalError(t(`slash.errors.${inv.error}`, { name: inv.name }))
@@ -751,7 +802,7 @@ function ChatPage() {
     } finally {
       setBusy(false)
     }
-  }, [input, files, activeId, busy, effectiveModel, draftModel, agentId, switches, composer.agents, chat, select, navigate, addToast, t, tc, drafts, sayError])
+  }, [input, files, activeId, busy, effectiveModel, draftModel, agentId, switches, composer.agents, composer.plugins, chat, select, navigate, addToast, t, tc, drafts, sayError])
 
   // The Home page hands over the first message in the location state. It goes
   // once, when a model is known; without one the text waits in the box. A
@@ -812,6 +863,7 @@ function ChatPage() {
   // Branch copies the chat up to and including the line into a new chat, which opens.
   const handleFork = useCallback(async (seq) => {
     if (!activeId) return
+    if (incognitoBlocked.fork) { addToast(tc('incognito.blocked'), 'warning'); return }
     try {
       const forked = await chatsApi.fork(activeId, seq)
       await chat.refreshList()
@@ -820,7 +872,7 @@ function ChatPage() {
     } catch (e) {
       addToast(e.message, 'error')
     }
-  }, [activeId, chat, navigate, addToast, t])
+  }, [activeId, chat, navigate, addToast, t, tc, incognitoBlocked.fork])
 
   // Up in an empty box edits the last waiting message, or puts your last
   // message back in the box to send again.
@@ -1001,6 +1053,7 @@ function ChatPage() {
     copy: (text) => actionsRef.current.copyText(text),
     edit: (seq, text) => actionsRef.current.edit(seq, text),
     fork: (seq) => actionsRef.current.handleFork(seq),
+    forkBlocked: incognitoBlocked.fork ? tc('incognito.blocked') : '',
     regenerate: (seq) => actionsRef.current.handleRegenerate(seq),
     focusRelative: (index, delta) => {
       const els = Array.from(messagesRef.current?.querySelectorAll('[data-testid="chat-message"]') || [])
@@ -1008,7 +1061,7 @@ function ChatPage() {
       const next = els[at + delta]
       if (next) { next.focus(); next.scrollIntoView({ block: 'nearest' }) }
     },
-  }), [])
+  }), [incognitoBlocked.fork, tc])
 
   const rows = useMemo(() => foldNotes(placeProposals(threadRows(messages, chat.live), { streaming: chat.running })), [messages, chat.live, chat.running])
   // The cards of a turn that is still running go after the streaming text.
@@ -1049,7 +1102,6 @@ function ChatPage() {
     return <WorkspaceChangeNote key={`wc-${row.msg.turn}`} desc={desc} live={live.has(row.msg.turn)} addToast={addToast} pageTitle={pageTitle} />
   }
   // A file chip of a step, or of an answer, opens the preview pane at its file.
-  const filesOn = chat.files.on
   const openFile = pane.openFile
   useEffect(() => {
     if (!filesOn) return undefined
@@ -1100,9 +1152,10 @@ function ChatPage() {
   // Creates the chat with the drafted switches, then gives it the reasoning
   // effort picked before it existed.
   const createWithDraft = async () => {
-    const id = await chat.createChat(draftModel, agentId, switches.draftSwitches(), composer.projectId)
-    // The shared projects picked in the composer are pulled into the new chat.
-    if (composer.pulledDraft?.length) {
+    const id = await chat.createChat(draftModel, agentId, withPluginDraft(switches.draftSwitches(), composer.plugins?.draftSwitches?.()), composer.projectId, incognitoDraft)
+    // The shared projects picked in the composer are pulled into the new chat
+    // (not into an incognito one: it belongs to no project).
+    if (composer.pulledDraft?.length && !incognitoDraft) {
       try { await chat.setPulled(id, composer.pulledDraft) } catch (e) { addToast(tpj('toasts.pullFailed', { message: e.message }), 'warning') }
       composer.setPulledDraft([])
     }
@@ -1126,6 +1179,26 @@ function ChatPage() {
       addToast(e.message || t('settings.saveFailed'), 'error')
     }
   }
+
+  const incognitoButton = (
+    <IncognitoButton
+      levels={activeId ? [] : incognitoLevels(chat.incognitoSetting)}
+      level={incognitoLevel}
+      locked={Boolean(activeId)}
+      onChange={(l) => setIncognitoDraft(l ? offeredLevel(chat.incognitoSetting, l) : '')}
+      onTurnOff={() => setConfirmDialog({
+        title: tc('incognito.discardTitle'),
+        message: tc('incognito.discardMessage'),
+        confirmLabel: tc('incognito.discardConfirm'),
+        danger: true,
+        onConfirm: () => {
+          setConfirmDialog(null)
+          setIncognitoDraft('')
+          navigate('/app')
+        },
+      })}
+    />
+  )
 
   const composerChips = (
     <>
@@ -1227,7 +1300,7 @@ function ChatPage() {
       return
     }
     let prompt = c.prompt
-    const inv = parseInvocation(prompt, { skills: switches.skills, agents: [], savedAgentsOn: false })
+    const inv = parseInvocation(prompt, { skills: switches.skills, agents: [], savedAgentsOn: false, pluginCommands: composer.plugins?.commands })
     if (inv?.skill) prompt = `/${inv.skill}${inv.text ? ` ${inv.text}` : ''}`
     try {
       await chat.startLoop(activeId, c.interval, prompt)
@@ -1348,7 +1421,7 @@ function ChatPage() {
           )}
           extra={(
             <>
-              {activeId && chat.files.on && <FilesButton open={pane.open} count={chatFiles.files.length} onToggle={pane.toggle} />}
+              {activeId && filesOn && <FilesButton open={pane.open} count={chatFiles.files.length} onToggle={pane.toggle} />}
               {dockOn && <DockButton open={pageDock.dock.open} onToggle={pageDock.toggle} />}
               <WorkspaceSlot name="chatHeader" onTool={handleSend} onCommand={fillComposer} />
             </>
@@ -1447,16 +1520,14 @@ function ChatPage() {
               </ChatSendContext.Provider>
               </EgressCardsContext.Provider>
 
-              {(chat.running || streaming.text || streaming.reasoning || streaming.tools.length > 0) && (
+              {(chat.running || streaming.text || streaming.reasoning || streaming.tools.length > 0 || streaming.steps.length > 0) && (
                 <StreamingTurn
                   files={chatFiles.files}
                   onOpenFile={filesOn ? openFile : undefined}
                   identity={shownIdentity}
                   model={model}
                   warm={modelWarm}
-                  content={streaming.text}
-                  reasoning={streaming.reasoning}
-                  toolCalls={streaming.tools}
+                  live={chat.live}
                   waiting={(loadProgress || !modelWarm) ? (
                     <LoadCard model={model} progress={loadProgress} />
                   ) : (
@@ -1580,7 +1651,7 @@ function ChatPage() {
               composer={composer}
               chatId={activeId}
               activeChat={activeChat}
-              filesOn={chat.files.on}
+              filesOn={chat.files.on && !incognitoBlocked.attach}
               loadedIds={loadedIds}
               imageModel={chat.imageModel}
               onPickModel={pickModel}
@@ -1592,6 +1663,7 @@ function ChatPage() {
               slotContext={composerSlotContext}
               toolbarSlot={<WorkspaceSlot name="composerToolbar" onTool={handleSend} onCommand={fillComposer} />}
               onDictateError={(m) => addToast(m, 'error')}
+              mode={incognitoButton}
               live={activeId && !liveOn ? <LiveButton live={liveVoice} onNeedSetup={openLiveSetup} buttonRef={liveButtonRef} /> : null}
               dock={activeId && liveOn ? <LiveDock live={liveVoice} waiting={chat.running} onTypeInstead={typeInsteadOfLive} onEnd={endLive} /> : null}
               onSubmit={handleSend}
@@ -1615,7 +1687,9 @@ function ChatPage() {
               textareaTestId="chat-input"
               sendId="chat-submit-btn"
               sendTestId="chat-send"
+              incognito={incognitoLevel}
             />
+            <IncognitoNote level={incognitoLevel} />
             <ChatFoot
               state={footState}
               status={status}
@@ -1657,7 +1731,7 @@ function ChatPage() {
           onAsk={fillComposer}
         />
       )}
-      {pane.open && activeId && (
+      {pane.open && activeId && !incognitoBlocked.attach && (
         <ChatFilesPane
           state={chatFiles}
           chatId={activeId}

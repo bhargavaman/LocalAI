@@ -10,6 +10,8 @@ import (
 	"github.com/mudler/LocalAI/core/backend"
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/http/middleware"
+	"github.com/mudler/LocalAI/core/priority"
+	"github.com/mudler/LocalAI/core/privacy"
 
 	"github.com/google/uuid"
 	"github.com/mudler/LocalAI/core/schema"
@@ -138,7 +140,7 @@ func CompletionEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eva
 			})
 			if err == nil {
 				predInput = templatedInput
-				xlog.Debug("Template found, input modified", "input", predInput)
+				xlog.Debug("Template found, input modified", "input", privacy.Redact(c.Request().Context(), predInput))
 			}
 
 			responses := make(chan schema.OpenAIResponse)
@@ -169,13 +171,15 @@ func CompletionEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eva
 					// OpenAI streaming spec: intermediate chunks must NOT
 					// carry a `usage` field. Strip the tracking copy now.
 					ev.Usage = nil
+					// OpenAI echoes the tier that applied in every chunk.
+					ev.ServiceTier = priority.Of(input.Context).ServiceTier()
 					respData, err := json.Marshal(ev)
 					if err != nil {
 						xlog.Debug("Failed to marshal response", "error", err)
 						continue
 					}
 
-					xlog.Debug("Sending chunk", "chunk", string(respData))
+					xlog.Debug("Sending chunk", "chunk", privacy.Redact(c.Request().Context(), string(respData)))
 					_, err = fmt.Fprintf(c.Response().Writer, "data: %s\n\n", string(respData))
 					if err != nil {
 						return err
@@ -225,7 +229,8 @@ func CompletionEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eva
 						FinishReason: &stopReason,
 					},
 				},
-				Object: "text_completion",
+				Object:      "text_completion",
+				ServiceTier: priority.Of(input.Context).ServiceTier(),
 			}
 			respData, _ := json.Marshal(resp)
 
@@ -241,7 +246,7 @@ func CompletionEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eva
 			// Trailing usage chunk per OpenAI spec: emit only when the caller
 			// opted in via stream_options.include_usage.
 			if input.StreamOptions != nil && input.StreamOptions.IncludeUsage && latestUsage != nil {
-				trailer := streamUsageTrailerJSON(id, input.Model, created, *latestUsage)
+				trailer := streamUsageTrailerJSON(id, input.Model, created, *latestUsage, priority.Of(input.Context).ServiceTier())
 				_, _ = fmt.Fprintf(c.Response().Writer, "data: %s\n\n", trailer)
 			}
 
@@ -297,10 +302,12 @@ func CompletionEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eva
 			Choices: result,
 			Object:  "text_completion",
 			Usage:   &usage,
+			// The tier that applied, as OpenAI echoes it.
+			ServiceTier: priority.Of(input.Context).ServiceTier(),
 		}
 
 		jsonResult, _ := json.Marshal(resp)
-		xlog.Debug("Response", "response", string(jsonResult))
+		xlog.Debug("Response", "response", privacy.Redact(c.Request().Context(), string(jsonResult)))
 
 		middleware.StampUsage(c, input.Model, totalTokenUsage.Prompt, totalTokenUsage.Completion)
 

@@ -112,13 +112,13 @@ var _ = Describe("/api/operations with durable staging jobs", func() {
 		Expect(err).ToNot(HaveOccurred())
 		router := nodes.NewSmartRouter(registry, nodes.SmartRouterOptions{})
 
-		durableJob, _, err := registry.ClaimLoadJob(context.Background(), "durable-model", "replica-a")
+		durableJob, _, err := registry.ClaimLoadJobOn(context.Background(), "durable-model", "", "replica-a")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(registry.UpdateLoadJob(context.Background(), durableJob.Ref(), nodes.LoadJobUpdate{
 			State: nodes.LoadJobStateStaging, NodeID: "node-1", NodeName: "durable-node",
 			BytesSent: 25, TotalBytes: 100, FileIndex: 1, TotalFiles: 1,
 		})).To(Succeed())
-		loadingJob, _, err := registry.ClaimLoadJob(context.Background(), "loading-model", "replica-a")
+		loadingJob, _, err := registry.ClaimLoadJobOn(context.Background(), "loading-model", "", "replica-a")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(registry.UpdateLoadJob(context.Background(), loadingJob.Ref(), nodes.LoadJobUpdate{
 			State: nodes.LoadJobStateLoading,
@@ -139,12 +139,41 @@ var _ = Describe("/api/operations with durable staging jobs", func() {
 		Expect(operationByID(operations, "staging:loading-model")).To(BeNil())
 	})
 
+	It("shows one operation per model when it stages onto two nodes", func() {
+		db := operationsDB()
+		registry, err := nodes.NewNodeRegistry(db)
+		Expect(err).ToNot(HaveOccurred())
+		router := nodes.NewSmartRouter(registry, nodes.SmartRouterOptions{})
+		ctx := context.Background()
+		for _, n := range []struct {
+			id    string
+			bytes int64
+		}{{"node-a", 20}, {"node-b", 80}} {
+			job, claimed, err := registry.ClaimLoadJobOn(ctx, "split-model", n.id, "replica-a")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claimed).To(BeTrue())
+			Expect(registry.UpdateLoadJob(ctx, job.Ref(), nodes.LoadJobUpdate{
+				State: nodes.LoadJobStateStaging, NodeName: n.id, BytesSent: n.bytes, TotalBytes: 100,
+			})).To(Succeed())
+		}
+
+		operations := serveOperations(applicationWithDistributedServices(registry, router))
+		matches := 0
+		for _, operation := range operations {
+			if operation["id"] == "staging:split-model" {
+				matches++
+				Expect(operation).To(HaveKeyWithValue("nodeID", "node-b"), "the load furthest along")
+			}
+		}
+		Expect(matches).To(Equal(1))
+	})
+
 	It("overlays a matching tracker snapshot without duplicating the durable job", func() {
 		db := operationsDB()
 		registry, err := nodes.NewNodeRegistry(db)
 		Expect(err).ToNot(HaveOccurred())
 		router := nodes.NewSmartRouter(registry, nodes.SmartRouterOptions{})
-		overlayJob, _, err := registry.ClaimLoadJob(context.Background(), "overlay-model", "replica-a")
+		overlayJob, _, err := registry.ClaimLoadJobOn(context.Background(), "overlay-model", "", "replica-a")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(registry.UpdateLoadJob(context.Background(), overlayJob.Ref(), nodes.LoadJobUpdate{
 			State: nodes.LoadJobStateStaging, NodeName: "durable-node", BytesSent: 10, TotalBytes: 100,
@@ -351,6 +380,40 @@ var _ = Describe("/api/operations with node-scoped backend ops", func() {
 		// Critical: bare ops must NOT gain a misleading empty nodeID field.
 		Expect(found).ToNot(HaveKey("nodeID"), "non-node-scoped ops must NOT carry a nodeID field")
 		Expect(found["name"]).To(Equal("llama-cpp"))
+	})
+
+	It("marks a plugin install with isPlugin and names it by its plugin ID", func() {
+		state, err := system.GetSystemState(system.WithModelPath(GinkgoT().TempDir()))
+		Expect(err).NotTo(HaveOccurred())
+		appCfg := &config.ApplicationConfig{SystemState: state}
+		galleryService := galleryop.NewGalleryService(appCfg, nil)
+		opcache := galleryop.NewOpCache(galleryService)
+		jobID := "job-plugin"
+		opcache.Set(galleryop.PluginOpKey("fmt@team"), jobID)
+		galleryService.UpdateStatus(jobID, &galleryop.OpStatus{Message: "installing", Progress: 10, Cancellable: true})
+
+		e := echo.New()
+		routes.RegisterUIAPIRoutes(e, nil, nil, appCfg, galleryService, opcache, &application.Application{}, noopMw)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/operations", nil))
+		Expect(rec.Code).To(Equal(http.StatusOK))
+		var envelope struct {
+			Operations []map[string]any `json:"operations"`
+		}
+		Expect(json.Unmarshal(rec.Body.Bytes(), &envelope)).To(Succeed())
+		var found map[string]any
+		for _, op := range envelope.Operations {
+			if op["jobID"] == jobID {
+				found = op
+			}
+		}
+		Expect(found).NotTo(BeNil())
+		Expect(found).To(SatisfyAll(
+			HaveKeyWithValue("isPlugin", true),
+			HaveKeyWithValue("isAddon", false),
+			HaveKeyWithValue("isBackend", false),
+			HaveKeyWithValue("name", "fmt@team"),
+		))
 	})
 
 	It("reports an admitted operation the worker has not started as queued", func() {

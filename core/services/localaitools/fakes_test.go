@@ -3,6 +3,7 @@ package localaitools
 import (
 	"context"
 	"errors"
+	"github.com/mudler/LocalAI/pkg/enginesettings"
 	"github.com/mudler/LocalAI/pkg/modelsearch"
 	"sync"
 
@@ -69,6 +70,9 @@ type fakeClient struct {
 	listFailoverChains    func() ([]FailoverChainInfo, error)
 	pinFailoverTarget     func(string, string) error
 	unpinFailoverTarget   func(string) error
+	installPlugin         func(string, string) (*PluginInstallResult, error)
+	listPluginInstalls    func(bool) ([]PluginInstall, error)
+	browsePlugins         func(PluginBrowseQuery) (*PluginCatalog, error)
 }
 
 type fakeCall struct {
@@ -370,12 +374,37 @@ func (f *fakeClient) DeleteScheduling(_ context.Context, modelName string) error
 	return nil
 }
 
+func (f *fakeClient) DrainNode(_ context.Context, req DrainNodeRequest) (*NodeDrain, error) {
+	f.record("DrainNode", req)
+	return &NodeDrain{NodeID: req.NodeID, Status: "draining"}, nil
+}
+
+func (f *fakeClient) SetNodeLimits(_ context.Context, req SetNodeLimitsRequest) (*NodeLimits, error) {
+	f.record("SetNodeLimits", req)
+	return &NodeLimits{NodeID: req.NodeID}, nil
+}
+
+func (f *fakeClient) SetModelMemoryPolicy(_ context.Context, req ModelMemoryPolicy) error {
+	f.record("SetModelMemoryPolicy", req)
+	return nil
+}
+
 func (f *fakeClient) SetNodeVRAMBudget(_ context.Context, nodeID, budget string) error {
 	f.record("SetNodeVRAMBudget", []any{nodeID, budget})
 	if f.setNodeVRAMBudget != nil {
 		return f.setNodeVRAMBudget(nodeID, budget)
 	}
 	return nil
+}
+
+func (f *fakeClient) ParseEngineCommand(_ context.Context, engine, command string) (*enginesettings.ParseResult, error) {
+	f.record("ParseEngineCommand", engine+" "+command)
+	return &enginesettings.ParseResult{}, nil
+}
+
+func (f *fakeClient) PreviewEngineCommand(_ context.Context, engine string, config enginesettings.Config) (*enginesettings.BuildResult, error) {
+	f.record("PreviewEngineCommand", config)
+	return &enginesettings.BuildResult{Command: engine}, nil
 }
 
 func (f *fakeClient) VRAMEstimate(_ context.Context, req VRAMEstimateRequest) (*vram.EstimateResult, error) {
@@ -408,6 +437,16 @@ func (f *fakeClient) GetBranding(_ context.Context) (*Branding, error) {
 		return f.getBranding()
 	}
 	return &Branding{InstanceName: "LocalAI"}, nil
+}
+
+func (f *fakeClient) GetPromptCache(_ context.Context) (*PromptCacheStatus, error) {
+	f.record("GetPromptCache", nil)
+	return &PromptCacheStatus{Enabled: true}, nil
+}
+
+func (f *fakeClient) ClearPromptCache(_ context.Context, model string) (*PromptCacheClearResult, error) {
+	f.record("ClearPromptCache", model)
+	return &PromptCacheClearResult{}, nil
 }
 
 func (f *fakeClient) SetBranding(_ context.Context, req SetBrandingRequest) (*Branding, error) {
@@ -544,6 +583,16 @@ func (f *fakeClient) GetP2PRelayLimits(_ context.Context, id string) (*P2PRelayL
 func (f *fakeClient) SetP2PRelayLimits(_ context.Context, id string, req SetP2PRelayLimitsRequest) (*P2PRelayLimitsInfo, error) {
 	f.record("SetP2PRelayLimits", id)
 	return &P2PRelayLimitsInfo{CanChange: true}, nil
+}
+
+func (f *fakeClient) GetP2PUserPairing(_ context.Context) (*P2PUserPairingInfo, error) {
+	f.record("GetP2PUserPairing", nil)
+	return &P2PUserPairingInfo{Relays: "auto", MaxDevices: 5}, nil
+}
+
+func (f *fakeClient) SetP2PUserPairing(_ context.Context, req SetP2PUserPairingRequest) (*P2PUserPairingInfo, error) {
+	f.record("SetP2PUserPairing", req)
+	return &P2PUserPairingInfo{Relays: "auto", MaxDevices: 5}, nil
 }
 
 func (f *fakeClient) RevokeP2PDevice(_ context.Context, id string) error {

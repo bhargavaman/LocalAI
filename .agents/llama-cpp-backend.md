@@ -8,11 +8,45 @@ The llama.cpp backend (`backend/cpp/llama-cpp/grpc-server.cpp`) is a gRPC adapta
 - The backend is built as part of the main build process
 - Check `backend/cpp/llama-cpp/Makefile` for build configuration
 
+## CPU variants
+
+Every llama-cpp image ships `llama-cpp-cpu-all`: ggml built with `GGML_BACKEND_DL`, and `ggml` picks the best `libggml-cpu-*.so` for the host at run time. The variants are built once per architecture by the `cpu-variants` stage of `backend/Dockerfile.llama-cpp` (`.docker/llama-cpp-cpu-variants.sh`, plain gcc, Ubuntu 22.04) and copied into every flavor. The GPU stage builds with `-DGGML_CPU=OFF` and compiles only its own backend and the loader, so icpx and hipcc never compile `ggml-cpu`. Rules:
+
+- The variants must come from the same llama.cpp commit as the GPU tree. The Makefile checks this through the `LLAMA_VERSION` file the stage writes.
+- Keep the stage on the oldest glibc of any builder image. The script refuses a variant that needs a newer glibc or libstdc++ than Ubuntu 22.04 has.
+- turboquant, bonsai and olala build a llama.cpp fork and use the same stage with their own pin (`CPU_VARIANTS_VERSION_VAR`, and `OLALA_CMAKE_ARGS` for olala's CPU flags) and their own patches. The variants of a fork come from that fork, never from upstream. ik-llama-cpp has its own ggml without the backend loader, so it keeps per-instruction-set binaries.
+- `llama-cpp-grpc` and `llama-cpp-rpc-server` come from the same tree as `llama-cpp-cpu-all` in the image builds (`CPU_ALL_RPC=ON`, set by the `.docker/*-compile.sh` scripts of llama-cpp, bonsai, turboquant and olala). That tree also builds `libggml-rpc.so` and `ggml-rpc-server`, and both binaries find the RPC backend through the backend registry. Do not go back to a separate static grpc tree: it compiles the GPU backend a second time for every CUDA or HIP arch, which was half of each GPU build and took the ROCm images to GitHub's 6h job limit. The Darwin and Windows builds still call the static `llama-cpp-grpc` target.
+- `backend.yml` and `backend_pr.yml` end with a `build-timings` job (`scripts/ci/backend-build-timings.sh`). It writes the slowest image jobs to the run summary and fails when a llama.cpp-family job ran longer than 4h.
+
+## NCCL (CUDA images)
+
+ggml's CUDA backend links NCCL when CMake finds it (`GGML_CUDA_NCCL` is on by default) and uses it for the cross-GPU reductions of `split_mode: tensor`. `.docker/install-nccl.sh` installs `libnccl2` and `libnccl-dev` in both builder stages of `backend/Dockerfile.llama-cpp`, for cublas on amd64 (CUDA 12 and 13) and on arm64 with CUDA 13. The Jetson (CUDA 12 arm64) image has none, since NVIDIA ships no NCCL for Jetson. Rules:
+
+- It is not in `install-base-deps.sh` on purpose: the forks that share that script would link NCCL too and each grow by about 190 to 290 MB compressed.
+- The version is the newest `libnccl2` built for the exact CUDA `major.minor` of the image (`+cudaX.Y`), so its driver requirement matches the bundled CUDA libraries. `NCCL_VERSION` overrides it.
+- `package.sh` runs `scripts/build/check-nccl-bundle.sh`: it fails the build when an ELF needs `libnccl.so.2` that `lib/` lacks, or when the builder has NCCL but `libggml-cuda.so` does not link it. It also copies the NCCL license notice to `licenses/`.
+- A missing `libnccl.so.2` at run time would make ggml skip `libggml-cuda.so` (GPU silently lost), which is why the library is bundled and checked rather than left to the host.
+
+## llguidance (grammar_engine)
+
+The image builds link llguidance (`LLGUIDANCE=ON` in `.docker/llama-cpp-compile.sh`, `-DLLAMA_LLGUIDANCE=ON`). llama.cpp builds it with cargo, so the compile step installs a pinned Rust toolchain (`RUST_TOOLCHAIN`) into BuildKit cache mounts; nothing Rust ships in the image. `scripts/build/llama-cpp-darwin.sh` turns it on when the runner has cargo. The forks keep GBNF.
+
+- The Go side builds the GBNF grammar and, through `ModelConfig.SchemaGrammar`, its llguidance form (`pkg/functions/grammars/llguidance.go`). The form travels in `PredictOptions.Metadata["llguidance_grammar"]`, which a client cannot set.
+- `grpc-server.cpp` picks the form in `parse_options` with `select_grammar` (`grammar_engine.h`): llguidance only when the build has it and `grammar_engine` is not `gbnf`.
+- A grammar the user wrote, mixed mode and `schema_type: llama3.1` stay GBNF.
+- The tool-call grammars of the chat template run on llguidance only with `grammar_engine: llguidance` (`template_grammars_on_llguidance`; `auto` keeps them on GBNF until the default changes). `patches/0008` translates the generated GBNF to llguidance Lark, keeps the lazy triggers and falls back to GBNF on any failure, or when llguidance rejects a sampled token that GBNF accepts. `grammar_engine: gbnf` is upstream behaviour. Read the 0008 rules in `PATCHES.md` before you touch it, and run `llg-template-check.sh` (all templates of the tree; CI job `tests-llama-cpp-llg-templates`) after a bump.
+- The llguidance tokenizer treats added tokens such as `<tool_call>` as special, for every llguidance grammar.
+- With the flag on, upstream `json_schema_to_grammar()` returns an llguidance grammar unless `force_gbnf` is set. Check new callers of it after a llama.cpp bump.
+
 ## Architecture
 
 - **grpc-server.cpp**: gRPC server implementation, adapts HTTP server patterns to gRPC
 - Uses shared server infrastructure: `server-context.cpp`, `server-task.cpp`, `server-queue.cpp`, `server-common.cpp`
 - The gRPC server mirrors the HTTP server's functionality but uses gRPC instead of HTTP
+
+## Patches to llama.cpp
+
+`prepare.sh` applies `backend/cpp/llama-cpp/patches/*.patch` to the pinned checkout: the score task (0001), the paged serving hooks (0002: admission, preemption with resume by recompute, prefill budget; options `paged_kv`, `prefill_budget`, `kv_output_reserve`, `paged_preempt`, `kv_pool_tokens`) and the others listed in PATCHES.md, among them the template grammars on llguidance (0008). Read [backend/cpp/llama-cpp/PATCHES.md](../backend/cpp/llama-cpp/PATCHES.md) before you bump llama.cpp or touch a patch: it lists each hook, the upstream invariants it relies on, the re-porting steps and the upstream changes to watch (`upstream-watch.sh`). The paged serving policy is in `serving_policy.h`, tested by `serving_policy_test.cpp`.
 
 ## Common Issues When Updating llama.cpp
 

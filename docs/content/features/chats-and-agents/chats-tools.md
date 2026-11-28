@@ -99,7 +99,7 @@ it off, so a chat that never touches the menu has every group:
 | **Past chats** | `history` | `search_chats` and `read_chat` (opt-in; see [Past chats]({{% relref "/features/chats-and-agents/chats-sub-agents#past-chats" %}})) |
 | **Triggers** | `triggers` | `propose_trigger`, `list_triggers`, `update_trigger`, `delete_trigger` and `list_connections` |
 | **Memory** | `memory` | Your notes: the model reads them before it answers and may save new ones (see [Memory]({{% relref "/features/chats-and-agents/short-memory" %}})). Switch it off to make the chat private: it neither reads nor saves memory |
-| **LocalAI admin** | `localai_admin` | The tools that manage this server (administrators only, opt-in; see [LocalAI Assistant]({{% relref "/features/chats-and-agents/localai-client-tools#tool-groups" %}})). A chat in assistant mode has it on. It is never offered in a messaging chat or a run that starts by itself, whatever the agent switches on |
+| **LocalAI admin** | `localai_admin` | The tools that manage this server (administrators only, opt-in; see [LocalAI Assistant]({{% relref "/features/chats-and-agents/localai-client-tools#tool-groups" %}})). A chat in assistant mode has it on. It is never offered in a messaging chat or a run that starts by itself, whatever the agent switches on. A change of plugins through its `plugins` tool (install, switch, removal, new marketplace) shows a card, and runs only when you confirm it |
 | **Suggested changes** | `changes` | `propose_change` and `revert_change`: a model asks to change your notes, an agent profile, a skill, a page or the dashboard, and you confirm (see [change proposals]({{% relref "/addons/contract-reference/connectors-and-chats#change-proposals-from-chats" %}})); for memory notes only, you can choose in your account settings to have them saved at once with an Undo, or never (see [Memory]({{% relref "/features/chats-and-agents/short-memory" %}}#choose-how-a-note-is-saved)) |
 
 ```bash
@@ -260,6 +260,33 @@ an audit line without the text. One chat may send at most 5 messages in 10
 minutes; this count is kept in memory by each server instance. Chats that a
 connector started keep their own `send_message`, which writes in the chat that
 the sender used; see [Chat apps]({{% relref "/features/chat-apps/actions" %}}).
+
+### From a trigger run
+
+A trigger run gets `send_message` only when the trigger holds `act.send` (see
+[Action policy of unattended runs]({{% relref "/features/chats-and-agents/chats-agents#action-policy-of-unattended-runs" %}})).
+Without it the run does not see the tool. The run still reports to the delivery
+target of the trigger; `send_message` is for an extra message that the run
+decides to send while it works, for example when a check finds a problem. The
+tool tells the model to send only when the task of the trigger asks for it and
+the case is met, and not to send the final answer again.
+
+The rules are those of a chat in Studio, with these differences:
+
+- The run holds `act.send` only when the trigger lists it in `acts` and its
+  agent holds the grant. A trigger whose runs only read never gets the tool.
+  The policy is checked again at each call.
+- The destinations are the connections of the trigger owner, with their
+  approved channels, as above. A connection of another user is refused. A
+  trigger that a chat of a messaging app proposed writes only to that
+  connection, and the model may leave out `connection`.
+- One trigger may send at most 5 messages in 10 minutes, counted over all its
+  runs. As for chats, each server instance keeps this count in memory.
+- The result of each call names the connection and the channel that received
+  the message. It stays in the chat of the run, so you can see what the run
+  sent and where. The audit of the connection records the send with the kind
+  `trigger_run`.
+- Sub-agents of the run and agent jobs do not get the tool.
 
 ## Web
 

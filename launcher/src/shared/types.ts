@@ -38,6 +38,21 @@ export interface LauncherInfo {
   sandboxed: boolean
   /** Set when launcher.json could not be used at start and defaults were loaded. Never holds file content. */
   configNotice?: { status: 'recovered'; reason: string }
+  /** The application ID of an app that has one (the Android app). The desktop sends none. */
+  applicationId?: string
+  /** What this app can do. Missing (an older main process) means the desktop set. */
+  capabilities?: Capabilities
+}
+
+export interface Capabilities {
+  /** The app runs and manages a LocalAI server on this device. */
+  localServer: boolean
+  /** Servers can be added with an invite link. */
+  p2p: boolean
+  /** How the app updates itself. */
+  selfUpdate: 'electron' | 'apk' | 'none'
+  /** The platform can scan a QR code. */
+  qrScan: boolean
 }
 
 // ---- server install -------------------------------------------------------
@@ -474,7 +489,7 @@ export interface WebuiViewState {
   remote: RemoteStatusView | null
 }
 
-/** The remote server of the window does not answer (see main/remoteMonitor.ts). */
+/** The remote server of the window does not answer (see core/remoteMonitor.ts). */
 export interface RemoteStatusView {
   kind: 'unreachable'
   /** A short plain reason: "timed out", "refused", "name not found", "network", "not LocalAI", "certificate". */
@@ -522,6 +537,8 @@ export interface ServerRowView {
   checkedAt?: number
   /** Set for a server over P2P: the state of its forwarder. */
   p2p?: TunnelStatusView
+  /** Set for a server over P2P: its peer ID, so an invite of a saved server is recognised. */
+  peer?: string
 }
 
 /** The switch to another server is under way (the calm "Opening X" card). */
@@ -580,9 +597,15 @@ export type InviteFailReason =
   | 'open-relay'
   | 'no-binary'
   | 'pair-failed'
+  | 'needs-relay'
 
 export type AddServerByInviteResult =
-  | { ok: true; view: ServersView; id: string; phrase: string; opened: boolean }
+  /**
+   * `routesUpdated`: the invite names a server that is already saved. The
+   * code was not used (`phrase` is empty); the routes of the link replaced
+   * the saved ones. The invite stays pending until its owner cancels it.
+   */
+  | { ok: true; view: ServersView; id: string; phrase: string; opened: boolean; routesUpdated?: boolean }
   | { ok: false; reason: InviteFailReason | ServerFailReason; detail?: string }
 
 /** The forwarder of a server over P2P. */
@@ -591,6 +614,8 @@ export interface TunnelStatusView {
   /** direct, hole_punched or relayed. */
   path?: string
   error?: string
+  /** A stable error code: `needs_relay` when only a relay can reach the server. */
+  code?: string
 }
 
 export interface UpdateServerInput {

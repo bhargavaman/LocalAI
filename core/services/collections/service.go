@@ -20,6 +20,7 @@ import (
 
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/http/tlsconf"
+	"github.com/mudler/LocalAI/core/privacy"
 	"github.com/mudler/LocalAI/core/services/messaging"
 )
 
@@ -34,6 +35,13 @@ type Service struct {
 	// httpClient, when set, carries the embedding and rerank calls instead of
 	// the network; see WithHTTPClient.
 	httpClient *http.Client
+	// inProcess is true when httpClient reaches the server inside the
+	// process, where a call can carry the privacy level of a search.
+	inProcess bool
+	private   privateQueries
+	// searches are the queries of the searches that run now; their embedding
+	// calls keep the default priority class (privacy.go).
+	searches privateQueries
 
 	root lagi.Backend
 
@@ -91,6 +99,16 @@ func New(appConfig *config.ApplicationConfig, bus messaging.Broadcaster, opts ..
 		if cfg.APIURL == "" && appConfig.TLSFingerprint != "" {
 			s.httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsconf.PinnedClientConfig(appConfig.TLSFingerprint)}}
 		}
+	} else if s.httpClient != nil {
+		// The calls of a zero-retention search carry its level (privacy.go).
+		next := s.httpClient.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		c := *s.httpClient
+		c.Transport = privateTransport{next: next, queries: &s.private, searches: &s.searches}
+		s.httpClient = &c
+		s.inProcess = true
 	}
 	dbPath := cfg.CollectionDBPath
 	if dbPath == "" {
@@ -240,6 +258,12 @@ func (s *Service) EntryContentForUser(userID, collection, entry string) (string,
 
 // SearchForUser searches a collection.
 func (s *Service) SearchForUser(ctx context.Context, userID, collection, query string, maxResults int) ([]lagi.SearchResult, error) {
+	release, err := s.privateSearch(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	defer s.searches.hold(query, privacy.Normal)()
 	b, err := s.Backend(userID)
 	if err != nil {
 		return nil, err

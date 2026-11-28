@@ -262,6 +262,8 @@
       "model_cooldown_anon": "মডেলটি এক মুহূর্ত আগে চালু হতে ব্যর্থ হয়েছিল এবং এখন বিশ্রাম নিচ্ছে।",
       "model_load_failed": "মডেল \"{{model}}\" শুরু করা যায়নি।",
       "model_load_failed_anon": "মডেলটি শুরু করা যায়নি।",
+      "model_loading": "মডেল \"{{model}}\" এখনও লোড হচ্ছে।",
+      "model_loading_anon": "মডেলটি এখনও লোড হচ্ছে।",
       "model_not_found": "মডেল \"{{model}}\" পাওয়া যায়নি।",
       "model_not_found_anon": "মডেলটি পাওয়া যায়নি।",
       "upstream_key": "আপস্ট্রিম কীটি প্রত্যাখ্যান করল।",
@@ -279,6 +281,7 @@
       "model_backend_missing_admin": "অন্য কোনো মডেল নির্বাচন করুন, অথবা ব্যাকএন্ড পৃষ্ঠা থেকে ব্যাকএন্ড ইনস্টল করুন।",
       "model_cooldown": "{{seconds}} সেকেন্ডে আবার চেষ্টা করুন।",
       "model_load_failed": "মডেলের কনফিগারেশন এবং এর ব্যাকএন্ড পরীক্ষা করুন, তারপর পুনরায় চেষ্টা করুন।",
+      "model_loading": "একটি বড় মডেল লোড হতে অনেক মিনিট সময় নিতে পারে। কয়েক মিনিট পরে আবার চেষ্টা করুন।",
       "model_not_found": "অন্য কোনো মডেল নির্বাচন করুন, অথবা মডেল পৃষ্ঠা থেকে এই মডেলটি ইনস্টল করুন।",
       "upstream_key": "মডেলের সেটিংসে API কীটি পরীক্ষা করুন।",
       "upstream_path": "আপস্ট্রিম ঠিকানাটি সম্পূর্ণ এন্ডপয়েন্ট হতে হবে, উদাহরণস্বরূপ .../v1/chat/completions।",
@@ -311,7 +314,8 @@
       "context": "প্রসঙ্গ",
       "skills": "দক্ষতা এবং এজেন্টরা",
       "help": "সহায়তা",
-      "yours": "আপনার"
+      "yours": "আপনার",
+      "plugins": "প্লাগইন"
     },
     "model": {
       "label": "সুইচ মডেল",
@@ -398,7 +402,9 @@
       "shared": "ভাগ করা হয়েছে",
       "yours": "আপনার",
       "prompt": "তাত্ক্ষণিক নির্দেশ",
-      "tool": "সরঞ্জাম"
+      "tool": "সরঞ্জাম",
+      "plugin": "প্লাগইন",
+      "command": "কমান্ড"
     },
     "collides": "শুধুমাত্র দক্ষতার সাথে",
     "errors": {
@@ -515,12 +521,17 @@
       "shared": "ভাগ করা হয়েছে",
       "folder": "কর্মক্ষেত্র",
       "addon": "{{name}}",
-      "addonFrom": "থেকে {{name}}"
+      "addonFrom": "থেকে {{name}}",
+      "plugin": "প্লাগইন"
     },
     "replacedBy": "{{name}}দ্বারা প্রতিস্থাপিত",
     "fallback_one": "নির্মিত {{skills}} ব্যবহারে: {{name}} অ্যাড-অনটির নিজস্ব স্কিল এখানে বন্ধ বা চলছে না।",
     "fallback_other": "নির্মিত {{skills}} ব্যবহারে: {{name}} অ্যাড-অন-এর নিজস্ব দক্ষতা এখানে বন্ধ বা চলছে না।",
-    "fromProject": "প্রকল্প থেকে"
+    "fromProject": "প্রকল্প থেকে",
+    "pluginGroup": "প্লাগইন: {{name}}",
+    "pluginSwitch": "এই চ্যাটে {{name}} ব্যবহার করুন",
+    "pluginOff": "এই চ্যাটে বন্ধ। এর দক্ষতা, কমান্ড এবং কনেক্টর এখানে কাজ করে না।",
+    "pluginNoSkills": "এই প্লাগইন কমান্ড বা কনেক্টর যোগ করে, কোনো দক্ষতা নয়।"
   },
   "agent": {
     "label": "এজেন্ট",
@@ -632,7 +643,15 @@
     "alsoSavedWorking_other": "এছাড়াও {{count}} কাজের ফাইলগুলি সংরক্ষণ করা হয়েছে।",
     "savedWorking_one": "{{count}} কাজের ফাইল সংরক্ষিত হয়েছে",
     "savedWorking_other": "সংরক্ষিত {{count}} কাজের ফাইলসমূহ",
-    "workingTitle": "কর্মরত ফাইল (একটি স্ক্রিপ্ট, একটি লগ বা একটি খসড়া): খুলুন {{path}}"
+    "workingTitle": "কর্মরত ফাইল (একটি স্ক্রিপ্ট, একটি লগ বা একটি খসড়া): খুলুন {{path}}",
+    "group": {
+      "used_one": "{{count}}টি টুল ব্যবহার করা হয়েছে",
+      "used_other": "{{count}}টি টুল ব্যবহার করা হয়েছে",
+      "calls_one": "{{count}}টি কল",
+      "calls_other": "{{count}}টি কল",
+      "failed_one": "{{count}}টি ব্যর্থ",
+      "failed_other": "{{count}}টি ব্যর্থ"
+    }
   },
   "allChats": {
     "title": "সমস্ত চ্যাট",
@@ -829,7 +848,8 @@
   },
   "invoked": {
     "skill": "দক্ষতা: {{name}}",
-    "agent": "এজেন্ট: {{name}}"
+    "agent": "এজেন্ট: {{name}}",
+    "command": "কমান্ড: {{name}}"
   },
   "marker": {
     "compacted": "প্রসঙ্গ সংকুচিত: {{before}} থেকে {{after}} টোকেন",
@@ -1080,5 +1100,10 @@
     "message_one": "Delete the {{count}} chat shown in {{project}}? This cannot be undone.",
     "message_other": "Delete the {{count}} chats shown in {{project}}? This cannot be undone.",
     "confirm": "দেখানো মুছুন"
+  },
+  "plugins": {
+    "toolsGroup": "প্লাগইন",
+    "toolsDescribe": "এই চ্যাটে এর কনেক্টর: {{names}}।",
+    "connectorFrom": "{{name}} প্লাগইন থেকে।"
   }
 }

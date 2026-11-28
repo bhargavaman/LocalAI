@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	mcpTools "github.com/mudler/LocalAI/core/http/endpoints/mcp"
 	openaiEndpoint "github.com/mudler/LocalAI/core/http/endpoints/openai"
 	"github.com/mudler/LocalAI/core/http/middleware"
+	"github.com/mudler/LocalAI/core/http/sse"
+	"github.com/mudler/LocalAI/core/privacy"
 	"github.com/mudler/LocalAI/core/schema"
 	"github.com/mudler/LocalAI/core/services/cloudproxy"
 	"github.com/mudler/LocalAI/core/templates"
@@ -148,7 +151,7 @@ func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evalu
 
 		// Template the prompt with tools if available
 		predInput := evaluator.TemplateMessages(*openAIReq, openAIReq.Messages, cfg, funcs, shouldUseFn)
-		xlog.Debug("Anthropic Messages - Prompt (after templating)", "prompt", predInput)
+		xlog.Debug("Anthropic Messages - Prompt (after templating)", "prompt", privacy.Redact(c.Request().Context(), predInput))
 
 		if input.Stream {
 			return handleAnthropicStream(c, id, input, cfg, ml, cl, appConfig, predInput, openAIReq, funcs, shouldUseFn, mcpExecutor, evaluator)
@@ -326,7 +329,7 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 		}
 
 		if respData, err := json.Marshal(resp); err == nil {
-			xlog.Debug("Anthropic Response", "response", string(respData))
+			xlog.Debug("Anthropic Response", "response", privacy.Redact(c.Request().Context(), string(respData)))
 		}
 
 		middleware.StampUsage(c, input.Model, tokenUsage.Prompt, tokenUsage.Completion)
@@ -375,8 +378,14 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 			xlog.Debug("Anthropic MCP stream re-templating", "iteration", mcpIteration)
 		}
 
-		// Track accumulated content for tool call detection
-		accumulatedContent := ""
+		// Track accumulated content for tool call detection. parsedLen is the
+		// length of the output at the last tool-call parse: a parse of the
+		// same output finds the same calls, which were emitted already.
+		var accumulatedContent functions.StreamOutput
+		// fnParser keeps its parse work across tokens; it finds what a parse
+		// of the whole output finds.
+		fnParser := functions.NewStreamFunctionCallParser(cfg.FunctionsConfig)
+		parsedLen := -1
 		currentBlockIndex := 0
 		inToolCall := false
 		toolCallsEmitted := 0
@@ -419,11 +428,12 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 				close(firstTokenReceived)
 				<-keepaliveDone // wait for keepalive goroutine to exit before writing
 			})
-			accumulatedContent += token
+			accumulatedContent.Write(token)
+			fnParser.Write(token)
 
-			if shouldUseFn {
-				cleanedResult := functions.CleanupLLMResult(accumulatedContent, cfg.FunctionsConfig)
-				toolCalls := functions.ParseFunctionCall(cleanedResult, cfg.FunctionsConfig)
+			if shouldUseFn && accumulatedContent.Len() != parsedLen && accumulatedContent.MayHoldFunctionCall(cfg.FunctionsConfig) {
+				parsedLen = accumulatedContent.Len()
+				toolCalls := fnParser.Parse()
 
 				if len(toolCalls) > toolCallsEmitted {
 					if !inToolCall && currentBlockIndex == 0 {
@@ -511,7 +521,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 			// Emit text content from ChatDeltas only when the tokenCallback
 			// didn't already stream it (autoparser clears raw text, so
 			// accumulatedContent will be empty in that case).
-			if deltaContent != "" && !inToolCall && accumulatedContent == "" {
+			if deltaContent != "" && !inToolCall && accumulatedContent.Len() == 0 {
 				sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 					Type:  "content_block_delta",
 					Index: intPtr(0),
@@ -569,7 +579,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 				// Append assistant message with tool_calls
 				assistantMsg := schema.Message{
 					Role:    "assistant",
-					Content: accumulatedContent,
+					Content: accumulatedContent.String(),
 				}
 				for i, tc := range collectedToolCalls {
 					toolCallID := tc.ID
@@ -617,8 +627,8 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 
 		// Automatic tool parsing fallback for streaming: when no tools were requested
 		// but the model emitted tool call markup, parse and emit as tool_use blocks.
-		if !shouldUseFn && cfg.FunctionsConfig.AutomaticToolParsingFallback && accumulatedContent != "" && toolCallsEmitted == 0 {
-			parsed := functions.ParseFunctionCall(accumulatedContent, cfg.FunctionsConfig)
+		if !shouldUseFn && cfg.FunctionsConfig.AutomaticToolParsingFallback && accumulatedContent.Len() > 0 && toolCallsEmitted == 0 {
+			parsed := functions.ParseFunctionCall(accumulatedContent.String(), cfg.FunctionsConfig)
 			if len(parsed) > 0 {
 				// Close the text content block.
 				sendAnthropicSSE(c, schema.AnthropicStreamEvent{
@@ -854,12 +864,10 @@ func convertFuncsToOpenAITools(funcs functions.Functions) []functions.Tool {
 func intPtr(i int) *int { return &i }
 
 func sendAnthropicSSE(c echo.Context, event schema.AnthropicStreamEvent) {
-	data, err := json.Marshal(event)
-	if err != nil {
+	if err := sse.WriteEvent(c.Response().Writer, event.Type, event); errors.Is(err, sse.ErrEncode) {
 		xlog.Error("Failed to marshal SSE event", "error", err)
 		return
 	}
-	fmt.Fprintf(c.Response().Writer, "event: %s\ndata: %s\n\n", event.Type, string(data))
 	c.Response().Flush()
 }
 

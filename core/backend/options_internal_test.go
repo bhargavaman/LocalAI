@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/mudler/LocalAI/core/config"
+	"github.com/mudler/LocalAI/pkg/functions"
 	pb "github.com/mudler/LocalAI/pkg/grpc/proto"
 	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/reasoning"
@@ -394,6 +395,25 @@ var _ = Describe("gRPCPredictOpts chat_template_kwargs metadata", func() {
 		Expect(blob).To(HaveKeyWithValue("preserve_thinking", true))
 	})
 
+	It("sends the llguidance form of a schema grammar, and never one from the client", func() {
+		cfg := baseCfg()
+		g, err := cfg.SchemaGrammar(functions.JSONFunctionStructure{AnyOf: []functions.Item{{
+			Type: "object", Properties: map[string]any{"a": map[string]any{"type": "string"}},
+		}}})
+		Expect(err).ToNot(HaveOccurred())
+		cfg.Grammar = g
+		cfg.RequestMetadata = map[string]string{"llguidance_grammar": "%llguidance {}\nstart: \"x\""}
+		opts := gRPCPredictOpts(cfg, "/tmp/models")
+		Expect(opts.Grammar).To(Equal(g))
+		Expect(opts.Metadata["llguidance_grammar"]).To(HavePrefix("%llguidance {}\nstart: %json "))
+		// It is not a chat template variable.
+		Expect(opts.Metadata).ToNot(HaveKey("chat_template_kwargs"))
+
+		cfg.Grammar = `root ::= "yes"`
+		opts = gRPCPredictOpts(cfg, "/tmp/models")
+		Expect(opts.Metadata).ToNot(HaveKey("llguidance_grammar"))
+	})
+
 	It("omits the blob when there is nothing to forward", func() {
 		opts := gRPCPredictOpts(baseCfg(), "/tmp/models")
 		Expect(opts.Metadata).ToNot(HaveKey("chat_template_kwargs"))
@@ -624,5 +644,50 @@ var _ = Describe("proxy remote key", func() {
 			Expect(fin(context.Background(), "unknown", other)).To(Succeed())
 			Expect(fin(context.Background(), "unknown", nil)).To(Succeed())
 		})
+	})
+})
+
+// An unset mmap must reach llama-cpp as "managed" so llama.cpp can choose the
+// load mode, while MMap keeps the historic true for backends that ignore the
+// new field. An explicit value, or the SYCL override, is never managed.
+var _ = Describe("grpcModelOpts mmap", func() {
+	threads := 1
+	ctx := 4096
+	base := func(backend string, mmap *bool) config.ModelConfig {
+		cfg := config.ModelConfig{Threads: &threads, Backend: backend, LLMConfig: config.LLMConfig{ContextSize: &ctx}}
+		cfg.MMap = mmap
+		return cfg
+	}
+	yes, no := true, false
+
+	It("sends an unset mmap as true and managed", func() {
+		opts := grpcModelOpts(base("llama-cpp", nil), "/tmp/models")
+		Expect(opts.MMap).To(BeTrue())
+		Expect(opts.MMapManaged).To(BeTrue())
+	})
+
+	It("keeps an explicit mmap: true", func() {
+		opts := grpcModelOpts(base("llama-cpp", &yes), "/tmp/models")
+		Expect(opts.MMap).To(BeTrue())
+		Expect(opts.MMapManaged).To(BeFalse())
+	})
+
+	It("keeps an explicit mmap: false", func() {
+		opts := grpcModelOpts(base("llama-cpp", &no), "/tmp/models")
+		Expect(opts.MMap).To(BeFalse())
+		Expect(opts.MMapManaged).To(BeFalse())
+	})
+
+	It("forces mmap off for SYCL backends, even when unset", func() {
+		opts := grpcModelOpts(base("intel-sycl-f16-llama-cpp", nil), "/tmp/models")
+		Expect(opts.MMap).To(BeFalse())
+		Expect(opts.MMapManaged).To(BeFalse())
+	})
+
+	It("does not panic on an unset mmap in the predict options", func() {
+		cfg := config.ModelConfig{}
+		cfg.SetDefaults()
+		Expect(cfg.MMap).To(BeNil())
+		Expect(gRPCPredictOpts(cfg, "/tmp/models").MMap).To(BeTrue())
 	})
 })

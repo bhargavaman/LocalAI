@@ -7,6 +7,7 @@ import { createSharesApi } from './sharesApi'
 import { createFolderSharesApi } from './folderSharesApi'
 import { createPageSharesApi } from './pageSharesApi'
 import { reportUnauthorized } from './sessionEvents'
+import { INCOGNITO_HEADER, forgetIncognitoChat, incognitoChatLevel, incognitoHeaders } from './incognito'
 
 const enc = encodeURIComponent
 const userQ = (userId) => userId ? `?user_id=${enc(userId)}` : ''
@@ -53,10 +54,13 @@ function buildUrl(endpoint, params) {
 }
 
 async function fetchJSON(endpoint, options = {}) {
-  const response = await fetch(apiUrl(endpoint), {
+  const init = {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
-  })
+  }
+  // While an incognito chat is open, every request carries its level.
+  init.headers = incognitoHeaders(init.headers)
+  const response = await fetch(apiUrl(endpoint), init)
   return handleResponse(response)
 }
 
@@ -66,6 +70,30 @@ async function postJSON(endpoint, body, options = {}) {
     body: JSON.stringify(body),
     ...options,
   })
+}
+
+// Engine runtime settings: the engines whose settings LocalAI maps, the
+// settings the model editor's Runtime tuning section draws, and the two-way
+// translation between a model config and an engine command line.
+//
+//   list({ backend })                -> { engines: [{ id, name, binary, backends, capabilities }] }
+//                                       backend: only the engine that serves it
+//   settingsSchema(engine)           -> { id, name, binary, capabilities, flags, groups, combined, presets,
+//                                         reserved_options, placement, example }
+//   commandPreview(engine, config)   -> { command, warnings }          config: a model config (YAML keys)
+//   parseCommand(engine, command)    -> { fields, options, unmapped: [{ flag, value, reason }], warnings, placements }
+//   placement(engine, body)          -> { option, placement, raw }     body: { placement } builds an entry,
+//                                                                     { option } reads one back
+export const engineSettingsApi = {
+  // An empty backend is a real question (a model with no backend), so the
+  // parameter is kept even when empty.
+  list: (params, options) => fetchJSON(params?.backend === undefined
+    ? API_CONFIG.endpoints.engines
+    : `${API_CONFIG.endpoints.engines}?backend=${encodeURIComponent(params.backend)}`, options),
+  settingsSchema: (engine, options) => fetchJSON(API_CONFIG.endpoints.engineSettingsSchema(engine), options),
+  commandPreview: (engine, config, options) => postJSON(API_CONFIG.endpoints.engineCommandPreview(engine), { config }, options),
+  parseCommand: (engine, command, options) => postJSON(API_CONFIG.endpoints.engineParseCommand(engine), { command }, options),
+  placement: (engine, body, options) => postJSON(API_CONFIG.endpoints.enginePlacement(engine), body, options),
 }
 
 // Models API
@@ -283,7 +311,7 @@ export const chatsApi = {
     form.append('text', text)
     Object.entries(cmd).forEach(([k, v]) => form.append(k, v))
     files.forEach(f => form.append('files', f, f.name))
-    const res = await fetch(apiUrl(API_CONFIG.endpoints.chatMessages(id)), { method: 'POST', body: form })
+    const res = await fetch(apiUrl(API_CONFIG.endpoints.chatMessages(id)), { method: 'POST', body: form, headers: incognitoHeaders() })
     return handleResponse(res)
   },
   editPending: (id, pid, text) => fetchJSON(API_CONFIG.endpoints.chatPending(id, pid), { method: 'PATCH', body: JSON.stringify({ text }) }),
@@ -750,6 +778,9 @@ export const chatTriggersApi = {
   rotateSecret: (id) => postJSON(`/api/chats/triggers/${enc2(id)}/secret`, {}),
   runs: (id) => fetchJSON(`/api/chats/triggers/${enc2(id)}/runs`),
   preview: (when, tz) => fetchJSON(`/api/chats/triggers/preview${q({ when, tz, n: 3 })}`),
+  // Where a trigger can report: { connections: [{ id, kind, kind_title, addon, name, enabled, can_receive_reports, talkback_allowed,
+  // channels: [{ id, label, current }], reason }], from_chat, connectors_off }. trigger marks the channel it reports to now.
+  destinations: (agentId, trigger) => fetchJSON(`/api/chats/triggers/destinations${q({ agent_id: agentId, trigger })}`),
   proposals: (chat) => fetchJSON(`/api/chats/triggers/proposals${q({ chat })}`),
   // One proposal and what became of it: { state: pending|accepted|declined|expired|undone, trigger, answered_at, can_undo, undo_blocked }.
   proposal: (id) => fetchJSON(`/api/chats/triggers/proposals/${enc2(id)}`),
@@ -763,6 +794,16 @@ export const chatTriggersApi = {
   applyChange: (id) => postJSON(`/api/chats/triggers/changes/${enc2(id)}/apply`, {}),
   undoChange: (id) => postJSON(`/api/chats/triggers/changes/${enc2(id)}/undo`, {}),
   dismissChange: (id) => fetchJSON(`/api/chats/triggers/changes/${enc2(id)}`, { method: 'DELETE' }),
+  // The add-ons a watch can watch: { sources: [{ id, title, events: [{ type, lifecycle, label }] }] }.
+  sources: (lang) => fetchJSON(`/api/chats/triggers/sources${q({ lang })}`),
+  // The reminders of a watch, soonest first: { reminders: [{ id, title, link, task, due, start, item_time, all_day,
+  // offset_minutes, lead_minutes, at, snoozed_to, skipped, adjusted, snoozable }] }.
+  reminders: (id) => fetchJSON(`/api/chats/triggers/${enc2(id)}/reminders`),
+  // Snooze, skip, re-time or change the task of a reminder; send the old values back to undo. source is the add-on
+  // whose page asks: the server then refuses a reminder of a watch on another add-on.
+  patchReminder: (id, rid, body, source) => fetchJSON(`/api/chats/triggers/${enc2(id)}/reminders/${enc2(rid)}${q({ source })}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  // The reminders of your watches for the items of one add-on: { reminders: [{ item_id, watch_id, id, due, ... }] }.
+  sourceReminders: (source) => fetchJSON(`/api/chats/triggers/reminders${q({ source })}`),
 }
 
 // The changes a model proposed to your memory, profile and other files, and
@@ -838,6 +879,16 @@ export const operationsApi = {
 export const settingsApi = {
   get: () => fetchJSON(API_CONFIG.endpoints.settings),
   save: (body) => postJSON(API_CONFIG.endpoints.settings, body),
+}
+
+// The disk prompt cache of llama.cpp.
+//   status()        -> { enabled, shared, nodes: [{ node, bytes, files, namespaces, status, models }] }  (admin)
+//   clear(model)    -> { files, bytes }   one model, or every model when model is empty (admin)
+//   clearMine()     -> { files, bytes }   the cached prompts of the caller
+export const promptCacheApi = {
+  status: () => fetchJSON(API_CONFIG.endpoints.promptCache),
+  clear: (model) => postJSON(API_CONFIG.endpoints.promptCacheClear, model ? { model } : {}),
+  clearMine: () => fetchJSON(API_CONFIG.endpoints.promptCacheMine, { method: 'DELETE' }),
 }
 
 // P2P relays and identity (the P2P settings page). Status, invites and devices
@@ -935,6 +986,22 @@ export const p2pNetApi = {
   cancelInvite: (id) => fetchJSON(API_CONFIG.endpoints.p2pInvite(id), { method: 'DELETE' }),
   devices: () => fetchJSON(API_CONFIG.endpoints.p2pDevices),
   revokeDevice: (id) => fetchJSON(API_CONFIG.endpoints.p2pDevice(id), { method: 'DELETE' }),
+  // The policy of the invites users mint for their own devices (admin).
+  userPairing: () => fetchJSON(API_CONFIG.endpoints.p2pUserPairing),
+  setUserPairing: (patch) => fetchJSON(API_CONFIG.endpoints.p2pUserPairing, { method: 'PUT', body: JSON.stringify(patch) }),
+}
+
+// A signed-in user's own devices (feature p2p_pair). A device paired from
+// here signs in as the user. 409 needs_account without a user account, 429
+// limit_reached at a limit, 400 for a life over the cap.
+export const myP2PApi = {
+  me: () => fetchJSON(API_CONFIG.endpoints.p2pMe),
+  mintInvite: (label, ttlSeconds) => postJSON(API_CONFIG.endpoints.p2pMyInvites, { label, ttl_seconds: ttlSeconds }),
+  invites: () => fetchJSON(API_CONFIG.endpoints.p2pMyInvites),
+  cancelInvite: (id) => fetchJSON(API_CONFIG.endpoints.p2pMyInvite(id), { method: 'DELETE' }),
+  devices: () => fetchJSON(API_CONFIG.endpoints.p2pMyDevices),
+  renameDevice: (id, label) => fetchJSON(API_CONFIG.endpoints.p2pMyDevice(id), { method: 'PATCH', body: JSON.stringify({ label }) }),
+  revokeDevice: (id) => fetchJSON(API_CONFIG.endpoints.p2pMyDevice(id), { method: 'DELETE' }),
 }
 
 // Federation (admin): the instances that can serve a group and the groups,
@@ -1018,7 +1085,7 @@ async function parseAudioBlobResponse(response) {
 async function postAudioBlob(endpoint, body, signal) {
   const response = await fetch(apiUrl(endpoint), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: incognitoHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
     ...(signal ? { signal } : {}),
   })
@@ -1028,6 +1095,16 @@ async function postAudioBlob(endpoint, body, signal) {
 async function postMultipartAudioBlob(endpoint, formData) {
   const response = await fetch(apiUrl(endpoint), { method: 'POST', body: formData })
   return parseAudioBlobResponse(response)
+}
+
+// Ends an incognito chat of this tab on the server and forgets it. keepalive
+// lets the request finish while the tab closes. A chat that is not one of the
+// tab's incognito chats is left alone: this never deletes a kept chat.
+export function discardIncognitoChat(id, { keepalive = false } = {}) {
+  const level = incognitoChatLevel(id)
+  if (!level) return
+  forgetIncognitoChat(id)
+  fetch(apiUrl(API_CONFIG.endpoints.chat(id)), { method: 'DELETE', keepalive, headers: { [INCOGNITO_HEADER]: level } }).catch(() => {})
 }
 
 // TTS
@@ -1092,6 +1169,7 @@ export const audioApi = {
       method: 'POST',
       body: formData,
       signal,
+      headers: incognitoHeaders(),
     })
     return handleResponse(response)
   },
@@ -1191,6 +1269,10 @@ export const adminUsersApi = {
     method: 'PUT', body: JSON.stringify(perms), headers: { 'Content-Type': 'application/json' },
   }),
   getFeatures: () => fetchJSON('/api/auth/admin/features'),
+  // Only a feature whose meta says configurable accepts a default.
+  setFeatureDefault: (feature, enabled) => fetchJSON(`/api/auth/admin/features/${encodeURIComponent(feature)}/default`, {
+    method: 'PUT', body: JSON.stringify({ enabled }), headers: { 'Content-Type': 'application/json' },
+  }),
   setModels: (id, allowlist) => fetchJSON(`/api/auth/admin/users/${encodeURIComponent(id)}/models`, {
     method: 'PUT', body: JSON.stringify(allowlist), headers: { 'Content-Type': 'application/json' },
   }),
@@ -1363,6 +1445,18 @@ export const nodesApi = {
     body: JSON.stringify({ value }),
   }),
   resetVramBudget: (id) => fetchJSON(API_CONFIG.endpoints.nodeVramBudget(id), {
+    method: 'DELETE',
+  }),
+  // The memory limits a node runs with, each with its source (override,
+  // worker, cluster, default). setLimits sends only the keys that change;
+  // resetLimits clears every override of the node.
+  getLimits: (id) => fetchJSON(API_CONFIG.endpoints.nodeLimits(id)),
+  setLimits: (id, limits) => fetchJSON(API_CONFIG.endpoints.nodeLimits(id), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(limits),
+  }),
+  resetLimits: (id) => fetchJSON(API_CONFIG.endpoints.nodeLimits(id), {
     method: 'DELETE',
   }),
   listScheduling: () => fetchJSON(API_CONFIG.endpoints.nodesScheduling),

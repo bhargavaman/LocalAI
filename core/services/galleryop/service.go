@@ -630,6 +630,10 @@ func (g *GalleryService) StoreCancellationActions(id string, cancelFunc, pauseFu
 	g.storeCancellation(id, cancelFunc, pauseFunc)
 }
 
+// RemoveCancellation drops the cancellation of an operation that ended. A job
+// that registered its own cancel with StoreCancellation calls it when it ends.
+func (g *GalleryService) RemoveCancellation(id string) { g.removeCancellation(id) }
+
 // removeCancellation removes a cancellation function when operation completes
 func (g *GalleryService) removeCancellation(id string) {
 	g.Lock()
@@ -1064,6 +1068,9 @@ type OpResult struct {
 	Upgrade  bool
 	// Addon is an add-on install or upgrade; Backend is false then.
 	Addon bool
+	// Plugin is a plugin install or update; By is the user who started it.
+	Plugin bool
+	By     string
 	// NeedsApproval is a failed add-on install that waits for the
 	// administrator to review its host access again.
 	NeedsApproval bool

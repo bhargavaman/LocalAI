@@ -172,7 +172,21 @@ func recipeNames() []string {
 // the update of several items in its description (no new recipe); the
 // measured size went from 9,888 to 9,962 bytes. Safety rule 1 must name every
 // mutating tool.
-const adminTurnPromptBudget = 10000
+// 10,000 to 10,200: the skill apply_llama_cpp_command is listed in the index
+// (its name and one line); in CI the measured size went from 9,889 to 10,085
+// bytes before the upgrade runs, which add about 74 bytes more.
+// It is now apply_engine_command, with a name and a line that are 4 bytes
+// shorter, so the prompt did not grow; it still does not fit 10,000.
+// 10,200 to 10,400: the plugins tool adds the recipe manage_plugins (its name
+// and one line in the compact prompt and in the index) and `plugins` in
+// safety rule 1; the measured size went to 10,384 bytes. The tool has
+// mutating actions, so rule 1 must name it, and the recipe holds the steps
+// that keep code plugins in the browser.
+// 10,400 to 10,600: after the rebase of the plugins on master, master's own
+// rule 1 names more tools (set_p2p_user_pairing and drain_node among them)
+// and the measured size went to 10,503 bytes; the plugins part is
+// unchanged.
+const adminTurnPromptBudget = 10600
 
 var _ = Describe("the admin recipes as skills", func() {
 	ctx := context.Background()

@@ -80,6 +80,7 @@ jobs:
       context: ${{ matrix.context }}
       ubuntu-version: ${{ matrix.ubuntu-version }}
       amdgpu-targets: ${{ matrix.amdgpu-targets || 'gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201' }}
+      cuda-docker-arch: ${{ matrix.cuda-docker-arch || '' }}
     secrets:
       quayUsername: ${{ secrets.LOCALAI_REGISTRY_USERNAME }}
       quayPassword: ${{ secrets.LOCALAI_REGISTRY_PASSWORD }}
@@ -108,6 +109,7 @@ jobs:
       context: ${{ matrix.context }}
       ubuntu-version: ${{ matrix.ubuntu-version }}
       amdgpu-targets: ${{ matrix.amdgpu-targets || 'gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201' }}
+      cuda-docker-arch: ${{ matrix.cuda-docker-arch || '' }}
     secrets:
       quayUsername: ${{ secrets.LOCALAI_REGISTRY_USERNAME }}
       quayPassword: ${{ secrets.LOCALAI_REGISTRY_PASSWORD }}
@@ -137,6 +139,7 @@ jobs:
       context: ${{ matrix.context }}
       ubuntu-version: ${{ matrix.ubuntu-version }}
       amdgpu-targets: ${{ matrix.amdgpu-targets || 'gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201' }}
+      cuda-docker-arch: ${{ matrix.cuda-docker-arch || '' }}
     secrets:
       quayUsername: ${{ secrets.LOCALAI_REGISTRY_USERNAME }}
       quayPassword: ${{ secrets.LOCALAI_REGISTRY_PASSWORD }}
@@ -166,6 +169,7 @@ jobs:
       context: ${{ matrix.context }}
       ubuntu-version: ${{ matrix.ubuntu-version }}
       amdgpu-targets: ${{ matrix.amdgpu-targets || 'gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201' }}
+      cuda-docker-arch: ${{ matrix.cuda-docker-arch || '' }}
     secrets:
       quayUsername: ${{ secrets.LOCALAI_REGISTRY_USERNAME }}
       quayPassword: ${{ secrets.LOCALAI_REGISTRY_PASSWORD }}
@@ -195,6 +199,7 @@ jobs:
       context: ${{ matrix.context }}
       ubuntu-version: ${{ matrix.ubuntu-version }}
       amdgpu-targets: ${{ matrix.amdgpu-targets || 'gfx908,gfx90a,gfx942,gfx950,gfx1030,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1152,gfx1153,gfx1200,gfx1201' }}
+      cuda-docker-arch: ${{ matrix.cuda-docker-arch || '' }}
     secrets:
       quayUsername: ${{ secrets.LOCALAI_REGISTRY_USERNAME }}
       quayPassword: ${{ secrets.LOCALAI_REGISTRY_PASSWORD }}
@@ -312,3 +317,21 @@ jobs:
     strategy:
       fail-fast: true
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix-windows) }}
+
+  # Fails when a llama.cpp-family image build ran longer than 4h, well before
+  # GitHub kills the job at 6h, and writes the slowest jobs to the run summary.
+  build-timings:
+    needs: [backend-jobs-multiarch, backend-jobs-singlearch-1, backend-jobs-singlearch-2, backend-jobs-singlearch-3, backend-jobs-singlearch-4]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/ci
+      - name: Backend build timings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/backend-build-timings.sh "${{ github.run_id }}" "${{ github.run_attempt }}"

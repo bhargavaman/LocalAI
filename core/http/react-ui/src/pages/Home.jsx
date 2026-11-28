@@ -15,6 +15,7 @@ import { useChatSandboxProfile } from '../hooks/useChatSandboxProfile'
 // eslint-disable-next-line no-unused-vars
 import { SlashHelpCard } from '../components/chat/CommandCards'
 import { parseInvocation } from '../utils/slashCommands'
+import { withPluginDraft } from '../utils/chatPlugins'
 // eslint-disable-next-line no-unused-vars
 import { ReadyLine } from '../components/chat/EmptyChat'
 // eslint-disable-next-line no-unused-vars
@@ -32,6 +33,7 @@ import SetupStatusLine, { SetupReason } from '../components/chat/SetupStatusLine
 // eslint-disable-next-line no-unused-vars
 import ManageSetups from '../components/chat/ManageSetups'
 import { useChatComposer } from '../hooks/useChatComposer'
+import { withLoadedAliases } from '../utils/loadedAliases'
 import { liveBlockedReason } from '../hooks/useLive'
 // eslint-disable-next-line no-unused-vars
 import LiveButton from '../components/chat/LiveButton'
@@ -74,6 +76,9 @@ import { Button, Callout, LoadError } from '../components/ui'
 import './home.css'
 import Icon from '../components/Icon'
 import { idsText, resultParts } from '../utils/remotes'
+// eslint-disable-next-line no-unused-vars
+import { IncognitoButton, IncognitoNote } from '../components/chat/Incognito'
+import { ZERO_RETENTION, incognitoLevels, offeredLevel, rememberIncognitoChat, setIncognitoMarker } from '../utils/incognito'
 
 const DOCS_URL = 'https://localai.io'
 const ADDONS_DOCS_URL = 'https://localai.io/features/addons/#turning-the-owner-on-or-off'
@@ -123,11 +128,18 @@ export default function Home() {
   const [searchParams] = useSearchParams()
   // What the chat server says about chats here: whether files (attachments,
   // skills) work, whether chats are kept, the model that reads images.
-  const [chatServer, setChatServer] = useState({ files: true, filesReason: '', persistent: true, imageModel: '' })
+  const [chatServer, setChatServer] = useState({ files: true, filesReason: '', persistent: true, imageModel: '', incognito: null })
+  // The incognito level of the next chat, '' when off. It lives in this
+  // component only, and every request carries it while it is on.
+  const [incognito, setIncognito] = useState('')
+  useEffect(() => {
+    setIncognitoMarker(incognito)
+    return () => setIncognitoMarker('')
+  }, [incognito])
   // The composer is the chat page's (useChatComposer): the draft is Home's,
   // the switches are a draft that goes with the new chat.
   const composer = useChatComposer({
-    draftKey: HOME_DRAFT, userId: user?.id, filesOn: chatServer.files, canAgents: hasFeature('agents'),
+    draftKey: HOME_DRAFT, userId: user?.id, filesOn: chatServer.files && incognito !== ZERO_RETENTION, pluginsOn: chatServer.files, canAgents: hasFeature('agents'),
     initialModel: searchParams.get('model') || '',
   })
   // The sandbox profile and the network of the new chat: picked here, saved
@@ -433,9 +445,12 @@ export default function Home() {
   // The new chat of Send and of Live: the chosen model, agent and drafted
   // switches, then the reasoning effort in its settings.
   const createChat = useCallback(async () => {
-    const chat = await chatsApi.create(draftModel, undefined, agentId, false, switches.draftSwitches() || undefined, projectId || undefined)
+    // An incognito chat belongs to no project; the marker is on the request.
+    const drafted = withPluginDraft(switches.draftSwitches(), composer.plugins?.draftSwitches?.())
+    const chat = await chatsApi.create(draftModel, undefined, agentId, false, drafted || undefined, incognito ? undefined : (projectId || undefined))
+    if (incognito) rememberIncognitoChat(chat.id, chat.incognito || incognito)
     // The shared projects picked in the composer are pulled into the new chat.
-    if (pulledDraft?.length) {
+    if (pulledDraft?.length && !incognito) {
       try {
         await chatProjectsApi.setChatPulled(chat.id, pulledDraft)
         chat.pulled_projects = pulledDraft
@@ -457,7 +472,7 @@ export default function Home() {
       }
     }
     return chat
-  }, [draftModel, agentId, projectId, pulledDraft, draftEffort, switches, addToast, tpj, tch, tc, saveProfileDraft, saveNetworkDraft])
+  }, [draftModel, agentId, projectId, pulledDraft, draftEffort, switches, composer.plugins, addToast, tpj, tch, tc, saveProfileDraft, saveNetworkDraft, incognito])
   const doSubmit = useCallback(async (override) => {
     const own = typeof override !== 'string'
     let text = (own ? message : override).trim()
@@ -468,13 +483,13 @@ export default function Home() {
     // drafted switches of the new chat decide which it has).
     const savedGroup = switches.builtins.find(b => b.group === 'saved_agents')
     const subOff = !!switches.builtins.find(b => b.group === 'subagents')?.off
-    const inv = own ? parseInvocation(text, { skills: switches.skills, agents: composer.agents, savedAgentsOn: !!savedGroup && !savedGroup.off && !subOff }) : null
+    const inv = own ? parseInvocation(text, { skills: switches.skills, agents: composer.agents, savedAgentsOn: !!savedGroup && !savedGroup.off && !subOff, pluginCommands: composer.plugins?.commands }) : null
     if (inv?.error) {
       addToast(tch(`slash.errors.${inv.error}`, { name: inv.name }), 'warning')
       return
     }
     const command = inv ? { skill: inv.skill, agent: inv.agent } : undefined
-    const invoked = inv ? (inv.skill ? { kind: 'skill', name: inv.skill } : { kind: 'agent', name: inv.agent.name, id: inv.agent.id }) : undefined
+    const invoked = inv ? (inv.skill ? { kind: inv.kind === 'command' ? 'command' : 'skill', name: inv.skill } : { kind: 'agent', name: inv.agent.name, id: inv.agent.id }) : undefined
     if (inv) text = inv.text
     if (!selectedModel) {
       addToast(t('input.selectModelToast'), 'warning')
@@ -503,7 +518,7 @@ export default function Home() {
       addToast(err.message || tc('errors.send'), 'error')
       setSending(false)
     }
-  }, [message, files, sending, selectedModel, composer.agents, switches, drafts, addToast, navigate, t, tc, tch, beginSend, failSend, handOff, createChat])
+  }, [message, files, sending, selectedModel, composer.agents, composer.plugins, switches, drafts, addToast, navigate, t, tc, tch, beginSend, failSend, handOff, createChat])
 
   // Live: the chat is created as Send creates it, without a message, and opens
   // with state.live; the chat page starts Live there (Chat.jsx). The text
@@ -604,7 +619,7 @@ export default function Home() {
     chatsApi.list(1, 'chat', 'person').then(r => {
       if (!live) return
       setConversations(resumeItems(r.conversations))
-      setChatServer({ files: r.files !== false, filesReason: r.files_reason || '', persistent: r.persistent !== false, imageModel: r.image_model || '' })
+      setChatServer({ files: r.files !== false, filesReason: r.files_reason || '', persistent: r.persistent !== false, imageModel: r.image_model || '', incognito: r.incognito || null })
     }).catch(() => { if (live) setConversations([]) })
     return () => { live = false }
   }, [])
@@ -654,7 +669,8 @@ export default function Home() {
   const examplesOn = chatsOn && configuredModels !== null && !firstRun
   const examplesGone = useExamplesGone(examplesOn)
   const loadedCount = loadedList.length
-  const loadedIds = useMemo(() => new Set(loadedList.map(m => m.id)), [loadedList])
+  // An alias is warm when its target is loaded: the server lists the target only.
+  const loadedIds = useMemo(() => withLoadedAliases(new Set(loadedList.map(m => m.id)), composer.models), [loadedList, composer.models])
 
   // Staging a model onto a worker is the one load this page can see: the
   // operations list reports it. An OOM on a single host surfaces in the chat.
@@ -795,7 +811,7 @@ export default function Home() {
             composer={composer}
             sandboxProfile={sandboxProfile}
             egress={egress}
-            filesOn={chatServer.files}
+            filesOn={chatServer.files && incognito !== ZERO_RETENTION}
             loadedIds={loadedIds}
             imageModel={chatServer.imageModel}
             pickerRef={pickerRef}
@@ -812,10 +828,18 @@ export default function Home() {
               />
             )}
             chips={<ReasoningChips effort={draftEffort} onEffort={setDraftEffort} />}
+            incognito={incognito}
             pickerDisabled={firstRun}
             pickerPlaceholder={firstRun ? t('picker.noneSelected') : undefined}
             onDictateError={(m) => addToast(m, 'error')}
             live={<LiveButton live={liveHome} />}
+            mode={(
+              <IncognitoButton
+                levels={incognitoLevels(chatServer.incognito)}
+                level={incognito}
+                onChange={(l) => setIncognito(l ? offeredLevel(chatServer.incognito, l) : '')}
+              />
+            )}
             onSubmit={doSubmit}
             canSend={canSend}
             sending={sending}
@@ -829,6 +853,7 @@ export default function Home() {
             textareaTestId="home-input"
             sendTestId="home-send"
           />
+          <IncognitoNote level={incognito} />
           {isAdmin && addonProjection.diagnostics.length > 0 && (
             <details data-testid="addon-command-diagnostics">
               <summary>{t('slash.commandDiagnostics')}</summary>

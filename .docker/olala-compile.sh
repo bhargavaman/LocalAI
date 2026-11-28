@@ -25,22 +25,15 @@ sh /LocalAI/.docker/apt-mirror.sh apt-get update -qq && sh /LocalAI/.docker/apt-
 
 cd /LocalAI/backend/cpp/olala
 
-if [ -z "${BUILD_TYPE:-}" ]; then
-  # Pure CPU image: one ggml CPU_ALL_VARIANTS build replaces the per-microarch binaries.
-  # arm64: the armv9.2 SME variants need gcc-14 (gcc-13 rejects +sme).
-  if [ "${TARGETARCH}" = "arm64" ]; then
-    sh /LocalAI/.docker/apt-mirror.sh || true
-    sh /LocalAI/.docker/apt-mirror.sh apt-get update -qq && sh /LocalAI/.docker/apt-mirror.sh apt-get install -y -qq gcc-14 g++-14
-    export CC=gcc-14 CXX=g++-14
-  fi
-  make olala-cpu-all
-else
-  # GPU build (cublas/hipblas/sycl/vulkan/...): single fallback CPU build, the accelerator
-  # does the compute. Keeps the GPU compile from also building the CPU variant matrix and
-  # avoids the gcc-14 apt step on GPU base images such as nvidia l4t.
-  make olala-fallback
-fi
-make olala-grpc
-make olala-rpc-server
+# The CPU variants come from the cpu-variants stage of the Dockerfile (the fork's own pin,
+# plain gcc); the tree built here has no CPU backend and ggml dlopens the best variant at
+# run time, for CPU-only and GPU images alike. See .docker/llama-cpp-compile.sh.
+CPU_VARIANTS_DIR=/LocalAI/backend/cpp/olala/cpu-variants
+ls "$CPU_VARIANTS_DIR"/libggml-cpu-*.so > /dev/null
+# CPU_ALL_RPC=ON builds the RPC backend and ggml-rpc-server in the same tree, so
+# olala-grpc and olala-rpc-server come out of this one build. Building them in their own
+# static tree compiled the whole GPU backend a second time, which was half the job time.
+make olala-cpu-all CPU_VARIANTS_DIR="$CPU_VARIANTS_DIR" CPU_ALL_RPC=ON
+test -x olala-grpc && test -x olala-rpc-server
 
 ccache -s || true

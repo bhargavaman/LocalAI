@@ -267,12 +267,17 @@
       "shared": "Bersama",
       "folder": "Ruang kerja",
       "addon": "{{name}}",
-      "addonFrom": "dari {{name}}"
+      "addonFrom": "dari {{name}}",
+      "plugin": "Plugin"
     },
     "replacedBy": "Digantikan oleh {{name}}",
     "fallback_one": "{{skills}} bawaan dipakai: skill milik add-on {{name}} mati atau tidak berjalan di sini.",
     "fallback_other": "{{skills}} bawaan dipakai: skill milik add-on {{name}} mati atau tidak berjalan di sini.",
-    "fromProject": "Dari proyek"
+    "fromProject": "Dari proyek",
+    "pluginGroup": "Plugin: {{name}}",
+    "pluginSwitch": "Gunakan {{name}} di chat ini",
+    "pluginOff": "Nonaktif di chat ini. Skill, perintah, dan konektornya tidak berjalan di sini.",
+    "pluginNoSkills": "Plugin ini menambahkan perintah atau konektor, bukan skill."
   },
   "agent": {
     "label": "Agen",
@@ -304,7 +309,8 @@
       "help": "Bantuan",
       "chat": "Obrolan",
       "view": "Lihat",
-      "yours": "Milik Anda"
+      "yours": "Milik Anda",
+      "plugins": "Plugin"
     },
     "models": {
       "label": "Model",
@@ -359,7 +365,9 @@
       "shared": "bersama",
       "yours": "milik Anda",
       "prompt": "prompt",
-      "tool": "alat"
+      "tool": "alat",
+      "plugin": "plugin",
+      "command": "perintah"
     },
     "collides": "hanya dengan /skill",
     "errors": {
@@ -506,7 +514,15 @@
     "alsoSavedWorking_other": "Juga menyimpan {{count}} file kerja",
     "savedWorking_one": "Menyimpan {{count}} file kerja",
     "savedWorking_other": "Menyimpan {{count}} file kerja",
-    "workingTitle": "File kerja (skrip, log, atau draf): buka {{path}}"
+    "workingTitle": "File kerja (skrip, log, atau draf): buka {{path}}",
+    "group": {
+      "used_one": "Memakai {{count}} alat",
+      "used_other": "Memakai {{count}} alat",
+      "calls_one": "{{count}} panggilan",
+      "calls_other": "{{count}} panggilan",
+      "failed_one": "{{count}} gagal",
+      "failed_other": "{{count}} gagal"
+    }
   },
   "error": {
     "title": "Balasan gagal",
@@ -521,6 +537,8 @@
       "model_cooldown_anon": "Model gagal dimulai beberapa saat lalu dan sedang beristirahat.",
       "model_load_failed": "Model \"{{model}}\" tidak dapat dimulai.",
       "model_load_failed_anon": "Model tidak dapat dimulai.",
+      "model_loading": "Model \"{{model}}\" masih dimuat.",
+      "model_loading_anon": "Model masih dimuat.",
       "model_not_found": "Model \"{{model}}\" tidak ditemukan.",
       "model_not_found_anon": "Model tidak ditemukan.",
       "upstream_key": "Upstream menolak kunci.",
@@ -538,6 +556,7 @@
       "model_backend_missing_admin": "Pilih model lain, atau pasang backend dari halaman Backend.",
       "model_cooldown": "Coba lagi dalam {{seconds}} detik.",
       "model_load_failed": "Periksa konfigurasi model dan backend-nya, lalu coba lagi.",
+      "model_loading": "Model yang besar bisa memerlukan waktu bermenit-menit untuk dimuat. Coba lagi dalam beberapa menit.",
       "model_not_found": "Pilih model lain, atau pasang model ini dari halaman Model.",
       "upstream_key": "Periksa kunci API di pengaturan model.",
       "upstream_path": "Alamat upstream harus berupa endpoint lengkap, misalnya .../v1/chat/completions.",
@@ -766,7 +785,8 @@
   },
   "invoked": {
     "skill": "Skill: {{name}}",
-    "agent": "Agen: {{name}}"
+    "agent": "Agen: {{name}}",
+    "command": "Perintah: {{name}}"
   },
   "marker": {
     "compacted": "Konteks dipadatkan: {{before}} menjadi {{after}} token",
@@ -1047,5 +1067,10 @@
     "message_one": "Hapus {{count}} obrolan yang ditampilkan di {{project}}? Tindakan ini tidak dapat dibatalkan.",
     "message_other": "Hapus {{count}} obrolan yang ditampilkan di {{project}}? Tindakan ini tidak dapat dibatalkan.",
     "confirm": "Hapus yang ditampilkan"
+  },
+  "plugins": {
+    "toolsGroup": "Plugin",
+    "toolsDescribe": "Konektornya di chat ini: {{names}}.",
+    "connectorFrom": "Dari plugin {{name}}."
   }
 }

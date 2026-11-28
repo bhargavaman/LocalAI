@@ -91,6 +91,12 @@ uname -m
 
 **Solution:** The app in the release DMG and the `local-ai` binary are signed with an Apple Developer ID and notarized, so a current release opens without a workaround. Check that you downloaded `LocalAI.dmg` from the [releases page](https://github.com/mudler/LocalAI/releases/latest). To check the signature, run the `spctl` command in the [desktop app guide]({{% relref "/start/install/desktop" %}}#install-on-macos). A copy that was modified or downloaded from another place fails this check.
 
+### macOS: the server stops with "Code Signature Invalid"
+
+**Symptoms:** on Apple silicon, `local-ai` stops with `SIGKILL (Code Signature Invalid)` when it reads a PDF, for example a file added to a collection or a chat.
+
+**Solution:** LocalAI reads PDFs with WebAssembly code that it compiles at run time, and the hardened runtime of macOS allows this only when the binary has the `com.apple.security.cs.allow-unsigned-executable-memory` entitlement. Releases after v5.0.1 are signed with it. On v5.0.0 or v5.0.1, update LocalAI. Until you can, set `chats_index_files` to `false` in the runtime settings: the server then stops reading the text of PDFs in your files, so it does not crash, but PDF text is not searchable. A binary that you build yourself must be signed with `Entitlements.plist` (`make osx-signed`).
+
 ### Audio requests fail with "ffmpeg not found"
 
 **Symptoms:** transcription, text to speech in a format other than WAV, or an audio upload fails with `ffmpeg not found`. At start the log shows `ffmpeg is not available; audio conversion will fail`.
@@ -241,6 +247,24 @@ If LocalAI picks the wrong GPU backend, override it:
 LOCALAI_FORCE_META_BACKEND_CAPABILITY=nvidia local-ai run
 # Options: default, nvidia, amd, intel
 ```
+
+### Wrong VRAM Total Detected
+
+**Symptoms:** the startup log line `Total available VRAM` or the Nodes page shows far more GPU memory than the cards have, often close to the system RAM of the host.
+
+LocalAI reads per-GPU VRAM from the vendor tools (`nvidia-smi`, `rocm-smi`, `xpu-smi`). When they give no figure, it can only fall back to the memory that the PCI enumeration attributes to the card, which is the system RAM of the card's NUMA node. LocalAI does not use that figure for NVIDIA cards, and logs a warning instead.
+
+1. Check that the vendor tool works in the same environment as LocalAI:
+   ```bash
+   docker exec <container> nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv,noheader,nounits
+   ```
+   For NVIDIA containers, the `utility` driver capability puts `nvidia-smi` into the container (`NVIDIA_DRIVER_CAPABILITIES=compute,utility`, or `capabilities: [gpu, utility]` in Docker Compose). The LocalAI images set it by default.
+2. Start with `--log-level=debug` and look for `nvidia-smi failed` or a warning that names the detection source.
+3. Until detection works, set the total yourself:
+   ```bash
+   LOCALAI_VRAM_TOTAL=40GB
+   ```
+   This is different from `LOCALAI_VRAM_BUDGET`, which is the share of the total LocalAI may use. See [VRAM Budget]({{%relref "/models/vram-management#overriding-the-detected-total" %}}).
 
 ### Out of Memory (OOM)
 

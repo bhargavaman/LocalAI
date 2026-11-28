@@ -27,6 +27,7 @@ import (
 	"github.com/mudler/LocalAI/core/schema"
 	"github.com/mudler/LocalAI/core/services/galleryop"
 	"github.com/mudler/LocalAI/core/services/nodes"
+	"github.com/mudler/LocalAI/pkg/enginesettings/builtin"
 	"github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/vram"
 	"github.com/mudler/LocalAI/pkg/xsysinfo"
@@ -198,6 +199,9 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 
 			// An add-on install of the install queue: its key names the add-on.
 			addonID, isAddon := galleryop.ParseAddonOpKey(galleryID)
+			// A plugin install or update: its key names the plugin
+			// (name@marketplace).
+			pluginID, isPlugin := galleryop.ParsePluginOpKey(galleryID)
 
 			// Determine if it's a model or backend
 			// First check if it was explicitly marked as a backend operation
@@ -207,7 +211,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			// backend-vs-model, and a GPU-only backend installed on a worker is
 			// still a backend op even when this host cannot run it. The
 			// capability-filtered listing misclassified those as model ops.
-			if !isBackend && !isAddon {
+			if !isBackend && !isAddon && !isPlugin {
 				backends, _ := gallery.AvailableBackendsUnfiltered(appConfig.BackendGalleries, appConfig.SystemState)
 				for _, b := range backends {
 					backendID := fmt.Sprintf("%s@%s", b.Gallery.Name, b.Name)
@@ -233,6 +237,8 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			displayName := galleryID
 			if isAddon {
 				displayName = addonID
+			} else if isPlugin {
+				displayName = pluginID
 			} else if strings.Contains(galleryID, "@") {
 				parts := strings.Split(galleryID, "@")
 				if len(parts) > 1 {
@@ -255,6 +261,7 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 				"isDeletion":  isDeletion,
 				"isBackend":   isBackend,
 				"isAddon":     isAddon,
+				"isPlugin":    isPlugin,
 				"isQueued":    isQueued,
 				"cancellable": isCancellable,
 				"message":     message,
@@ -362,11 +369,19 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 				if err != nil {
 					xlog.Warn("Failed to list durable model load jobs", "error", err)
 				} else {
+					shownJobs := map[string]*nodes.ModelLoadJob{}
 					for i := range jobs {
 						job := &jobs[i]
 						if job.State != nodes.LoadJobStateStaging {
 							continue
 						}
+						// A model can stage onto several nodes at once, one
+						// job per node. Show the one furthest along, so the
+						// operation keeps its one-per-model shape.
+						if prev, ok := shownJobs[job.TrackingKey]; ok && prev.Progress() >= job.Progress() {
+							continue
+						}
+						shownJobs[job.TrackingKey] = job
 						op := map[string]any{
 							"id":           "staging:" + job.TrackingKey,
 							"name":         job.TrackingKey,
@@ -1300,6 +1315,17 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 	// VRAM estimation endpoint
 	app.POST("/api/models/vram-estimate", localai.VRAMEstimateEndpoint(cl, appConfig), adminMiddleware)
 
+	// Engine runtime settings: the engines and the flag tables the model
+	// editor renders from, paste-a-command parsing and the command preview.
+	// Pure text handling over a static registry, so every frontend answers the
+	// same.
+	engines := builtin.Registry()
+	app.GET("/api/engines", localai.EngineListEndpoint(engines), adminMiddleware)
+	app.GET("/api/engines/:engine/settings-schema", localai.EngineSettingsSchemaEndpoint(engines), adminMiddleware)
+	app.POST("/api/engines/:engine/parse-command", localai.EngineParseCommandEndpoint(engines), adminMiddleware)
+	app.POST("/api/engines/:engine/command-preview", localai.EngineCommandPreviewEndpoint(engines), adminMiddleware)
+	app.POST("/api/engines/:engine/placement", localai.EnginePlacementEndpoint(engines), adminMiddleware)
+
 	// On-disk storage report: per-model sizes, shared files, missing refs
 	app.GET("/api/models/storage", localai.ModelStorageEndpoint(appConfig), adminMiddleware)
 
@@ -1914,6 +1940,10 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 			"reclaimer_threshold": appConfig.MemoryReclaimerThreshold,
 			"watchdog_interval":   watchdogInterval,
 		}
+		// How the GPU reaches its memory (unified, discrete or none), for the
+		// memory-aware quick setup of the model editor. It describes this
+		// host; in distributed mode the models run on the workers.
+		response["memory"] = xsysinfo.HostMemoryOf(resourceInfo.GPUs)
 
 		// The same host readings a distributed worker reports in its
 		// heartbeat, so a single-node install can draw the CPU and models-disk
@@ -1946,6 +1976,12 @@ func RegisterUIAPIRoutes(app *echo.Echo, cl *config.ModelConfigLoader, ml *model
 		app.GET("/api/settings", localai.GetSettingsEndpoint(applicationInstance), adminMiddleware)
 		app.POST("/api/settings", localai.UpdateSettingsEndpoint(applicationInstance), adminMiddleware)
 	}
+
+	// Disk prompt cache: the admin reads and clears it; any user clears
+	// their own cached prompts.
+	app.GET("/api/prompt-cache", localai.PromptCacheStatusEndpoint(applicationInstance), adminMiddleware)
+	app.POST("/api/prompt-cache/clear", localai.PromptCacheClearEndpoint(applicationInstance), adminMiddleware)
+	app.DELETE("/api/prompt-cache/mine", localai.PromptCacheClearMineEndpoint(applicationInstance))
 
 	// Branding / whitelabeling. The read endpoint and the asset server are
 	// public so the login screen can render the configured logo and instance

@@ -97,6 +97,9 @@ type ChangeView struct {
 	UndoBlocked string
 	// LastRun is the newest run of the trigger, if any.
 	LastRun *triggers.Run
+	// Reminder is set on a change of a reminder of a watch; Before is then
+	// the watch, and After and Fields are empty.
+	Reminder *ReminderChange
 }
 
 // TriggerRef is the short reference of a trigger that list_triggers gives a
@@ -308,24 +311,30 @@ func (p TriggerPatch) apply(in TriggerInput, oldKind triggers.Kind) TriggerInput
 			in.Acts = []string{}
 		}
 	}
-	if d := p.Delivery; d != nil {
-		if d.Target != "" {
-			in.Route.Target = d.Target
-			if d.Target != triggers.TargetChannel {
-				in.Route.Channel, in.Route.Connection = "", ""
-			}
-		}
-		if d.Mode != "" {
-			in.Route.Mode = d.Mode
-		}
-		if d.Channel != "" {
-			in.Route.Channel = d.Channel
-		}
-		if d.Connection != "" {
-			in.Route.Connection = d.Connection
-		}
+	if p.Delivery != nil {
+		in.Route = p.Delivery.applyTo(in.Route)
 	}
 	return in
+}
+
+// applyTo gives the route r with the delivery changed as d says.
+func (d DeliveryPatch) applyTo(r triggers.Route) triggers.Route {
+	if d.Target != "" {
+		r.Target = d.Target
+		if d.Target != triggers.TargetChannel {
+			r.Channel, r.Connection = "", ""
+		}
+	}
+	if d.Mode != "" {
+		r.Mode = d.Mode
+	}
+	if d.Channel != "" {
+		r.Channel = d.Channel
+	}
+	if d.Connection != "" {
+		r.Connection = d.Connection
+	}
+	return r
 }
 
 // ProposeChange asks for a change of the trigger target of the user, from the
@@ -415,7 +424,7 @@ func (h *Triggers) keepChange(ctx context.Context, owner string, rec triggers.Tr
 			continue
 		}
 		if m.Change.Op == rec.Change.Op && m.Change.Target == rec.Change.Target && m.Change.Stamp == rec.Change.Stamp &&
-			m.Change.On == rec.Change.On && stamp(m) == stamp(rec) {
+			m.Change.On == rec.Change.On && stamp(m) == stamp(rec) && reminderStamp(m) == reminderStamp(rec) {
 			return m, nil
 		}
 		pending++
@@ -523,6 +532,9 @@ func (h *Triggers) ChangeStatus(ctx context.Context, user, id string) (ChangeVie
 	if err != nil {
 		return ChangeView{}, err
 	}
+	if isReminderChange(rec) {
+		return h.reminderChangeStatus(ctx, user, rec)
+	}
 	v := ChangeView{State: changeStateOf(rec), Op: rec.Change.Op, ID: rec.ID, Target: rec.Change.Target, At: rec.OutcomeAt}
 	live, lerr := h.owned(ctx, user, rec.Change.Target)
 	if lerr != nil && !errors.Is(lerr, triggers.ErrNotFound) {
@@ -617,6 +629,10 @@ func (h *Triggers) ApplyChange(ctx context.Context, user, id string) (triggers.T
 	if err != nil {
 		h.wmu.Unlock()
 		return triggers.Trigger{}, err
+	}
+	if isReminderChange(rec) {
+		h.wmu.Unlock()
+		return h.applyReminderChange(ctx, user, id)
 	}
 	if rec.Outcome != "" {
 		h.wmu.Unlock()
@@ -777,6 +793,9 @@ func (h *Triggers) DismissChange(ctx context.Context, user, id string) error {
 // ErrCannotUndo once the time is over or the trigger changed since, and with
 // ErrProposalAnswered when it was undone already, on any frontend.
 func (h *Triggers) UndoChange(ctx context.Context, user, id string) (triggers.Trigger, error) {
+	if rec, err := h.ownedChange(ctx, user, id); err == nil && isReminderChange(rec) {
+		return h.undoReminderChange(ctx, user, id)
+	}
 	h.wmu.Lock()
 	defer h.wmu.Unlock()
 	rec, err := h.ownedChange(ctx, user, id)
@@ -855,6 +874,9 @@ func (h *Triggers) UndoChange(ctx context.Context, user, id string) (triggers.Tr
 
 // changeNote is how the model hears of a change it asked for in a chat.
 func changeNote(t triggers.Trigger, name string) string {
+	if isReminderChange(t) {
+		return reminderChangeNote(t)
+	}
 	switch t.Change.Op + "/" + t.Outcome {
 	case triggers.ChangeUpdate + "/" + triggers.OutcomeAccepted:
 		return fmt.Sprintf("the change to %q applied by the user", name)

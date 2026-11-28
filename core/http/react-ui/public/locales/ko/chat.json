@@ -219,12 +219,17 @@
       "shared": "공유",
       "folder": "작업 공간",
       "addon": "{{name}}",
-      "addonFrom": "{{name}} 제공"
+      "addonFrom": "{{name}} 제공",
+      "plugin": "플러그인"
     },
     "replacedBy": "{{name}}(으)로 대체됨",
     "fallback_one": "기본 제공 {{skills}} 사용 중: {{name}} 애드온의 자체 스킬이 여기서 꺼져 있거나 실행 중이 아닙니다.",
     "fallback_other": "기본 제공 {{skills}} 사용 중: {{name}} 애드온의 자체 스킬이 여기서 꺼져 있거나 실행 중이 아닙니다.",
-    "fromProject": "프로젝트에서"
+    "fromProject": "프로젝트에서",
+    "pluginGroup": "플러그인: {{name}}",
+    "pluginSwitch": "이 채팅에서 {{name}} 사용",
+    "pluginOff": "이 채팅에서 꺼져 있습니다. 이 플러그인의 스킬, 명령, 커넥터는 여기서 작동하지 않습니다.",
+    "pluginNoSkills": "이 플러그인은 스킬 없이 명령이나 커넥터를 추가합니다."
   },
   "agent": {
     "label": "에이전트",
@@ -252,7 +257,8 @@
       "context": "컨텍스트",
       "skills": "스킬과 에이전트",
       "help": "도움말",
-      "yours": "내 명령어"
+      "yours": "내 명령어",
+      "plugins": "플러그인"
     },
     "models": {
       "label": "모델",
@@ -307,7 +313,9 @@
       "shared": "공유",
       "yours": "내 것",
       "prompt": "프롬프트",
-      "tool": "도구"
+      "tool": "도구",
+      "plugin": "플러그인",
+      "command": "명령"
     },
     "collides": "/skill로만",
     "errors": {
@@ -424,7 +432,15 @@
     "alsoSavedWorking_other": "작업 파일 {{count}}개도 저장함",
     "savedWorking_one": "작업 파일 {{count}}개 저장함",
     "savedWorking_other": "작업 파일 {{count}}개 저장함",
-    "workingTitle": "작업 파일(스크립트, 로그 또는 초안): {{path}} 열기"
+    "workingTitle": "작업 파일(스크립트, 로그 또는 초안): {{path}} 열기",
+    "group": {
+      "used_one": "도구 {{count}}개 사용",
+      "used_other": "도구 {{count}}개 사용",
+      "calls_one": "호출 {{count}}회",
+      "calls_other": "호출 {{count}}회",
+      "failed_one": "{{count}}개 실패",
+      "failed_other": "{{count}}개 실패"
+    }
   },
   "error": {
     "title": "답변에 실패했습니다",
@@ -439,6 +455,8 @@
       "model_cooldown_anon": "모델이 방금 시작에 실패하여 잠시 쉬는 중입니다.",
       "model_load_failed": "모델 \"{{model}}\"을(를) 시작할 수 없습니다.",
       "model_load_failed_anon": "모델을 시작할 수 없습니다.",
+      "model_loading": "모델 \"{{model}}\"이(가) 아직 로드 중입니다.",
+      "model_loading_anon": "모델이 아직 로드 중입니다.",
       "model_not_found": "모델 \"{{model}}\"을(를) 찾을 수 없습니다.",
       "model_not_found_anon": "모델을 찾을 수 없습니다.",
       "upstream_key": "업스트림이 키를 거부했습니다.",
@@ -456,6 +474,7 @@
       "model_backend_missing_admin": "다른 모델을 고르거나 백엔드 페이지에서 백엔드를 설치하세요.",
       "model_cooldown": "{{seconds}}초 후에 다시 시도하세요.",
       "model_load_failed": "모델 설정과 백엔드를 확인한 뒤 다시 시도하세요.",
+      "model_loading": "큰 모델은 로드하는 데 몇 분 이상 걸릴 수 있습니다. 몇 분 후에 다시 시도하세요.",
       "model_not_found": "다른 모델을 고르거나 모델 페이지에서 이 모델을 설치하세요.",
       "upstream_key": "모델 설정에서 API 키를 확인하세요.",
       "upstream_path": "업스트림 주소는 전체 엔드포인트여야 합니다. 예: .../v1/chat/completions",
@@ -684,7 +703,8 @@
   },
   "invoked": {
     "skill": "스킬: {{name}}",
-    "agent": "에이전트: {{name}}"
+    "agent": "에이전트: {{name}}",
+    "command": "명령: {{name}}"
   },
   "marker": {
     "compacted": "컨텍스트 압축됨: {{before}}에서 {{after}} 토큰으로",
@@ -935,5 +955,10 @@
     "message_one": "{{project}}에 표시된 채팅 {{count}}개를 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
     "message_other": "{{project}}에 표시된 채팅 {{count}}개를 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
     "confirm": "표시된 항목 삭제"
+  },
+  "plugins": {
+    "toolsGroup": "플러그인",
+    "toolsDescribe": "이 채팅에서 사용하는 커넥터: {{names}}.",
+    "connectorFrom": "{{name}} 플러그인에서 제공합니다."
   }
 }

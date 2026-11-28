@@ -15,6 +15,8 @@ import (
 	"github.com/mudler/cogito/clients"
 
 	"github.com/mudler/LocalAI/core/http/auth"
+	"github.com/mudler/LocalAI/core/priority"
+	"github.com/mudler/LocalAI/core/privacy"
 )
 
 // maxRewriteBody caps a request body that LLMWith reads to add its fields. A
@@ -33,6 +35,15 @@ const nodeHeader = "X-LocalAI-Node"
 // Params are the sampling fields and the usage hook of one chat's model
 // client. A nil pointer or an empty string leaves the model's own default.
 type Params struct {
+	// Privacy is the incognito level of the chat. Every request of the client
+	// carries it in its context, so the chat route keeps what the level
+	// allows (no trace, counters only, for zero-retention).
+	Privacy privacy.Level
+	// Priority is the class the backend serves the chat's requests with
+	// (core/priority): Interactive when a person waits, Batch for work that
+	// runs on its own. It rides in the request context, which the chat route
+	// trusts only from the internal user, so it needs a user.
+	Priority        priority.Class
 	Temperature     *float64
 	TopP            *float64
 	TopK            *int
@@ -40,6 +51,9 @@ type Params struct {
 	// OnUsage, when set, is called once for each model request that reports
 	// token counts. It asks the route for stream usage and timings.
 	OnUsage func(Usage)
+	// OnLoading, when set, is called each time a request finds the model
+	// still loading, before the client waits and asks again.
+	OnLoading func(Loading)
 	// TakeVideos, when set, is asked for each chat request. The data: URIs it
 	// returns are added to the last user message as video_url parts. The agent
 	// harness drops audio and video parts, so videos go in here, once, with
@@ -86,7 +100,7 @@ type Usage struct {
 // LLMWith is LLM with the chat's own settings added to every request.
 func (p *Provider) LLMWith(user *auth.User, model string, params Params) cogito.LLM {
 	llm := clients.NewLocalAILLM(model, "", baseURL)
-	client := p.transport.Client(user)
+	client := p.transport.ClientOnLoading(user, params.OnLoading)
 	if params.isZero() {
 		llm.SetHTTPClient(client)
 		return llm
@@ -97,7 +111,7 @@ func (p *Provider) LLMWith(user *auth.User, model string, params Params) cogito.
 }
 
 func (p Params) isZero() bool {
-	return p.Temperature == nil && p.TopP == nil && p.TopK == nil && p.ReasoningEffort == "" && p.OnUsage == nil && p.TakeVideos == nil && !p.OnlyLastImages && !p.PreserveThinking
+	return p.Privacy == privacy.Normal && p.Priority == priority.Default && p.Temperature == nil && p.TopP == nil && p.TopK == nil && p.ReasoningEffort == "" && p.OnUsage == nil && p.TakeVideos == nil && !p.OnlyLastImages && !p.PreserveThinking
 }
 
 type paramsTransport struct {
@@ -106,6 +120,12 @@ type paramsTransport struct {
 }
 
 func (t *paramsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.params.Privacy.Incognito() {
+		req = req.WithContext(privacy.WithLevel(req.Context(), t.params.Privacy))
+	}
+	if t.params.Priority != priority.Default {
+		req = req.WithContext(priority.WithClass(req.Context(), t.params.Priority))
+	}
 	if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/chat/completions") || req.Body == nil {
 		return t.next.RoundTrip(req)
 	}

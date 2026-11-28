@@ -44,6 +44,14 @@ func NewStudioOAuth(app *application.Application) studioendpoint.HandlerOption {
 	}})
 }
 
+// NewStudioIncognito gives the chat list the server's incognito setting.
+func NewStudioIncognito(app *application.Application) studioendpoint.HandlerOption {
+	return studioendpoint.WithIncognito(func() schema.ChatsIncognito {
+		cfg := app.ApplicationConfig()
+		return schema.ChatsIncognito{Policy: string(cfg.IncognitoPolicy()), MaxLevel: cfg.IncognitoMaxLevel().String()}
+	})
+}
+
 // NewStudioUserLookup lets the project routes check that the user an
 // administrator names (?user_id=) is a user of this instance. Without an auth
 // database no user is known.
@@ -272,6 +280,9 @@ func RegisterStudioRoutes(e *echo.Echo, svc *studiosvc.Service, models studioend
 	// Public: the secret of the trigger is the credential (see auth.isEventHookPath).
 	e.POST(base+"/triggers/:id/hook", h.TriggerHook)
 	e.GET(base+"/triggers/preview", h.PreviewTrigger)
+	e.GET(base+"/triggers/destinations", h.TriggerDestinations)
+	e.GET(base+"/triggers/sources", h.WatchSources)
+	e.GET(base+"/triggers/reminders", h.SourceReminders)
 	e.GET(base+"/triggers/proposals", h.ListTriggerProposals)
 	e.GET(base+"/triggers/proposals/:id", h.GetTriggerProposal)
 	e.POST(base+"/triggers/proposals/:id/undo", h.UndoTriggerProposal)
@@ -291,6 +302,9 @@ func RegisterStudioRoutes(e *echo.Echo, svc *studiosvc.Service, models studioend
 	e.POST(base+"/triggers/:id/enable", h.EnableTrigger)
 	e.POST(base+"/triggers/:id/disable", h.DisableTrigger)
 	e.GET(base+"/triggers/:id/runs", h.TriggerRuns)
+	e.GET(base+"/triggers/:id/reminders", h.WatchReminders)
+	e.PATCH(base+"/triggers/:id/reminders/:rid", h.PatchWatchReminder)
+	e.DELETE(base+"/triggers/:id/reminders/:rid", h.DeleteWatchReminder)
 	e.GET(base+"/connectors", h.ListConnectors)
 	e.GET(base+"/connectors/kinds", h.ConnectorKinds)
 	e.POST(base+"/connectors", h.CreateConnector)

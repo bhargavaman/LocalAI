@@ -20,18 +20,15 @@ fi
 cd /LocalAI/backend/cpp/turboquant
 
 BUILD_TARGET=$(/LocalAI/.docker/turboquant-build-target.sh "${TARGETARCH}" "${BUILD_TYPE:-}")
-if [ "$BUILD_TARGET" = "turboquant-cpu-all" ]; then
-  # BUILD_TYPE remains in the environment, so GPU builds retain their accelerator while
-  # ggml selects the best CPU library when model work is offloaded to the host.
-  # arm64: the armv9.2 SME variants need gcc-14 (gcc-13 rejects +sme).
-  if [ "${TARGETARCH}" = "arm64" ]; then
-    sh /LocalAI/.docker/apt-mirror.sh || true
-    sh /LocalAI/.docker/apt-mirror.sh apt-get update -qq && sh /LocalAI/.docker/apt-mirror.sh apt-get install -y -qq gcc-14 g++-14
-    export CC=gcc-14 CXX=g++-14
-  fi
-fi
-make "$BUILD_TARGET"
-make turboquant-grpc
-make turboquant-rpc-server
+# The CPU variants come from the cpu-variants stage of the Dockerfile (the fork's own pin,
+# plain gcc); the tree built here has no CPU backend and ggml dlopens the best variant at
+# run time. See .docker/llama-cpp-compile.sh.
+CPU_VARIANTS_DIR=/LocalAI/backend/cpp/turboquant/cpu-variants
+ls "$CPU_VARIANTS_DIR"/libggml-cpu-*.so > /dev/null
+# CPU_ALL_RPC=ON builds the RPC backend and ggml-rpc-server in the same tree, so
+# turboquant-grpc and turboquant-rpc-server come out of this one build. Building them in their own
+# static tree compiled the whole GPU backend a second time, which was half the job time.
+make "$BUILD_TARGET" CPU_VARIANTS_DIR="$CPU_VARIANTS_DIR" CPU_ALL_RPC=ON
+test -x turboquant-grpc && test -x turboquant-rpc-server
 
 ccache -s || true

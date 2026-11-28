@@ -25,6 +25,7 @@ An agent has:
 | `addons` | IDs of installed add-ons. |
 | `collections` | Names of your collections. |
 | `skills` | Names of skills. The index of skills and the `load_skill` tool of the chat offer only these. |
+| `plugins` | Install IDs of [plugins]({{% relref "/features/plugins" %}}). A chat with the agent gets the skills of these plugins only, and only those you enabled for yourself. The skills of a granted plugin need no entry in `skills`. |
 | `builtins_off` | Groups of built-in tools the agent's chats never have: `shell`, `files`, `web`, `media`, `collections`, `subagents`, `triggers`, `changes`, `localai_client` (the inference tools) and `localai_admin` (the server-management tools). It is a ceiling: a chat with the agent shows the group switched off and cannot switch it on. Empty (the default): the chat has every group it has by default. A group this server does not offer is dropped. |
 | `builtins_on` | Opt-in groups of built-in tools that chats with the agent start with: `saved_agents` and `localai_admin`. The chat can switch them off. `localai_admin` is for administrators and is never offered in a messaging chat or a run that starts by itself, whatever the agent says. |
 | `network` | The network of the [Sandbox]({{% relref "/addons/catalogue/work/sandbox-settings#network-access" %}}) commands of the agent's trigger and connector runs: `off` (the default), `registries` (called Custom in the UI: the package registries and the administrator's custom domains) or `all` (every public host), capped by the administrator's `chats_egress_ceiling`. A run never shows a card: a host outside it is blocked, and the block is in the run's output. A chat you start with the agent starts with this preset too; you change it in the chat's Tools menu. The agent form sets it in the add-ons fold. |
@@ -687,6 +688,44 @@ to the connections page. The same fields are in `delivery` of the trigger in
 `state` (`ok`, `off`, `gone`, `unavailable`, `no_channel`, `blocked`) and
 `mode`.
 
+#### Change where a trigger reports
+
+Open the trigger, select **Edit**, and open the **Reports** section. It shows
+where the runs report now, and two choices:
+
+- **Where runs report**: the Inbox, a channel that you approved on one of your
+  connections, or **Keep** for the channel that the trigger uses now. A trigger
+  that a messaging app proposed can also go back to **The chat where it was
+  proposed**, and it can only use channels of that same connection.
+- **When to report**: every run, only when the answer changes, or only when a
+  run fails.
+
+The list holds only the channels that can receive a report now: the connection
+is yours and on, its add-on runs and can receive reports, you let it write in
+channels, and you approved the channel. Under the list, the form names your
+other connections and says why each one has no channel to offer. Any kind of
+messaging connection works the same way.
+
+The form saves at once, because you are the person who changes it; a
+confirmation card is shown only when the model asks for the change in a chat.
+
+The REST API does the same. `POST` and `PUT /api/chats/triggers` take
+`delivery`: `{"target": "channel", "connection": <id>, "channel": <id or
+label>, "mode": "always" | "on_change" | "on_problem"}`, `{"target": "inbox"}`
+to go back to the Inbox, or `{"target": "origin"}` for a trigger that a
+messaging app proposed (leave `connection` out for such a trigger: it keeps its
+own). Leave `delivery` out of a `PUT` to keep where the trigger reports. The
+server makes the same checks as for `update_trigger` and answers `400` with the
+reason when one fails. It checks only a new place: a save that sends back the
+same place, or the same place with another mode, works even while the
+connection is off. `GET /api/chats/triggers/destinations?agent_id=<id>&trigger=<id>`
+lists your connections with the channels you approved, the channel that the
+trigger reports to now (`current`), `from_chat` for a trigger that a messaging
+app proposed, and a `reason` (`off`, `addon_off`, `tool_only`, `talkback_off`,
+`no_channel`) for a connection with no channel to offer. It never returns a
+token or a sender. A proposal that waits for an answer keeps the place that was
+proposed: confirm it first, then change it.
+
 ### What a run gets
 
 - **Its message.** The first message is the prompt of the trigger, the folder
@@ -734,6 +773,8 @@ to the connections page. The same fields are in `delivery` of the trigger in
   records the prompt and completion tokens of its model requests (`tokens` on the
   run), and a trigger reports the average of its last runs, the most runs one day
   can have, and whether the model is a remote service (`cost` on the trigger).
+  For a schedule, the maximum counts its times on a matching local calendar day,
+  up to its daily limit. A daily schedule still counts as one across a clock change.
   LocalAI keeps no price list, so the cost is in tokens only.
 - **History.** A trigger keeps its last 200 finished runs, and every run of
   the last two days. A finished run older than 30 days is removed, whatever the
@@ -764,7 +805,7 @@ that cannot be read at that moment gives a read only run.
 | Files | `act.files` | `write_file`, `edit_file`, `move_file`, `delete_file`, and the built-in `bash` of this machine. |
 | Add-on actions | `act.addons`, or `act.addons:<add-on id>` for one add-on | Every add-on tool whose kind is not `read` (`action`, `write`, `schema`, `create`), including an add-on that serves `bash`. |
 | Outside | `act.spend` | MCP tools (of a server or a connector), and an add-on action tool that the add-on declares with a permission, which means it acts outside LocalAI with a credential. The last one needs `act.addons` as well. |
-| Send | `act.send` | Reserved for messages beyond the delivery target. No tool of this class exists yet. |
+| Send | `act.send` | `send_message` in a trigger run: a message to an approved channel of one of the owner's connections, in addition to the delivery target. See [Write to a messaging connection]({{% relref "/features/chats-and-agents/chats-tools#from-a-trigger-run" %}}). |
 
 What a run holds:
 

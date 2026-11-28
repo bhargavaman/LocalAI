@@ -1018,6 +1018,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if e := m.persist("reconciled"); e != nil {
 		return e
 	}
+	// The journals are settled and nothing has started yet, so this is the
+	// one point where the referenced packages are known and none is in use
+	// by an operation.
+	m.sweepPackages()
 	// Grants follow the journal: a crash between the two files leaves entries
 	// of operations that never completed and of add-ons that are gone.
 	if e := m.reconcileGrantsLocked(ctx); e != nil {
@@ -1651,6 +1655,7 @@ func (m *Manager) DeclaredCapabilities(ctx context.Context, id string, generatio
 	out.ContextFiles = append([]contract.ContextFile(nil), c.ContextFiles...)
 	out.Credentials = slices.Clone(c.Credentials)
 	out.Provides = slices.Clone(c.Provides)
+	out.Events = slices.Clone(c.Events)
 	if c.ModelSearch != nil {
 		ms := *c.ModelSearch
 		ms.Sorts, ms.Filters = slices.Clone(ms.Sorts), slices.Clone(ms.Filters)

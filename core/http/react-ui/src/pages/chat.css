@@ -56,6 +56,7 @@
 .cx-msg--user + .cx-msg--model,
 .cx-row + .cx-msg--model { margin-top: 6px; }
 .cx-msg--model + .cx-msg--user { margin-top: 10px; }
+.cx-msg[data-settled] { animation: none; }
 /* A message that arrives (the one you just sent, the answer that replaces the
    live turn) rises 6 px and fades in. */
 @media (prefers-reduced-motion: no-preference) {
@@ -478,6 +479,132 @@ button.cx-step__head:hover,
 .cx-think > * { margin: 0; }
 .cx-think > * + * { margin-top: var(--sp-2); }
 .cx-think--live { max-height: 220px; overflow: auto; }
+
+/* A thought is up to two lines of its words. The text is cut at a word or a
+   sentence by the page (thoughtGist); the clamp is only the safety net. */
+.cx-step--thought .cx-step__line {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.cx-step--thought .cx-step__verb { margin-right: var(--sp-2); }
+.cx-step--thought .cx-step__gist { display: inline; overflow: visible; }
+/* A thought that is still arriving is one line, whatever its words: its height
+   must not change as they stream, or the thread under it jumps. The gist shows
+   its end, the latest words; what does not fit is cut on the left. The gist
+   is as wide as its words until the line is full, so a short one still sits
+   by the verb. */
+.cx-step--thought.cx-step--live .cx-step__line {
+  display: flex;
+  gap: 0;
+  -webkit-box-orient: horizontal;
+  -webkit-line-clamp: none;
+  line-clamp: none;
+  white-space: nowrap;
+}
+.cx-step--thought.cx-step--live .cx-step__gist {
+  display: flex;
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The running step: its label shimmers. One at a time. Under reduced motion it
+   is plain text; the spinner and the dots still say that it runs. */
+.cx-shimmer {
+  background: linear-gradient(90deg, var(--dk-muted) 0%, var(--dk-muted) 40%, var(--dk-text) 50%, var(--dk-muted) 60%, var(--dk-muted) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+@media (prefers-reduced-motion: no-preference) { .cx-shimmer { animation: shimmer 3s ease-in-out infinite; } }
+@media (prefers-reduced-motion: reduce) {
+  .cx-shimmer { background: none; -webkit-text-fill-color: currentColor; }
+}
+
+/* The turn as it happened: thoughts, notes, calls, then the answer. No rail:
+   every line has its own icon, and the answer is the text after the last call.
+   What the model says before a call is a quiet note; the text that is the
+   answer so far is the same element and changes style when a call follows it
+   (padding, size and colour move with one short ease). */
+.cx-flow { margin: var(--sp-1) 0 var(--sp-3); padding: 0; border-left: 0; }
+.cx-note {
+  list-style: none;
+  min-width: 0;
+  padding: 2px 0 2px 36px;
+  color: var(--dk-muted);
+  transition: padding var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
+}
+.cx-note .cx-prose {
+  color: inherit;
+  transition: font-size var(--dur-base) var(--ease-out), line-height var(--dur-base) var(--ease-out);
+}
+.cx-note:not(.cx-note--answer) .cx-prose { font-size: var(--fs-small); line-height: 1.55; }
+.cx-note:not(.cx-note--answer) .cx-prose > * + * { margin-top: 6px; }
+.cx-note--answer { padding: var(--sp-2) 0 0; color: var(--dk-text); }
+@media (prefers-reduced-motion: reduce) {
+  .cx-note, .cx-note .cx-prose { transition: none; }
+}
+.cx-flow__wait { list-style: none; padding: 4px 0 2px 36px; color: var(--dk-muted); }
+
+/* The end of the turn: the steps fold to no height and the line of the turn
+   (Worked for 5.6 s) grows from none, both with one ease, so the answer under
+   them moves once. Where height cannot animate to auto, the change is at once.
+   The answer is never folded. */
+.cx-flow { interpolate-size: allow-keywords; }
+.cx-flow > li {
+  height: auto;
+  transition: height var(--dur-slow) var(--ease-out), opacity var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out), visibility 0s;
+}
+.cx-flow > .cx-flow__fold { list-style: none; }
+.cx-flow:not([data-ended]) > .cx-flow__fold { height: 0; opacity: 0; overflow: hidden; visibility: hidden; }
+.cx-flow[data-folded] > li:not(.cx-flow__fold):not(.cx-note--answer) {
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding-block: 0;
+  visibility: hidden;
+  transition: height var(--dur-slow) var(--ease-out), opacity var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out), visibility 0s linear var(--dur-slow);
+}
+/* The finished turn leaves no space of its own: its line and the answer sit as
+   the stored turn draws them, so the record that replaces it changes nothing. */
+.cx-flow { transition: margin var(--dur-slow) var(--ease-out), gap var(--dur-slow) var(--ease-out); }
+.cx-flow[data-ended] { margin-block: 0; gap: 0; }
+.cx-flow[data-ended] > .cx-note--answer { padding-top: calc(var(--sp-1) * 1.5); }
+@media (prefers-reduced-motion: reduce) { .cx-flow, .cx-flow > li, .cx-flow[data-folded] > li { transition: none; } }
+
+/* A run of calls as one line. It opens into the calls, one rail down. */
+.cx-group__steps {
+  list-style: none;
+  margin: 0 0 var(--sp-1) 18px;
+  padding: 0 0 0 var(--sp-1);
+  border-left: 1px solid var(--dk-edge);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+@starting-style { .cx-group__steps { opacity: 0; transform: translateY(-4px); } }
+.cx-group[data-state="failed"] .cx-step[data-state="done"] .cx-step__icon { color: var(--dk-ok-text); }
+.cx-group[data-state="running"] .cx-step[data-state="done"] .cx-step__icon { color: var(--dk-ok-text); }
+.cx-group[data-open] > .cx-step__head .cx-step__chev { transform: rotate(90deg); }
+.cx-group[data-state="done"] .cx-step__verb,
+.cx-group[data-state="failed"] .cx-step__verb { color: var(--color-text-secondary); font-weight: 500; }
+.cx-badge {
+  flex: none;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--dk-error-wash);
+  color: var(--dk-error-text);
+  font-size: var(--fs-meta);
+  font-weight: 500;
+}
 .cx-out {
   margin: 0;
   max-height: 240px;
@@ -1242,9 +1369,15 @@ button.cx-step__head:hover,
   .cx-msg:not([data-last]):not(:focus-within) .cx-acts .cx-icobtn:nth-child(n+3) { display: none; }
   .cx-dock { padding: 4px 12px 8px; }
   .cx-dock .home-slash-hint, .cx-dock .home-input-hint { display: none; }
-  .cx-dock .home-cmd__top { flex-wrap: nowrap; }
-  /* An empty chat has the draft menus too: its chips wrap, as on Home. */
-  .cx-conv[data-empty] .cx-dock .home-cmd__top { flex-wrap: wrap; }
+  /* The chips wrap, as on Home. On one line the model, Tools, Skills and
+     effort chips are wider than a phone: the model chip shrank to nothing and
+     the chips after it drew over it and ran out of the card. */
+  .cx-dock .home-cmd__top { flex-wrap: wrap; }
+  /* In an open chat the incognito pill is its icon, square like the other
+     icon buttons: the bar has no room for the level, and the line under the
+     composer names it. */
+  .cx-conv:not([data-empty]) .cx-dock .cx-incognito-ctl .ui-btn__label { display: none; }
+  .cx-conv:not([data-empty]) .cx-dock .cx-incognito-ctl[data-level] .dk-btn { padding: 0; width: var(--dk-btn-h); }
   .cx-foot { padding-top: 6px; }
   .cx-find { width: calc(100% - 24px); margin-bottom: 6px; }
   .cx-menu { top: 56px; }
@@ -1267,6 +1400,12 @@ button.cx-step__head:hover,
     z-index: var(--dk-z-popover);
   }
   .cx-dock .home-menu__list { max-height: min(60vh, 420px); }
+}
+/* A short phone screen, most often with the keyboard open: the shortcuts give
+   their line to the thread, so the composer and some of the conversation stay
+   in view above the keyboard. */
+@media (max-width: 760px) and (max-height: 520px) {
+  .cx-conv:not([data-empty]) .cx-dock .wk-shortcuts { display: none; }
 }
 .cx-thread[hidden] { display: none; }
 
@@ -2107,3 +2246,45 @@ html[data-handoff='fade']::view-transition-new(root) {
 .cx-greeting .wk-avatar { margin-top: 2px; }
 .cx-greeting b { display: block; font-size: var(--fs-small); color: var(--dk-text); }
 .cx-greeting p { margin: 2px 0 0; font-family: var(--cx-font, var(--font-sans)); font-size: var(--fs-lead); line-height: 1.6; color: var(--dk-text); }
+
+/* Incognito (components/chat/Incognito.jsx). The button sits in the bottom
+   bar of the composer, after Live. Off, it is the attach button's ghost icon;
+   while its menu is open it keeps the hover background. On, it is a small
+   pill in the accent that names the level. The composer card takes a faint
+   wash of the accent, and a line under it says what the level keeps. Only
+   the background of the card changes: it keeps its own edge, focus ring and
+   drop ring. */
+.cx-incognito-ctl .dk-btn--ghost[aria-expanded="true"] { background: var(--dk-hover); }
+/* On, the button is the kit's primary button (Incognito.jsx); the only
+   change is the pill shape that marks it as a state, not an action. */
+.cx-incognito-ctl[data-level] .dk-btn { border-radius: var(--radius-full); }
+/* The menu of the button opens over it when there is no room under it. */
+.cx-incognito-ctl .home-menu[data-side="top"] { top: auto; bottom: calc(100% + 6px); }
+.home-cmd:has(.cx-incognito-ctl[data-level]) {
+  background: color-mix(in srgb, var(--dk-accent-wash) 55%, var(--dk-card));
+}
+/* The menu: the switch row, then the level and what it keeps. */
+.cx-incognito {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--color-border-divider);
+}
+.cx-incognito--off { padding: 0; border-top: 0; }
+.cx-incognito__heading { font-size: var(--fs-meta); font-weight: 600; color: var(--color-text-secondary); }
+.cx-incognito__level { font-size: var(--fs-small); font-weight: 500; color: var(--color-text-primary); }
+.cx-incognito__desc { margin: 0; font-size: var(--fs-meta); line-height: 1.45; color: var(--color-text-secondary); }
+/* The line under the composer. */
+.cx-incognito-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: 0 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--fs-meta);
+  line-height: 1.45;
+}
+.cx-incognito-note .lai-icon { flex: none; width: 14px; height: 14px; margin-top: 1px; color: var(--dk-accent-text); }
+.cx-incognito-note__title { font-weight: 600; color: var(--dk-accent-text); }

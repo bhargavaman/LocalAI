@@ -97,7 +97,8 @@
       "Notes": "Gedächtnis",
       "Connections": "Verbindungen",
       "Effective": "Wirksame Ansicht",
-      "Uses": "Was er nutzen kann"
+      "Uses": "Was er nutzen kann",
+      "Plugins": "Plugins"
     },
     "name": "Name",
     "description": "Description",
@@ -467,7 +468,14 @@
     },
     "sandboxProfile": "Sandbox-Profil",
     "sandboxProfileDefault": "Standard",
-    "sandboxProfileHelp": "Wird von unbeaufsichtigten Läufen und als Startprofil seiner Chats verwendet."
+    "sandboxProfileHelp": "Wird von unbeaufsichtigten Läufen und als Startprofil seiner Chats verwendet.",
+    "countPlugins_one": "{{count}} Plugin",
+    "countPlugins_other": "{{count}} Plugins",
+    "pluginsHelp": "Die Plugins, die ein Chat mit diesem Agenten nutzen darf. Die Liste ist exakt: Eine leere Liste erlaubt keine. Ein Plugin muss außerdem für die Person eingeschaltet sein, die chattet.",
+    "pluginsNone": "Keine Plugins installiert. Installiere eines im Tab Plugins der Seite Add-ons.",
+    "pluginOffForYou": "{{plugin}}, für dich aus",
+    "pluginGone": "Dieses Plugin ist nicht mehr installiert.",
+    "pluginsLoadFailed": "Die Plugins konnten nicht geladen werden."
   },
   "run": {
     "workingLine": "Working"
@@ -558,7 +566,8 @@
         "prompt": "What to do",
         "schedule": "When",
         "limits": "Limits",
-        "acts": "Berechtigungen"
+        "acts": "Berechtigungen",
+        "delivery": "Berichte"
       },
       "summary": {
         "basics": "{{name}}, {{model}}",
@@ -602,6 +611,25 @@
         "dots": "Ein Ordnername darf „..“ nicht enthalten.",
         "outside": "Dieser Agent kann nur Ordner in seinen eigenen beobachten: {{folders}}.",
         "noFolders": "Dieser Agent hat keinen nutzbaren Ordner. Wähle einen Ordner in den Einstellungen des Agenten."
+      },
+      "delivery": {
+        "now": "Berichtet derzeit an",
+        "where": "Wohin Läufe berichten",
+        "mode": "Wann berichten",
+        "always": "Bei jedem Lauf",
+        "keep": "Beibehalten: {{place}}",
+        "origin": "Der Chat, in dem er vorgeschlagen wurde",
+        "hint": "Aufgeführt sind nur die Kanäle, die du in deinen Verbindungen freigegeben hast, auf Verbindungen, die in Kanälen schreiben dürfen.",
+        "fromChat": "Dieser Trigger wurde in einem Chat einer Messaging-App vorgeschlagen: seine Berichte bleiben auf dieser Verbindung.",
+        "loadFailed": "Die Verbindungen konnten nicht gelesen werden: {{message}}",
+        "unusable": "{{name}}: {{reason}}",
+        "reason": {
+          "off": "ausgeschaltet",
+          "addon_off": "sein Add-on läuft nicht",
+          "tool_only": "ein Dienst für Werkzeuge, kann keine Berichte empfangen",
+          "talkback_off": "darf nicht in Kanälen schreiben",
+          "no_channel": "kein freigegebener Kanal"
+        }
       }
     },
     "subtitle": "Starten Sie einen Agenten nach Zeitplan oder wenn eine Datei ankommt. Jeder Lauf ist ein Chat, den Sie öffnen können.",

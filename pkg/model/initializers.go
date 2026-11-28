@@ -238,8 +238,8 @@ func (ml *ModelLoader) spawnGRPCModel(backend, uri string, o *Options, modelID, 
 	// StartProcess registers a spawned backend with the watchdog. A backend
 	// reached by address has no process, so register it here or LRU and group
 	// eviction never see it loaded.
-	if ml.wd != nil && client.Process() == nil {
-		ml.wd.AddAddressModelMap(uri, modelID)
+	if client.Process() == nil {
+		ml.trackAddressBackend(modelID, uri)
 	}
 
 	return client, nil
@@ -370,12 +370,23 @@ func (ml *ModelLoader) backendLoader(opts ...Option) (client grpc.Backend, err e
 	}
 	model, err := ml.LoadModelWithFile(o.modelID, o.model, modelFileName, ml.grpcModel(backend, o))
 	if err != nil {
-		// Defensive cleanup: the model usually wasn't registered yet (LoadModel
-		// failed before that), so StopGRPC reporting "model not found" is the
-		// expected case, not an error. The outer Failed-to-load log below
-		// carries the real reason.
-		if stopErr := ml.StopGRPC(only(o.modelID)); stopErr != nil {
-			xlog.Debug("cleanup stop after failed load", "error", stopErr, "model", o.modelID)
+		// Defensive cleanup applies only to local cold loads. In distributed
+		// mode Load() calls backendLoader on every request and SmartRouter
+		// owns failed-load cleanup on workers; calling StopGRPC here runs
+		// ShutdownModel -> UnloadRemoteModelContext and stops healthy replicas
+		// across all nodes (both when a local stub is present and when
+		// DistributedModelStore.Range reports cluster-resident replicas on a
+		// cold frontend). For an already-resident local model, a refused load
+		// must not tear down the running entry.
+		if coldLoad {
+			ml.mu.Lock()
+			distributed := ml.modelRouter != nil
+			ml.mu.Unlock()
+			if !distributed {
+				if stopErr := ml.StopGRPC(only(o.modelID)); stopErr != nil {
+					xlog.Debug("cleanup stop after failed load", "error", stopErr, "model", o.modelID)
+				}
+			}
 		}
 		// A model held by a failed distributed load, or still loading, is an
 		// answer to retry later, not a fault of this request.
@@ -459,6 +470,36 @@ func (ml *ModelLoader) enforceGroupExclusivity(modelID string) {
 	}, maxRetries, retryInterval, "group-exclusivity")
 }
 
+// waitForRoom is the load gate with model swap off. It never unloads a
+// model: it waits up to the LRU retry window for room to free up (an idle
+// unload, a stop) and then refuses with a retryable error, so the request
+// does not load over the limit.
+func (ml *ModelLoader) waitForRoom(modelID string) error {
+	if ml.wd == nil {
+		return nil
+	}
+	ml.mu.Lock()
+	maxRetries := ml.lruEvictionMaxRetries
+	retryInterval := ml.lruEvictionRetryInterval
+	ml.mu.Unlock()
+
+	for attempt := 0; ; attempt++ {
+		if !ml.wd.NeedsRoom(modelID, ml.GetLoadingCount()) {
+			return nil
+		}
+		if attempt >= maxRetries-1 {
+			break
+		}
+		time.Sleep(retryInterval)
+	}
+	retryAfter := retryInterval * time.Duration(max(maxRetries, 1))
+	if retryAfter < time.Second {
+		retryAfter = time.Second
+	}
+	xlog.Info("[ModelLoader] Model swap is off and no room is free; refusing the load", "model", modelID)
+	return &ModelSwapDisabledError{ModelID: modelID, RetryAfter: retryAfter}
+}
+
 // updateModelLastUsed updates the last used time for a model (for LRU tracking)
 func (ml *ModelLoader) updateModelLastUsed(m *Model) {
 	if ml.wd == nil || m == nil {
@@ -522,10 +563,14 @@ func (ml *ModelLoader) Load(opts ...Option) (grpc.Backend, error) {
 	// requested one before applying the global LRU cap — group eviction may
 	// already make room, and otherwise LRU might evict an unrelated model
 	// only for the group check to immediately evict another.
-	ml.enforceGroupExclusivity(o.modelID)
+	if ml.ModelSwapEnabled() {
+		ml.enforceGroupExclusivity(o.modelID)
 
-	// Enforce LRU limit before loading a new model
-	ml.enforceLRULimit()
+		// Enforce LRU limit before loading a new model
+		ml.enforceLRULimit()
+	} else if err := ml.waitForRoom(o.modelID); err != nil {
+		return nil, err
+	}
 
 	// if a backend is defined, return the loader directly
 	if o.backendString != "" {

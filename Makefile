@@ -1,5 +1,5 @@
 # Disable parallel execution for backend builds
-.NOTPARALLEL: backends/diffusers backends/llama-cpp backends/turboquant backends/bonsai backends/olala backends/outetts backends/piper backends/stablediffusion-ggml backends/trellis2cpp backends/trellis2cpp-darwin backends/whisper backends/crispasr backends/parakeet-cpp backends/moss-transcribe-cpp backends/nemo-speech-cpp backends/faster-whisper backends/silero-vad backends/local-store backends/valkey-store backends/qdrant-store backends/cloud-proxy backends/localai-proxy backends/huggingface backends/rfdetr backends/rfdetr-cpp backends/insightface backends/speaker-recognition backends/kitten-tts backends/kokoro backends/chatterbox backends/llama-cpp-darwin backends/neutts build-darwin-python-backend build-darwin-go-backend backends/mlx backends/mlx-video backends/diffuser-darwin backends/mlx-vlm backends/mlx-audio backends/mlx-distributed backends/stablediffusion-ggml-darwin backends/vllm backends/vllm-omni backends/longcat-video backends/sglang backends/moonshine backends/pocket-tts backends/qwen-tts backends/faster-qwen3-tts backends/qwen-asr backends/nemo backends/voxcpm backends/whisperx backends/ace-step backends/acestep-cpp backends/fish-speech backends/voxtral backends/opus backends/trl backends/llama-cpp-quantization backends/kokoros backends/sam3-cpp backends/qwen3-tts-cpp backends/moss-tts-cpp backends/magpie-tts-cpp backends/vllm-cpp backends/omnivoice-cpp backends/vibevoice-cpp backends/localvqe backends/tinygrad backends/sherpa-onnx backends/ds4 backends/ds4-darwin backends/supertonic backends/depth-anything-cpp backends/timestral-cpp backends/privacy-filter backends/privacy-filter-darwin backends/audio-cpp backends/audio-cpp-darwin backends/strata
+.NOTPARALLEL: backends/diffusers backends/llama-cpp backends/turboquant backends/bonsai backends/olala backends/outetts backends/piper backends/stablediffusion-ggml backends/trellis2cpp backends/trellis2cpp-darwin backends/whisper backends/crispasr backends/parakeet-cpp backends/moss-transcribe-cpp backends/nemo-speech-cpp backends/faster-whisper backends/silero-vad backends/local-store backends/valkey-store backends/qdrant-store backends/cloud-proxy backends/localai-proxy backends/huggingface backends/rfdetr backends/rfdetr-cpp backends/insightface backends/speaker-recognition backends/kitten-tts backends/kokoro backends/chatterbox backends/llama-cpp-darwin backends/neutts build-darwin-python-backend build-darwin-go-backend backends/mlx backends/mlx-video backends/diffuser-darwin backends/mlx-vlm backends/mlx-audio backends/mlx-distributed backends/stablediffusion-ggml-darwin backends/vllm backends/vllm-omni backends/longcat-video backends/sglang backends/moonshine backends/pocket-tts backends/qwen-tts backends/faster-qwen3-tts backends/qwen-asr backends/nemo backends/voxcpm backends/whisperx backends/ace-step backends/acestep-cpp backends/fish-speech backends/voxtral backends/opus backends/trl backends/llama-cpp-quantization backends/kokoros backends/sam3-cpp backends/qwen3-tts-cpp backends/moss-tts-cpp backends/magpie-tts-cpp backends/vllm-cpp backends/omnivoice-cpp backends/vibevoice-cpp backends/localvqe backends/tinygrad backends/sherpa-onnx backends/ds4 backends/ds4-darwin backends/supertonic backends/depth-anything-cpp backends/timestral-cpp backends/privacy-filter backends/privacy-filter-darwin backends/audio-cpp backends/audio-cpp-darwin backends/strata backends/colibri
 .NOTPARALLEL: backends/whisper-medusa
 .NOTPARALLEL: backends/funasr
 .NOTPARALLEL: backends/llama-cpp-windows backends/llama-cpp-windows-all backends/llama-cpp-windows-cpu backends/llama-cpp-windows-vulkan backends/llama-cpp-windows-cuda backends/llama-cpp-windows-rpc backends/llama-cpp-windows-fallback
@@ -172,7 +172,7 @@ COVERAGE_E2E_LABELS?=!real-models
 COVERAGE_EXCLUDE_RE?=grpc/proto/.*[.]pb[.]go
 
 
-.PHONY: all test test-coverage test-coverage-baseline test-coverage-check test-backend-cpp test-build-scripts test-ui test-ui-stale-chunk test-ui-unit test-i18n test-postgres test-distributed-fakebus test-p2p test-e2e-p2p test-e2e-distributed-p2p-worker test-e2e-distributed-join-token test-addons-suites addons-inventory addons-inventory-write test-ui-coverage-baseline test-ui-coverage-check build vendor lint lint-all
+.PHONY: all test test-coverage test-coverage-baseline test-coverage-check test-backend-cpp test-build-scripts test-ui test-ui-stale-chunk test-ui-unit test-i18n test-postgres test-distributed-fakebus test-p2p test-e2e-p2p test-e2e-distributed-p2p-worker test-e2e-distributed-join-token test-e2e-distributed-worker-shutdown test-addons-suites addons-inventory addons-inventory-write test-ui-coverage-baseline test-ui-coverage-check build vendor lint lint-all
 
 all: help
 
@@ -243,6 +243,7 @@ dev-dist-single:
 dist:
 	$(GORELEASER) build --clean
 
+## Entitlements.plist is also the file GoReleaser signs the release binary with.
 osx-signed: build
 	codesign --deep --force --sign "$(OSX_SIGNING_IDENTITY)" --entitlements "./Entitlements.plist" "./$(BINARY_NAME)"
 
@@ -394,6 +395,17 @@ run-e2e-aio: protogen-go
 	@echo 'Running e2e AIO tests'
 	$(GOCMD) run github.com/onsi/ginkgo/v2/ginkgo --flake-attempts $(TEST_FLAKES) -v -r ./tests/e2e-aio
 
+## Boots the container image LOCALAI_IMAGE (name:tag) in each user setup of
+## tests/e2e-container-users and installs a signed add-on and a backend in
+## each one. Needs Docker and network access to the official registries. Pick
+## setups with CONTAINER_USERS_LABELS, for example read-only-root.
+## No flake attempts: a failure must show, and the suite retries network
+## errors only.
+CONTAINER_USERS_LABELS?=
+.PHONY: test-e2e-container-users
+test-e2e-container-users:
+	$(GOCMD) run github.com/onsi/ginkgo/v2/ginkgo -v --timeout 80m $(if $(CONTAINER_USERS_LABELS),--label-filter='$(CONTAINER_USERS_LABELS)') ./tests/e2e-container-users
+
 # Distributed architecture e2e (PostgreSQL + NATS via testcontainers).
 # Includes NatsJWT specs (JWT-enabled NATS). Requires Docker.
 # VLLMMultinode is excluded here; use test-e2e-vllm-multinode for that.
@@ -416,6 +428,14 @@ test-e2e-distributed-join-token: protogen-go build-mock-backend
 	@echo 'Running the join token worker e2e (label JoinTokenWorker)'
 	LOCALAI_E2E_MOCK_BACKEND=$(abspath tests/e2e/mock-backend/mock-backend) \
 	$(GOCMD) run github.com/onsi/ginkgo/v2/ginkgo --label-filter='JoinTokenWorker' --flake-attempts $(TEST_FLAKES) -v -r ./tests/e2e/distributed
+
+## A worker that gets SIGTERM while it loads a model, with real processes:
+## PostgreSQL and NATS in containers, a frontend and two workers. The spec
+## carries the WorkerShutdown label.
+test-e2e-distributed-worker-shutdown: protogen-go build-mock-backend
+	@echo 'Running the worker shutdown e2e (label WorkerShutdown)'
+	LOCALAI_E2E_MOCK_BACKEND=$(abspath tests/e2e/mock-backend/mock-backend) \
+	$(GOCMD) run github.com/onsi/ginkgo/v2/ginkgo --label-filter='WorkerShutdown' --flake-attempts $(TEST_FLAKES) -v -r ./tests/e2e/distributed
 
 # Platform e2e: MCP connectors and apps, collections, the process flags and the
 # permission of the new routes, against the real local-ai binary. The suite builds
@@ -766,6 +786,7 @@ prepare-test-extra: protogen-python
 	$(MAKE) -C backend/go/valkey-store
 	$(MAKE) -C backend/go/qdrant-store
 	$(MAKE) -C backend/go/strata
+	$(MAKE) -C backend/go/colibri
 
 test-extra: prepare-test-extra
 	$(MAKE) -C backend/python/transformers test
@@ -808,6 +829,7 @@ test-extra: prepare-test-extra
 	$(MAKE) -C backend/go/valkey-store test
 	$(MAKE) -C backend/go/qdrant-store test
 	$(MAKE) -C backend/go/strata test
+	$(MAKE) -C backend/go/colibri test
 
 ##
 ## End-to-end gRPC tests that exercise a built backend container image.
@@ -864,6 +886,8 @@ test-extra-backend: protogen-go
 	BACKEND_TEST_TOOL_NAME="$$BACKEND_TEST_TOOL_NAME" \
 	BACKEND_TEST_CACHE_TYPE_K="$$BACKEND_TEST_CACHE_TYPE_K" \
 	BACKEND_TEST_CACHE_TYPE_V="$$BACKEND_TEST_CACHE_TYPE_V" \
+	BACKEND_TEST_GRAMMAR_ENGINE="$$BACKEND_TEST_GRAMMAR_ENGINE" \
+	BACKEND_TEST_GRAMMAR_STRESS_TOOLS="$$BACKEND_TEST_GRAMMAR_STRESS_TOOLS" \
 	BACKEND_TEST_FACE_IMAGE_1_URL="$$BACKEND_TEST_FACE_IMAGE_1_URL" \
 	BACKEND_TEST_FACE_IMAGE_1_FILE="$$BACKEND_TEST_FACE_IMAGE_1_FILE" \
 	BACKEND_TEST_FACE_IMAGE_2_URL="$$BACKEND_TEST_FACE_IMAGE_2_URL" \
@@ -890,19 +914,8 @@ test-extra-backend-strata:
 	BACKEND_TEST_CAPS=health,load,predict,stream,tools,logprobs,logit_bias,tokenize,long_prefill,context_overflow \
 	$(MAKE) test-extra-backend
 
-test-extra-backend-llama-cpp: docker-build-llama-cpp
-	BACKEND_IMAGE=local-ai-backend:llama-cpp \
-	BACKEND_TEST_CAPS=health,load,predict,stream,logprobs,logit_bias,context_overflow \
-	$(MAKE) test-extra-backend
-
-## Raw llama.cpp embeddings are required by Go-side pooling. This exercises the
-## real C++ backend and verifies that it marks the flattened matrix per-token.
-test-extra-backend-llama-cpp-embeddings: docker-build-llama-cpp
-	BACKEND_IMAGE=local-ai-backend:llama-cpp \
-	BACKEND_TEST_CAPS=health,load,embeddings \
-	BACKEND_TEST_OPTIONS=pooling:none \
-	BACKEND_TEST_EMBEDDING_LAYOUT=per_token \
-	$(MAKE) test-extra-backend
+# Partial Docker build contexts omit tests/ and do not use these targets.
+-include tests/e2e-backends/llama-cpp-grpc.mk
 
 test-extra-backend-ik-llama-cpp: docker-build-ik-llama-cpp
 	BACKEND_IMAGE=local-ai-backend:ik-llama-cpp $(MAKE) test-extra-backend
@@ -1581,6 +1594,7 @@ BACKEND_LOCAL_STORE = local-store|golang|.|false|true
 BACKEND_VALKEY_STORE = valkey-store|golang|.|false|true
 BACKEND_QDRANT_STORE = qdrant-store|golang|.|false|true
 BACKEND_STRATA = strata|golang|.|false|true
+BACKEND_COLIBRI = colibri|golang|.|false|true
 BACKEND_CLOUD_PROXY = cloud-proxy|golang|.|false|true
 BACKEND_LOCALAI_PROXY = localai-proxy|golang|.|false|true
 BACKEND_HUGGINGFACE = huggingface|golang|.|false|true
@@ -1693,6 +1707,7 @@ $(eval $(call generate-docker-build-target,$(BACKEND_LOCAL_STORE)))
 $(eval $(call generate-docker-build-target,$(BACKEND_VALKEY_STORE)))
 $(eval $(call generate-docker-build-target,$(BACKEND_QDRANT_STORE)))
 $(eval $(call generate-docker-build-target,$(BACKEND_STRATA)))
+$(eval $(call generate-docker-build-target,$(BACKEND_COLIBRI)))
 $(eval $(call generate-docker-build-target,$(BACKEND_CLOUD_PROXY)))
 $(eval $(call generate-docker-build-target,$(BACKEND_LOCALAI_PROXY)))
 $(eval $(call generate-docker-build-target,$(BACKEND_HUGGINGFACE)))
@@ -1778,7 +1793,7 @@ $(eval $(call generate-docker-build-target,$(BACKEND_SUPERTONIC)))
 docker-save-%: backend-images
 	docker save local-ai-backend:$* -o backend-images/$*.tar
 
-docker-build-backends: docker-build-llama-cpp docker-build-ik-llama-cpp docker-build-turboquant docker-build-bonsai docker-build-olala docker-build-ds4 docker-build-rerankers docker-build-vllm docker-build-vllm-omni docker-build-longcat-video docker-build-sglang docker-build-transformers docker-build-outetts docker-build-diffusers docker-build-kokoro docker-build-faster-whisper docker-build-crispasr docker-build-coqui docker-build-chatterbox docker-build-vibevoice docker-build-moonshine docker-build-pocket-tts docker-build-qwen-tts docker-build-fish-speech docker-build-faster-qwen3-tts docker-build-qwen-asr docker-build-nemo docker-build-voxcpm docker-build-whisperx docker-build-ace-step docker-build-acestep-cpp docker-build-voxtral docker-build-mlx-distributed docker-build-trl docker-build-llama-cpp-quantization docker-build-tinygrad docker-build-kokoros docker-build-sam3-cpp docker-build-rfdetr-cpp docker-build-qwen3-tts-cpp docker-build-moss-tts-cpp docker-build-magpie-tts-cpp docker-build-vllm-cpp docker-build-omnivoice-cpp docker-build-vibevoice-cpp docker-build-localvqe docker-build-insightface docker-build-speaker-recognition docker-build-sherpa-onnx docker-build-cloud-proxy docker-build-localai-proxy docker-build-supertonic docker-build-depth-anything-cpp docker-build-moss-transcribe-cpp docker-build-nemo-speech-cpp docker-build-privacy-filter docker-build-trellis2cpp docker-build-valkey-store docker-build-qdrant-store docker-build-audio-cpp docker-build-timestral-cpp docker-build-strata
+docker-build-backends: docker-build-llama-cpp docker-build-ik-llama-cpp docker-build-turboquant docker-build-bonsai docker-build-olala docker-build-ds4 docker-build-rerankers docker-build-vllm docker-build-vllm-omni docker-build-longcat-video docker-build-sglang docker-build-transformers docker-build-outetts docker-build-diffusers docker-build-kokoro docker-build-faster-whisper docker-build-crispasr docker-build-coqui docker-build-chatterbox docker-build-vibevoice docker-build-moonshine docker-build-pocket-tts docker-build-qwen-tts docker-build-fish-speech docker-build-faster-qwen3-tts docker-build-qwen-asr docker-build-nemo docker-build-voxcpm docker-build-whisperx docker-build-ace-step docker-build-acestep-cpp docker-build-voxtral docker-build-mlx-distributed docker-build-trl docker-build-llama-cpp-quantization docker-build-tinygrad docker-build-kokoros docker-build-sam3-cpp docker-build-rfdetr-cpp docker-build-qwen3-tts-cpp docker-build-moss-tts-cpp docker-build-magpie-tts-cpp docker-build-vllm-cpp docker-build-omnivoice-cpp docker-build-vibevoice-cpp docker-build-localvqe docker-build-insightface docker-build-speaker-recognition docker-build-sherpa-onnx docker-build-cloud-proxy docker-build-localai-proxy docker-build-supertonic docker-build-depth-anything-cpp docker-build-moss-transcribe-cpp docker-build-nemo-speech-cpp docker-build-privacy-filter docker-build-trellis2cpp docker-build-valkey-store docker-build-qdrant-store docker-build-audio-cpp docker-build-timestral-cpp docker-build-strata docker-build-colibri
 docker-build-backends: docker-build-whisper-medusa
 docker-build-backends: docker-build-funasr
 
@@ -1902,13 +1917,14 @@ test-i18n:
 ## because -ginkgo.focus is an error for a test binary that has no Ginkgo.
 POSTGRES_STORE_PKGS = ./core/services/studio/agents ./core/services/studio/connectors \
 	./core/services/notify ./core/services/studio/store ./core/services/studio/triggers \
-	./core/services/studio/workspace/gormstore ./core/services/studio/jobs ./core/services/studio/projects ./core/http/auth
+	./core/services/studio/workspace/gormstore ./core/services/studio/jobs ./core/services/studio/projects ./core/http/auth \
+	./core/services/plugins/store
 test-postgres:
 	@test -n "$$LOCALAI_TEST_POSTGRES_URL" || { echo 'LOCALAI_TEST_POSTGRES_URL is not set; point it at a database the tests may wipe' >&2; exit 1; }
 	@out=$$($(GOCMD) test -count=1 -v -tags "$(COVERAGE_TAGS)" $(POSTGRES_STORE_PKGS) -ginkgo.focus 'PostgreSQL' -ginkgo.v -ginkgo.no-color 2>&1) || { printf '%s\n' "$$out"; exit 1; }; \
 	printf '%s\n' "$$out" | grep -E '^(Ran [0-9]+ of|ok |FAIL|\s*\[SKIPPED\])' ; \
 	if printf '%s\n' "$$out" | grep -q -- '\[SKIPPED\]'; then echo 'a PostgreSQL test skipped' >&2; exit 1; fi; \
-	test "$$(printf '%s\n' "$$out" | grep -c -- '^Ran [1-9]')" -ge 9 || { echo 'fewer PostgreSQL stores ran than expected' >&2; exit 1; }
+	test "$$(printf '%s\n' "$$out" | grep -c -- '^Ran [1-9]')" -ge 10 || { echo 'fewer PostgreSQL stores ran than expected' >&2; exit 1; }
 
 ## The multi-frontend paths run against the in-process bus (testutil.FakeBus)
 ## under the race detector: two frontends, a worker and the cluster state, with

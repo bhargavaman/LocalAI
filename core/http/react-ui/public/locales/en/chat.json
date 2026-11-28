@@ -262,6 +262,8 @@
       "model_cooldown_anon": "The model failed to start a moment ago and is resting.",
       "model_load_failed": "The model \"{{model}}\" could not be started.",
       "model_load_failed_anon": "The model could not be started.",
+      "model_loading": "The model \"{{model}}\" is still loading.",
+      "model_loading_anon": "The model is still loading.",
       "model_not_found": "The model \"{{model}}\" was not found.",
       "model_not_found_anon": "The model was not found.",
       "upstream_key": "The upstream refused the key.",
@@ -279,6 +281,7 @@
       "model_backend_missing_admin": "Pick another model, or install the backend from the Backends page.",
       "model_cooldown": "Try again in {{seconds}} seconds.",
       "model_load_failed": "Check the model's configuration and its backend, then retry.",
+      "model_loading": "A large model can take many minutes to load. Try again in a few minutes.",
       "model_not_found": "Pick another model, or install this one from the Models page.",
       "upstream_key": "Check the API key in the model's settings.",
       "upstream_path": "The upstream address must be the full endpoint, for example .../v1/chat/completions.",
@@ -311,7 +314,8 @@
       "context": "Context",
       "skills": "Skills and agents",
       "help": "Help",
-      "yours": "Yours"
+      "yours": "Yours",
+      "plugins": "Plugins"
     },
     "model": {
       "label": "Switch model",
@@ -398,7 +402,9 @@
       "shared": "shared",
       "yours": "yours",
       "prompt": "prompt",
-      "tool": "tool"
+      "tool": "tool",
+      "plugin": "plugin",
+      "command": "command"
     },
     "collides": "only with /skill",
     "errors": {
@@ -515,12 +521,17 @@
       "shared": "Shared",
       "folder": "Workspace",
       "addon": "{{name}}",
-      "addonFrom": "from {{name}}"
+      "addonFrom": "from {{name}}",
+      "plugin": "Plugin"
     },
     "replacedBy": "Replaced by {{name}}",
     "fallback_one": "Built-in {{skills}} in use: the {{name}} add-on's own skill is off or not running here.",
     "fallback_other": "Built-in {{skills}} in use: the {{name}} add-on's own skills are off or not running here.",
-    "fromProject": "From project"
+    "fromProject": "From project",
+    "pluginGroup": "Plugin: {{name}}",
+    "pluginSwitch": "Use {{name}} in this chat",
+    "pluginOff": "Off in this chat. Its skills, commands and connectors do not serve here.",
+    "pluginNoSkills": "This plugin adds commands or connectors, no skills."
   },
   "agent": {
     "label": "Agent",
@@ -632,7 +643,15 @@
     "alsoSavedWorking_other": "Also saved {{count}} working files",
     "savedWorking_one": "Saved {{count}} working file",
     "savedWorking_other": "Saved {{count}} working files",
-    "workingTitle": "Working file (a script, a log or a draft): open {{path}}"
+    "workingTitle": "Working file (a script, a log or a draft): open {{path}}",
+    "group": {
+      "used_one": "Used {{count}} tool",
+      "used_other": "Used {{count}} tools",
+      "calls_one": "{{count}} call",
+      "calls_other": "{{count}} calls",
+      "failed_one": "{{count}} failed",
+      "failed_other": "{{count}} failed"
+    }
   },
   "allChats": {
     "title": "All chats",
@@ -829,7 +848,8 @@
   },
   "invoked": {
     "skill": "Skill: {{name}}",
-    "agent": "Agent: {{name}}"
+    "agent": "Agent: {{name}}",
+    "command": "Command: {{name}}"
   },
   "marker": {
     "compacted": "Context compacted: {{before}} to {{after}} tokens",
@@ -1080,5 +1100,10 @@
     "message_one": "Delete the {{count}} chat shown in {{project}}? This cannot be undone.",
     "message_other": "Delete the {{count}} chats shown in {{project}}? This cannot be undone.",
     "confirm": "Delete shown"
+  },
+  "plugins": {
+    "toolsGroup": "Plugins",
+    "toolsDescribe": "Its connectors in this chat: {{names}}.",
+    "connectorFrom": "From the plugin {{name}}."
   }
 }

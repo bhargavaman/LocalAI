@@ -46,6 +46,9 @@ type ChatsSwitches struct {
 	BuiltinsOff []string `json:"builtins_off,omitempty"`
 	BuiltinsOn  []string `json:"builtins_on,omitempty"`
 	SkillsOff   []string `json:"skills_off,omitempty"`
+	// PluginsOff are the plugin install IDs the chat starts with off, in the
+	// form PUT /api/chats/{id}/plugins takes. At most 200.
+	PluginsOff []string `json:"plugins_off,omitempty"`
 	// Connections is the set of connections (connector binding IDs) the chat
 	// may use for each add-on whose tools run with a credential, by add-on ID.
 	// Each must be one of your own for that add-on. A single string is read as
@@ -65,6 +68,9 @@ type ChatsAgent struct {
 	Addons       []string `json:"addons"`
 	Collections  []string `json:"collections"`
 	Skills       []string `json:"skills"`
+	// Plugins are the install IDs of the plugins the agent may use (exact
+	// grant: empty grants none).
+	Plugins []string `json:"plugins"`
 	// Network is the network preset of the Sandbox commands of the agent's
 	// unattended runs: off (the default), registries or all, capped by the
 	// administrator's ceiling.
@@ -264,7 +270,9 @@ type ChatsAgentWrite struct {
 	Addons       []string `json:"addons,omitempty"`
 	Collections  []string `json:"collections,omitempty"`
 	Skills       []string `json:"skills,omitempty"`
-	Network      string   `json:"network,omitempty"`
+	// Plugins are the install IDs of the plugins the agent may use.
+	Plugins []string `json:"plugins,omitempty"`
+	Network string   `json:"network,omitempty"`
 	// ProjectID makes the agent a project agent. It is read on create only: it
 	// must be one of your own active projects (404 for an unknown or foreign
 	// one, 400 for an archived one). A write to an existing agent may leave it
@@ -359,9 +367,11 @@ type ChatsConversation struct {
 	PulledProjects []string `json:"pulled_projects,omitempty"`
 	// Collections is the restriction of the chat's collection tools: only
 	// these collections. Absent means all of the user's collections.
-	Collections []string  `json:"collections,omitempty"`
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
+	Collections []string `json:"collections,omitempty"`
+	// PluginsOff are the plugin install IDs switched off in the chat.
+	PluginsOff []string  `json:"plugins_off,omitempty"`
+	Created    time.Time `json:"created"`
+	Updated    time.Time `json:"updated"`
 	// Running is true while a turn runs. LastTurn is how the last finished turn
 	// ended: done, stopped, failed, interrupted, or paused (the tool loop
 	// reached its step limit; send a message to go on).
@@ -385,6 +395,10 @@ type ChatsConversation struct {
 	// Harness says whether the chat has the context window the chat agent
 	// needs. It is set when a single chat is opened, created or changed.
 	Harness *ChatsHarness `json:"harness,omitempty"`
+	// Incognito is the privacy level of an incognito chat (memory-off or
+	// zero-retention), empty for any other chat. An incognito chat lives in
+	// the memory of the server only and is never listed.
+	Incognito string `json:"incognito,omitempty"`
 }
 
 // ChatsHarness is the window check of a chat for the user who asks. The
@@ -483,6 +497,9 @@ type ChatsConversationList struct {
 	// ImageModel is the model that describes the images of a chat whose own
 	// model cannot look at them. It is empty when no model can.
 	ImageModel string `json:"image_model,omitempty"`
+	// Incognito is the server's incognito setting, so the page knows whether
+	// to offer incognito chats and up to which level.
+	Incognito *ChatsIncognito `json:"incognito,omitempty"`
 }
 
 // ChatsConversationDetail is a conversation with the messages waiting for the model.
@@ -1279,6 +1296,18 @@ type ChatsSkill struct {
 	// New is true for a personal skill that was imported and that no chat has
 	// used yet. The first use clears it.
 	New bool `json:"new,omitempty"`
+	// Plugin, PluginTitle and PluginInstall name the plugin of a skill of the
+	// plugin layer: its plugin ID (name@marketplace), its name, and the
+	// install that provides it.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginTitle   string `json:"plugin_title,omitempty"`
+	PluginInstall string `json:"plugin_install,omitempty"`
+	// NoModel is set for a plugin skill that only a person may call; NoMenu
+	// for one that stays out of the / menu. ArgumentHint is the hint of its
+	// arguments in that menu.
+	NoModel      bool   `json:"no_model,omitempty"`
+	NoMenu       bool   `json:"no_menu,omitempty"`
+	ArgumentHint string `json:"argument_hint,omitempty"`
 }
 
 // ChatsSkillList is the skills a user has.
@@ -1694,6 +1723,8 @@ type ChatsTrigger struct {
 	Binding string `json:"binding,omitempty"`
 	// Delivery says where the answer of each run goes.
 	Delivery ChatsTriggerDelivery `json:"delivery"`
+	// Watch is the reminder rule of a watch; absent on any other trigger.
+	Watch *ChatsWatchRule `json:"watch,omitempty"`
 }
 
 // ChatsTriggerDelivery is where the answer of each run of a trigger goes.
@@ -1767,6 +1798,9 @@ type ChatsTriggerChange struct {
 	CanUndo     bool             `json:"can_undo"`
 	UndoBlocked string           `json:"undo_blocked,omitempty"`
 	LastRun     *ChatsTriggerRun `json:"last_run,omitempty"`
+	// Reminder is set on a change of a reminder of a watch, which a chat
+	// proposed; before is then the watch.
+	Reminder *ChatsReminderChange `json:"reminder,omitempty"`
 }
 
 // ChatsTriggerPlan is what a run of a trigger does, as the model that proposed
@@ -1835,6 +1869,69 @@ type ChatsTriggerWrite struct {
 	// (act.files, act.addons, act.addons:<id>, act.send, act.spend). Leave it
 	// out to keep the trigger's value; an empty list takes all of them away.
 	Acts []string `json:"acts,omitempty"`
+	// Delivery is where the runs report. Leave it out to keep where the
+	// trigger reports now (the Inbox for a new trigger); {"target": "inbox"}
+	// sends the reports back to the Inbox. It is refused on a proposal.
+	Delivery *ChatsTriggerDeliveryWrite `json:"delivery,omitempty"`
+	// Watch makes an event trigger of an add-on a watch. Left out on an
+	// update, a watch keeps its rule.
+	Watch *ChatsWatchRule `json:"watch,omitempty"`
+}
+
+// ChatsTriggerDeliveryWrite is where the runs of a trigger report, as the owner
+// sets it. target is inbox, channel (connection and channel name one of your
+// connections and a channel you approved for it, see GET
+// /api/chats/triggers/destinations) or origin (the chat of a messaging app
+// that proposed the trigger; only for such a trigger, which also keeps its
+// connection: leave connection out). channel is the id or the label of the
+// channel. mode is always (the default), on_change or on_problem. The place
+// is checked only when it changes; a connection that is off, not yours, of a
+// service that cannot receive reports, not allowed to write in channels, or a
+// channel you did not approve is refused with 400.
+type ChatsTriggerDeliveryWrite struct {
+	Target     string `json:"target,omitempty" enums:"inbox,channel,origin"`
+	Connection string `json:"connection,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+	Mode       string `json:"mode,omitempty" enums:"always,on_change,on_problem"`
+}
+
+// ChatsTriggerDestinations lists where a trigger can report: your connections,
+// with the channels you approved for each one that can receive a report now.
+// from_chat is set when the trigger asked about was proposed in a chat of a
+// messaging app: it can report to that chat (target origin), to a channel of
+// the same connection (the only one listed), or to the Inbox.
+// connectors_off is set when this server runs no connections: only the Inbox
+// is possible.
+type ChatsTriggerDestinations struct {
+	Connections   []ChatsTriggerDestination `json:"connections"`
+	FromChat      bool                      `json:"from_chat,omitempty"`
+	ConnectorsOff bool                      `json:"connectors_off,omitempty"`
+}
+
+// ChatsTriggerDestination is one of your connections as a place for reports.
+// channels is empty unless the connection can receive a report, you let it
+// write in channels and you approved a channel; reason then says why not:
+// off (you switched it off), addon_off (its add-on does not run), tool_only (a service that agents only
+// use as a tool), talkback_off (it may not write in channels) or no_channel.
+type ChatsTriggerDestination struct {
+	ID                string                           `json:"id"`
+	Kind              string                           `json:"kind"`
+	KindTitle         string                           `json:"kind_title,omitempty"`
+	Addon             string                           `json:"addon,omitempty"`
+	Name              string                           `json:"name"`
+	Enabled           bool                             `json:"enabled"`
+	CanReceiveReports bool                             `json:"can_receive_reports"`
+	TalkbackAllowed   bool                             `json:"talkback_allowed"`
+	Channels          []ChatsTriggerDestinationChannel `json:"channels"`
+	Reason            string                           `json:"reason,omitempty" enums:"off,addon_off,tool_only,talkback_off,no_channel"`
+}
+
+// ChatsTriggerDestinationChannel is a channel you approved. current marks the
+// channel the trigger asked about reports to now.
+type ChatsTriggerDestinationChannel struct {
+	ID      string `json:"id"`
+	Label   string `json:"label,omitempty"`
+	Current bool   `json:"current,omitempty"`
 }
 
 // ChatsTriggerCreated is the response of creating a trigger. Secret is set for
@@ -2773,6 +2870,11 @@ type ChatsMCPConnector struct {
 	Enabled    bool      `json:"enabled"`
 	Created    time.Time `json:"created"`
 	Updated    time.Time `json:"updated"`
+	// PluginInstall and PluginServer name the plugin install and the MCP
+	// server of a connector that a plugin owns. Such a connector is read
+	// only: a change answers 403. Absent for a connector you made.
+	PluginInstall string `json:"plugin_install,omitempty"`
+	PluginServer  string `json:"plugin_server,omitempty"`
 }
 
 // ChatsMCPConnectorWrite creates or replaces an MCP connector. token, headers and
@@ -2837,6 +2939,8 @@ type ChatsMCPConnectorSwitch struct {
 	Off    bool   `json:"off"`
 	Usable bool   `json:"usable"`
 	Reason string `json:"reason,omitempty"`
+	// PluginInstall is the plugin install that owns the connector.
+	PluginInstall string `json:"plugin_install,omitempty"`
 }
 
 // ChatsBuiltinGroup is a group of built-in tools of a chat, such as the web
@@ -3481,4 +3585,11 @@ type ChatsSandboxProfilesAdmin struct {
 	Addon    string                `json:"addon,omitempty"`
 	Roles    []string              `json:"roles"`
 	Profiles []ChatsSandboxProfile `json:"profiles"`
+}
+
+// ChatsIncognito is the incognito setting of the server as the chat page reads
+// it: Policy is allow or forbid, MaxLevel is memory-off or zero-retention.
+type ChatsIncognito struct {
+	Policy   string `json:"policy"`
+	MaxLevel string `json:"max_level"`
 }

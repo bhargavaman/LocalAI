@@ -502,6 +502,9 @@ setting back on restores exactly what was there. Sources you added are not affec
 change applies at once, with no restart. On a frontend the switch is read-only: the
 owner's value applies, and a change there reaches the frontends within 60 seconds.
 
+The same setting suspends the default marketplaces of [plugins]({{% relref "/features/plugins" %}}),
+such as the curated LocalAI marketplace, in the same way.
+
 ### Source routes
 
 The routes are for administrators. A caller who is not an administrator gets `403`, and a
@@ -761,8 +764,10 @@ It ends with the phase `done` and `message` `completed`, or with `error` set and
 the entry arrive this way: an unknown entry, a name installed from another origin (a
 gallery, another library or a manual install; nothing changes), an image over the size
 limit, a library that strict mode refuses. The request itself answers `400` when it does
-not name an entry and `409` when the same backend is already being installed. Installing
-again from the same library is a reinstall.
+not name an entry and `409` when the same backend is already being installed, also when an
+upgrade run installs it, or when an upgrade run runs (type `run_active`; wait for the run or
+cancel it). A job can be cancelled from the Operations page until it writes the metadata,
+and runs for at most one hour. Installing again from the same library is a reinstall.
 
 ### Library backends on the Backends page
 
